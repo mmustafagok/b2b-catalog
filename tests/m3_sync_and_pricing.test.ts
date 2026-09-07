@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { prisma } from '../src/db.js';
 import { installOrUpdateShop } from '../src/services/shop.server.js';
 import { createCatalog, publishCatalog } from '../src/services/catalog.server.js';
-import { calculateDisplayPrice, roundMoney } from '../src/services/pricing.server.js';
+import { calculateDisplayPrice, roundDecimal, toDecimal } from '../src/services/pricing.server.js';
 import {
   syncProductSnapshot,
   deleteProductSnapshot,
@@ -29,31 +29,31 @@ describe('Milestone 3: Product Sync, Snapshot Cache & Pricing Logic', () => {
   });
 
   describe('Pricing Calculations', () => {
-    it('should correctly round money to two decimal places', () => {
-      expect(roundMoney(19.994)).toBe(19.99);
-      expect(roundMoney(19.995)).toBe(20.0);
-      expect(roundMoney(0.1 + 0.2)).toBe(0.3);
+    it('should correctly round decimal money to two decimal places', () => {
+      expect(roundDecimal('19.994').toString()).toBe('19.99');
+      expect(roundDecimal('19.995').toString()).toBe('20');
+      expect(roundDecimal(toDecimal('0.1').plus('0.2')).toString()).toBe('0.3');
     });
 
     it('should calculate wholesale display prices with various discount percentages', () => {
       // 1. Shopify Price mode (0% discount)
-      expect(calculateDisplayPrice(100, PriceMode.SHOPIFY_PRICE, 0)).toBe(100.0);
+      expect(calculateDisplayPrice(100, PriceMode.SHOPIFY_PRICE, 0).toNumber()).toBe(100.0);
 
       // 2. 10% discount on $100 -> $90
-      expect(calculateDisplayPrice(100, PriceMode.PERCENT_DISCOUNT, 10)).toBe(90.0);
+      expect(calculateDisplayPrice(100, PriceMode.PERCENT_DISCOUNT, 10).toNumber()).toBe(90.0);
 
       // 3. 25% discount on $39.99 -> $29.99
-      expect(calculateDisplayPrice(39.99, PriceMode.PERCENT_DISCOUNT, 25)).toBe(29.99);
+      expect(calculateDisplayPrice(39.99, PriceMode.PERCENT_DISCOUNT, 25).toNumber()).toBe(29.99);
 
       // 4. 33.3% discount on $45.50 -> $30.35
-      expect(calculateDisplayPrice(45.5, PriceMode.PERCENT_DISCOUNT, 33.3)).toBe(30.35);
+      expect(calculateDisplayPrice(45.5, PriceMode.PERCENT_DISCOUNT, 33.3).toNumber()).toBe(30.35);
 
       // 5. 90% discount on $200 -> $20
-      expect(calculateDisplayPrice(200, PriceMode.PERCENT_DISCOUNT, 90)).toBe(20.0);
+      expect(calculateDisplayPrice(200, PriceMode.PERCENT_DISCOUNT, 90).toNumber()).toBe(20.0);
 
       // 6. Zero or negative price handling
-      expect(calculateDisplayPrice(0, PriceMode.PERCENT_DISCOUNT, 20)).toBe(0);
-      expect(calculateDisplayPrice(-10, PriceMode.PERCENT_DISCOUNT, 20)).toBe(0);
+      expect(calculateDisplayPrice(0, PriceMode.PERCENT_DISCOUNT, 20).toNumber()).toBe(0);
+      expect(calculateDisplayPrice(-10, PriceMode.PERCENT_DISCOUNT, 20).toNumber()).toBe(0);
     });
   });
 
@@ -120,7 +120,7 @@ describe('Milestone 3: Product Sync, Snapshot Cache & Pricing Logic', () => {
       expect(product?.title).toBe('Wholesale Heavy Hoodie');
       expect(product?.variants).toHaveLength(2);
       expect(product?.variants[0].sku).toBe('HOOD-BLK-S');
-      expect(product?.variants[0].shopifyPrice).toBe(50.0);
+      expect(Number(product?.variants[0].shopifyPrice)).toBe(50.0);
     });
 
     it('should prune deleted variants upon product update', async () => {

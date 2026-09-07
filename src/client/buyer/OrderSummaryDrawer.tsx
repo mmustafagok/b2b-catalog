@@ -8,6 +8,7 @@ interface OrderSummaryDrawerProps {
   quantities: Record<string, number>;
   subtotal: number;
   totalItems: number;
+  currency?: string;
   onSubmit: (buyerInfo: {
     businessName: string;
     email: string;
@@ -18,6 +19,14 @@ interface OrderSummaryDrawerProps {
   errorMessage?: string | null;
 }
 
+function formatPrice(amount: number, currency: string = 'USD'): string {
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(amount);
+  } catch {
+    return `${currency.toUpperCase()} ${amount.toFixed(2)}`;
+  }
+}
+
 export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
   isOpen,
   onClose,
@@ -25,6 +34,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
   quantities,
   subtotal,
   totalItems,
+  currency = 'USD',
   onSubmit,
   isSubmitting,
   errorMessage,
@@ -120,7 +130,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                   {line.variantTitle} × {line.qty}
                 </div>
               </div>
-              <div style={{ fontWeight: 600 }}>${line.lineTotal.toFixed(2)}</div>
+              <div style={{ fontWeight: 600 }}>{formatPrice(line.lineTotal, currency)}</div>
             </div>
           ))}
         </div>
@@ -138,7 +148,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
           }}
         >
           <span>Estimated Subtotal:</span>
-          <span>${subtotal.toFixed(2)}</span>
+          <span>{formatPrice(subtotal, currency)}</span>
         </div>
 
         {/* Buyer Information Form */}
@@ -214,7 +224,9 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             style={{ width: '100%', padding: '0.875rem' }}
             disabled={isSubmitting || selectedLines.length === 0}
           >
-            {isSubmitting ? 'Submitting Order to Shopify...' : `Submit Wholesale Order ($${subtotal.toFixed(2)})`}
+            {isSubmitting
+              ? 'Submitting Order to Shopify...'
+              : `Submit Wholesale Order (${formatPrice(subtotal, currency)})`}
           </button>
         </form>
       </div>

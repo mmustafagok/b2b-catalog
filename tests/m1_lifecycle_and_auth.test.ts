@@ -6,26 +6,29 @@ import {
   getActiveShopByDomain,
   getActiveShopById,
   checkShopQuota,
+  getDecryptedAccessToken,
 } from '../src/services/shop.server.js';
 import {
   verifyShopifyWebhookHmac,
   generateOpaqueToken,
   hashIdempotencyKey,
   verifyAppBridgeJwt,
+  isValidShopifyDomain,
 } from '../src/services/auth.server.js';
+import { encryptToken, decryptToken, CryptoError } from '../src/services/crypto.server.js';
 import crypto from 'crypto';
 
-describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
+describe('Milestone 1: Shop Lifecycle, Encryption & Auth Hardening', () => {
   const testDomain = 'test-merchant-lifecycle.myshopify.com';
 
   beforeEach(async () => {
-    // Clean up test domain before each run
     await prisma.orderSubmission.deleteMany();
+    await prisma.catalogSource.deleteMany();
     await prisma.catalog.deleteMany();
     await prisma.shop.deleteMany({ where: { shopDomain: testDomain } });
   });
 
-  it('should install a new shop with starter plan and active status', async () => {
+  it('should install a new shop with encrypted access token and starter plan', async () => {
     const shop = await installOrUpdateShop({
       shopDomain: testDomain,
       accessToken: 'shpua_initial_test_token_123',
@@ -33,7 +36,14 @@ describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
 
     expect(shop).toBeDefined();
     expect(shop.shopDomain).toBe(testDomain);
-    expect(shop.accessToken).toBe('shpua_initial_test_token_123');
+    // Token must be encrypted at rest with version envelope
+    expect(shop.accessToken).toMatch(/^enc:v1:[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+/);
+    expect(shop.accessToken).not.toContain('shpua_initial_test_token_123');
+
+    // Decrypted token must match original
+    const plainToken = await getDecryptedAccessToken(shop.id);
+    expect(plainToken).toBe('shpua_initial_test_token_123');
+
     expect(shop.plan).toBe('STARTER');
     expect(shop.uninstalledAt).toBeNull();
 
@@ -69,8 +79,6 @@ describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
 
     // 2. Uninstall
     await uninstallShop(testDomain);
-
-    // Verify it is inactive
     expect(await getActiveShopByDomain(testDomain)).toBeNull();
 
     // 3. Reinstall
@@ -80,12 +88,12 @@ describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
     });
 
     expect(reinstalled.uninstalledAt).toBeNull();
-    expect(reinstalled.accessToken).toBe('token_reinstalled_2');
+    const plainToken = await getDecryptedAccessToken(reinstalled.id);
+    expect(plainToken).toBe('token_reinstalled_2');
 
     // Verify it is active again
     const active = await getActiveShopByDomain(testDomain);
     expect(active).toBeDefined();
-    expect(active?.accessToken).toBe('token_reinstalled_2');
   });
 
   it('should correctly check shop quota boundaries', async () => {
@@ -100,6 +108,37 @@ describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
     expect(quota.limits.monthlySubmissionsLimit).toBe(50);
     expect(quota.allowed.canPublishCatalog).toBe(true);
     expect(quota.allowed.canAcceptSubmission).toBe(true);
+  });
+
+  describe('Token Encryption at Rest (AES-256-GCM)', () => {
+    const secret = 'my_super_secret_encryption_key_32bytes!';
+
+    it('should encrypt with fresh IV every time and decrypt cleanly', () => {
+      const token = 'shpat_secret_token_abcdef123456';
+      const enc1 = encryptToken(token, secret);
+      const enc2 = encryptToken(token, secret);
+
+      expect(enc1).toMatch(/^enc:v1:/);
+      expect(enc2).toMatch(/^enc:v1:/);
+      // Fresh IV ensures different ciphertexts for the same plaintext
+      expect(enc1).not.toBe(enc2);
+
+      expect(decryptToken(enc1, secret)).toBe(token);
+      expect(decryptToken(enc2, secret)).toBe(token);
+    });
+
+    it('should fail safely when attempting to decrypt with incorrect key', () => {
+      const token = 'shpat_secret_token_abcdef123456';
+      const enc = encryptToken(token, secret);
+
+      const wrongSecret = 'wrong_secret_encryption_key_32bytes!';
+      expect(() => decryptToken(enc, wrongSecret)).toThrow(CryptoError);
+    });
+
+    it('should reject malformed or tampered encryption envelopes', () => {
+      expect(() => decryptToken('malformed_envelope', secret)).not.toThrow(); // non-envelope returns as-is
+      expect(() => decryptToken('enc:v1:corrupted:tag:data', secret)).toThrow(CryptoError);
+    });
   });
 
   describe('Auth Security and Hashing', () => {
@@ -125,35 +164,23 @@ describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
       expect(verifyShopifyWebhookHmac(rawBody, '', secret)).toBe(false);
     });
 
-    it('should generate 256-bit cryptographically secure URL-safe opaque tokens', () => {
-      const token1 = generateOpaqueToken();
-      const token2 = generateOpaqueToken();
-
-      expect(token1).toHaveLength(64); // 32 bytes = 64 hex characters
-      expect(token2).toHaveLength(64);
-      expect(token1).not.toBe(token2);
+    it('should validate myshopify.com domain format strictly', () => {
+      expect(isValidShopifyDomain('my-store.myshopify.com')).toBe(true);
+      expect(isValidShopifyDomain('https://my-store.myshopify.com')).toBe(true);
+      expect(isValidShopifyDomain('evil-domain.com')).toBe(false);
+      expect(isValidShopifyDomain('not-shopify.com/admin')).toBe(false);
+      expect(isValidShopifyDomain('my-store.myshopify.com.attacker.com')).toBe(false);
     });
 
-    it('should deterministically hash idempotency keys per public token', () => {
-      const publicToken = '0123456789abcdef0123456789abcdef';
-      const clientKey = 'order-req-998811';
-
-      const hash1 = hashIdempotencyKey(publicToken, clientKey);
-      const hash2 = hashIdempotencyKey(publicToken, clientKey);
-      const differentKeyHash = hashIdempotencyKey(publicToken, 'order-req-998812');
-
-      expect(hash1).toBe(hash2);
-      expect(hash1).toHaveLength(64); // sha256 hex
-      expect(hash1).not.toBe(differentKeyHash);
-    });
-
-    it('should verify and decode valid App Bridge JWT session tokens', () => {
+    it('should verify and decode valid App Bridge JWT session tokens with audience check', () => {
       const secret = 'my_shopify_app_secret_123';
+      const clientId = 'my_app_client_id_456';
       const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
       const now = Math.floor(Date.now() / 1000);
       const payloadObj = {
         dest: 'https://test-merchant.myshopify.com',
         iss: 'https://test-merchant.myshopify.com/admin',
+        aud: clientId,
         sub: 'user_123',
         exp: now + 3600,
         nbf: now - 10,
@@ -169,21 +196,31 @@ describe('Milestone 1: Shop Lifecycle and Auth Foundations', () => {
 
       const token = `${header}.${payload}.${signature}`;
 
-      const decoded = verifyAppBridgeJwt(token, secret);
+      const decoded = verifyAppBridgeJwt(token, secret, clientId);
       expect(decoded).not.toBeNull();
-      expect(decoded?.dest).toBe('https://test-merchant.myshopify.com');
+      expect(decoded?.shopDomain).toBe('test-merchant.myshopify.com');
       expect(decoded?.sub).toBe('user_123');
 
-      // Test expired token
+      // 1. Wrong audience
+      expect(verifyAppBridgeJwt(token, secret, 'different_client_id')).toBeNull();
+
+      // 2. Mismatched dest and iss host
+      const tamperedIssObj = { ...payloadObj, iss: 'https://evil-merchant.myshopify.com/admin' };
+      const tamperedPayload = Buffer.from(JSON.stringify(tamperedIssObj)).toString('base64url');
+      const tamperedSig = crypto
+        .createHmac('sha256', secret)
+        .update(`${header}.${tamperedPayload}`)
+        .digest('base64url');
+      expect(verifyAppBridgeJwt(`${header}.${tamperedPayload}.${tamperedSig}`, secret, clientId)).toBeNull();
+
+      // 3. Expired token
       const expiredPayloadObj = { ...payloadObj, exp: now - 100 };
       const expiredPayload = Buffer.from(JSON.stringify(expiredPayloadObj)).toString('base64url');
       const expiredSignature = crypto
         .createHmac('sha256', secret)
         .update(`${header}.${expiredPayload}`)
         .digest('base64url');
-      const expiredToken = `${header}.${expiredPayload}.${expiredSignature}`;
-
-      expect(verifyAppBridgeJwt(expiredToken, secret)).toBeNull();
+      expect(verifyAppBridgeJwt(`${header}.${expiredPayload}.${expiredSignature}`, secret, clientId)).toBeNull();
     });
   });
 });

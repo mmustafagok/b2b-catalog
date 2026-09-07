@@ -16,9 +16,17 @@ interface CatalogHeader {
 
 interface CatalogData {
   catalog: CatalogHeader;
-  shop: { shopDomain: string };
+  shop: { shopDomain: string; currency?: string };
   products: ProductItem[];
   dataVersion: number;
+}
+
+function formatPrice(amount: number, currency: string = 'USD'): string {
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(amount);
+  } catch {
+    return `${currency.toUpperCase()} ${amount.toFixed(2)}`;
+  }
 }
 
 export const BuyerCatalogApp: React.FC = () => {
@@ -262,7 +270,9 @@ export const BuyerCatalogApp: React.FC = () => {
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Order Subtotal:</span>
-              <span style={{ fontWeight: 600 }}>${submittedOrder.subtotal.toFixed(2)}</span>
+              <span style={{ fontWeight: 600 }}>
+                {formatPrice(submittedOrder.subtotal, data.shop.currency || 'USD')}
+              </span>
             </div>
           </div>
           <button
@@ -346,7 +356,9 @@ export const BuyerCatalogApp: React.FC = () => {
               </div>
               <div className="stat-item">
                 <span className="stat-label">Estimated Subtotal</span>
-                <span className="stat-value highlight">${subtotal.toFixed(2)}</span>
+                <span className="stat-value highlight">
+                  {formatPrice(subtotal, data.shop.currency || 'USD')}
+                </span>
               </div>
             </div>
 
@@ -369,6 +381,7 @@ export const BuyerCatalogApp: React.FC = () => {
         quantities={quantities}
         subtotal={subtotal}
         totalItems={totalItems}
+        currency={data.shop.currency || 'USD'}
         onSubmit={handleSubmitOrder}
         isSubmitting={isSubmitting}
         errorMessage={submitError}

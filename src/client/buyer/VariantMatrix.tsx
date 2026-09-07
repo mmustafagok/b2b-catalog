@@ -7,6 +7,7 @@ export interface VariantItem {
   sku: string | null;
   basePrice: number;
   displayPrice: number;
+  formattedPrice?: string;
   availableForSale: boolean;
   inventoryQuantity?: number;
   selectedOptions: Array<{ name: string; value: string }>;
@@ -99,7 +100,9 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                 )}
                 <td>
                   <div className="price-box">
-                    <span className="display-price">${variant.displayPrice.toFixed(2)}</span>
+                    <span className="display-price">
+                      {variant.formattedPrice || `$${variant.displayPrice.toFixed(2)}`}
+                    </span>
                     {hasDiscount && (
                       <span className="base-price-struck">${variant.basePrice.toFixed(2)}</span>
                     )}

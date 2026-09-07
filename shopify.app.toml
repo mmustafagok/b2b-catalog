@@ -1,9 +1,12 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+# CatalogFlow: B2B Order Catalog
+# Shopify App Configuration (API Version 2026-07)
+# Note: In production or development via Shopify CLI, application_url and redirect_urls
+# are dynamically configured by `shopify app dev` or your deployment host.
 
 client_id = "catalogflow-b2b-portal"
 name = "CatalogFlow: B2B Order Catalog"
 handle = "catalogflow-b2b-portal"
-application_url = "https://your-app-url.com"
+application_url = "https://app.catalogflow.io"
 embedded = true
 
 [build]
@@ -15,8 +18,7 @@ scopes = "read_products,read_inventory,write_draft_orders,read_draft_orders"
 
 [auth]
 redirect_urls = [
-  "https://your-app-url.com/auth/callback",
-  "https://your-app-url.com/auth/shopify/callback"
+  "https://app.catalogflow.io/auth/callback"
 ]
 
 [webhooks]
@@ -30,7 +32,14 @@ uri = "/api/webhooks/products"
 topics = [ "app/uninstalled" ]
 uri = "/api/webhooks/app/uninstalled"
 
-[privacy_compliance]
-customer_data_request_url = "https://your-app-url.com/api/webhooks/compliance/customers-data-request"
-customer_deletion_url = "https://your-app-url.com/api/webhooks/compliance/customers-redact"
-shop_deletion_url = "https://your-app-url.com/api/webhooks/compliance/shop-redact"
+[[webhooks.subscriptions]]
+compliance_topics = [ "customers/data_request" ]
+uri = "/api/webhooks/compliance/customers-data-request"
+
+[[webhooks.subscriptions]]
+compliance_topics = [ "customers/redact" ]
+uri = "/api/webhooks/compliance/customers-redact"
+
+[[webhooks.subscriptions]]
+compliance_topics = [ "shop/redact" ]
+uri = "/api/webhooks/compliance/shop-redact"

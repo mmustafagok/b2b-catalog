@@ -1,10 +1,14 @@
 import { prisma } from '../db.js';
 import { PlanTier, PLAN_LIMITS } from '../types/index.js';
+import { encryptToken, decryptToken } from './crypto.server.js';
 
 export async function installOrUpdateShop(data: {
   shopDomain: string;
   accessToken: string;
+  currency?: string;
 }) {
+  const encryptedToken = encryptToken(data.accessToken);
+
   const existingShop = await prisma.shop.findUnique({
     where: { shopDomain: data.shopDomain },
   });
@@ -13,8 +17,9 @@ export async function installOrUpdateShop(data: {
     return prisma.shop.update({
       where: { shopDomain: data.shopDomain },
       data: {
-        accessToken: data.accessToken,
-        uninstalledAt: null, // Re-installation
+        accessToken: encryptedToken,
+        currency: data.currency || existingShop.currency,
+        uninstalledAt: null, // Reactivate if uninstalled
         updatedAt: new Date(),
       },
     });
@@ -23,7 +28,8 @@ export async function installOrUpdateShop(data: {
   return prisma.shop.create({
     data: {
       shopDomain: data.shopDomain,
-      accessToken: data.accessToken,
+      accessToken: encryptedToken,
+      currency: data.currency || 'USD',
       plan: PlanTier.STARTER,
       billingCycleAnchor: new Date(),
       monthlySubmissionsCount: 0,
@@ -46,7 +52,7 @@ export async function uninstallShop(shopDomain: string) {
     where: { shopDomain },
     data: {
       uninstalledAt: new Date(),
-      accessToken: '', // Revoke active token
+      accessToken: '', // Clear token at rest
       updatedAt: new Date(),
     },
   });
@@ -68,6 +74,14 @@ export async function getActiveShopById(id: string) {
       uninstalledAt: null,
     },
   });
+}
+
+export async function getDecryptedAccessToken(shopId: string): Promise<string | null> {
+  const shop = await getActiveShopById(shopId);
+  if (!shop || !shop.accessToken) {
+    return null;
+  }
+  return decryptToken(shop.accessToken);
 }
 
 export async function checkShopQuota(shopId: string) {
@@ -112,4 +126,24 @@ export async function incrementSubmissionCount(shopId: string) {
       },
     },
   });
+}
+
+/**
+ * Compliance redaction: completely erases a shop and all associated data.
+ */
+export async function redactShopData(shopDomain: string) {
+  const shop = await prisma.shop.findUnique({
+    where: { shopDomain },
+  });
+
+  if (!shop) {
+    return false;
+  }
+
+  // Cascade delete handles catalogs, products, snapshots, submissions
+  await prisma.shop.delete({
+    where: { id: shop.id },
+  });
+
+  return true;
 }

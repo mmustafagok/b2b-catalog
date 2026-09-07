@@ -1,43 +1,82 @@
 import { PriceMode } from '../types/index.js';
+import { Prisma } from '@prisma/client';
+
+export type DecimalLike = number | string | Prisma.Decimal;
 
 /**
- * Rounds money to 2 decimal places using standard financial rounding.
+ * Converts a DecimalLike value to a Prisma Decimal with 2 decimal places.
  */
-export function roundMoney(amount: number): number {
-  return Math.round((amount + Number.EPSILON) * 100) / 100;
+export function toDecimal(val: DecimalLike): Prisma.Decimal {
+  if (val instanceof Prisma.Decimal) {
+    return val;
+  }
+  return new Prisma.Decimal(String(val));
 }
 
 /**
- * Deterministically computes the buyer display price.
- * @param basePrice Shopify regular variant price
- * @param priceMode SHOPIFY_PRICE or PERCENT_DISCOUNT
- * @param discountPercent 0 - 90 percentage discount
+ * Rounds a monetary decimal to 2 decimal places deterministically.
+ */
+export function roundDecimal(amount: DecimalLike): Prisma.Decimal {
+  const dec = toDecimal(amount);
+  return dec.toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+}
+
+/**
+ * Deterministically computes the buyer display price using Decimal arithmetic.
  */
 export function calculateDisplayPrice(
-  basePrice: number,
+  basePrice: DecimalLike,
   priceMode: string = PriceMode.SHOPIFY_PRICE,
-  discountPercent: number | null = 0
-): number {
-  if (basePrice <= 0) {
-    return 0;
+  discountPercent: DecimalLike | null = 0
+): Prisma.Decimal {
+  const baseDec = toDecimal(basePrice);
+
+  if (baseDec.lte(0)) {
+    return new Prisma.Decimal('0.00');
   }
 
-  if (priceMode === PriceMode.PERCENT_DISCOUNT && discountPercent && discountPercent > 0) {
-    const validDiscount = Math.min(Math.max(discountPercent, 0), 90);
-    const discounted = basePrice * (1 - validDiscount / 100);
-    return roundMoney(discounted);
+  if (priceMode === PriceMode.PERCENT_DISCOUNT && discountPercent) {
+    const discountDec = toDecimal(discountPercent);
+    if (discountDec.gt(0)) {
+      const validDiscount = Prisma.Decimal.min(Prisma.Decimal.max(discountDec, new Prisma.Decimal(0)), new Prisma.Decimal(90));
+      // multiplier = 1 - (discount / 100)
+      const multiplier = new Prisma.Decimal(1).minus(validDiscount.dividedBy(100));
+      return roundDecimal(baseDec.times(multiplier));
+    }
   }
 
-  return roundMoney(basePrice);
+  return roundDecimal(baseDec);
 }
 
 /**
- * Validates whether a line price matches the expected wholesale calculation.
+ * Formats a monetary amount into a localized currency string.
+ * e.g. formatMoney(120.50, 'EUR') => "€120.50"
+ * e.g. formatMoney(120.50, 'USD') => "$120.50"
+ * e.g. formatMoney(120.50, 'TRY') => "TRY 120.50" or "₺120.50"
+ */
+export function formatMoney(amount: DecimalLike, currency: string = 'USD'): string {
+  const num = typeof amount === 'number' ? amount : parseFloat(toDecimal(amount).toFixed(2));
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency.toUpperCase(),
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(num);
+  } catch {
+    // Fallback if currency code is unusual
+    return `${currency.toUpperCase()} ${num.toFixed(2)}`;
+  }
+}
+
+/**
+ * Validates whether two amounts match within standard cent tolerance.
  */
 export function verifyLinePrice(
-  actualCalculatedPrice: number,
-  expectedPrice: number,
-  tolerance: number = 0.01
+  actualCalculatedPrice: DecimalLike,
+  expectedPrice: DecimalLike,
+  tolerance: DecimalLike = 0.01
 ): boolean {
-  return Math.abs(actualCalculatedPrice - expectedPrice) <= tolerance;
+  const diff = toDecimal(actualCalculatedPrice).minus(toDecimal(expectedPrice)).abs();
+  return diff.lte(toDecimal(tolerance));
 }

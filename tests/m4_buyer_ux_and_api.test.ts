@@ -95,9 +95,14 @@ describe('Milestone 4: Public Buyer Ordering API & UX Integration', () => {
     expect(v1.availableForSale).toBe(true);
   });
 
-  it('should return 404 for unknown or unpublished catalog tokens', async () => {
-    const res = await request(app).get('/api/public/catalog/non_existent_token_12345');
-    expect(res.status).toBe(404);
+  it('should return 400 for malformed and 404 for unknown catalog tokens', async () => {
+    const malformedRes = await request(app).get('/api/public/catalog/short_token');
+    expect(malformedRes.status).toBe(400);
+
+    const unknownRes = await request(app).get(
+      '/api/public/catalog/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    );
+    expect(unknownRes.status).toBe(404);
   });
 
   it('should validate valid buyer lines via POST /api/public/catalog/:publicToken/validate', async () => {

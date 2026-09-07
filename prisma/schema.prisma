@@ -3,14 +3,15 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model Shop {
   id                      String            @id @default(uuid())
   shopDomain              String            @unique
-  accessToken             String
+  accessToken             String            // Encrypted at rest: enc:v1:<iv>:<tag>:<ciphertext>
+  currency                String            @default("USD")
   plan                    String            @default("STARTER") // STARTER, GROWTH, SCALE
   billingCycleAnchor      DateTime          @default(now())
   monthlySubmissionsCount Int               @default(0)
@@ -23,6 +24,7 @@ model Shop {
   submissions             OrderSubmission[]
   productSnapshots        ProductSnapshot[]
   variantSnapshots        VariantSnapshot[]
+  collections             CollectionSnapshot[]
   syncRuns                SyncRun[]
 
   @@index([shopDomain])
@@ -36,7 +38,7 @@ model Catalog {
   publicToken     String                @unique
   status          String                @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
   priceMode       String                @default("SHOPIFY_PRICE") // SHOPIFY_PRICE, PERCENT_DISCOUNT
-  discountPercent Float?                @default(0)
+  discountPercent Decimal?              @default(0) @db.Decimal(5, 2)
   logoUrl         String?
   accentColor     String?               @default("#108043")
   showSku         Boolean               @default(true)
@@ -84,6 +86,36 @@ model CatalogItemOverride {
   @@index([shopifyProductId])
 }
 
+model CollectionSnapshot {
+  id                  String   @id @default(uuid())
+  shopId              String
+  shopifyCollectionId String   // e.g. gid://shopify/Collection/123
+  title               String
+  handle              String
+  sourceUpdatedAt     DateTime?
+  syncedAt            DateTime @default(now())
+
+  shop                Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  productMemberships  CollectionProductMembership[]
+
+  @@unique([shopId, shopifyCollectionId])
+  @@index([shopId])
+  @@index([shopifyCollectionId])
+}
+
+model CollectionProductMembership {
+  id               String             @id @default(uuid())
+  collectionId     String
+  shopifyProductId String             // e.g. gid://shopify/Product/456
+  createdAt        DateTime           @default(now())
+
+  collection       CollectionSnapshot @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, shopifyProductId])
+  @@index([collectionId])
+  @@index([shopifyProductId])
+}
+
 model ProductSnapshot {
   id               String            @id @default(uuid())
   shopId           String
@@ -112,7 +144,7 @@ model VariantSnapshot {
   title               String
   sku                 String?
   barcode             String?
-  shopifyPrice        Float
+  shopifyPrice        Decimal          @db.Decimal(12, 2)
   inventoryQuantity   Int              @default(0)
   availableForSale    Boolean          @default(true)
   selectedOptionsJson String           @default("[]")
@@ -139,7 +171,7 @@ model OrderSubmission {
   idempotencyKeyHash String   // SHA-256 hash
   itemCount          Int
   lineCount          Int
-  subtotalAmount     Float
+  subtotalAmount     Decimal  @db.Decimal(12, 2)
   currency           String   @default("USD")
   createdAt          DateTime @default(now())
 

@@ -1,7 +1,8 @@
 import { prisma } from '../db.js';
 import { BuyerValidateOrderSchema } from '../types/index.js';
-import { calculateDisplayPrice } from './pricing.server.js';
+import { calculateDisplayPrice, toDecimal, formatMoney } from './pricing.server.js';
 import { CatalogStatus } from '../types/index.js';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 export type BuyerValidateOrderInput = z.infer<typeof BuyerValidateOrderSchema>;
@@ -21,6 +22,7 @@ export interface ValidationResult {
     totalItems: number;
     totalLines: number;
     subtotal: number;
+    formattedSubtotal: string;
     currency: string;
   };
 }
@@ -50,10 +52,11 @@ export async function validateBuyerOrderLines(
           reason: 'DELETED',
         },
       ],
-      summary: { totalItems: 0, totalLines: 0, subtotal: 0, currency: 'USD' },
+      summary: { totalItems: 0, totalLines: 0, subtotal: 0, formattedSubtotal: '$0.00', currency: 'USD' },
     };
   }
 
+  const currency = catalog.shop.currency || 'USD';
   const variantGids = validated.lines.map((l) => l.variantId);
   const variantSnapshots = await prisma.variantSnapshot.findMany({
     where: {
@@ -69,7 +72,7 @@ export async function validateBuyerOrderLines(
   const changedLines: ValidationResult['changedLines'] = [];
 
   let totalItems = 0;
-  let subtotal = 0;
+  let subtotalDecimal = new Prisma.Decimal('0.00');
 
   for (const line of validated.lines) {
     const snapshot = snapshotMap.get(line.variantId);
@@ -102,10 +105,10 @@ export async function validateBuyerOrderLines(
     );
 
     totalItems += line.quantity;
-    subtotal += currentDisplayPrice * line.quantity;
+    subtotalDecimal = subtotalDecimal.plus(currentDisplayPrice.times(line.quantity));
   }
 
-  subtotal = Math.round(subtotal * 100) / 100;
+  const subtotalNumber = parseFloat(subtotalDecimal.toFixed(2));
 
   const status: ValidationResult['status'] =
     changedLines.length > 0 ? (catalog.dataVersion !== validated.dataVersion ? 'CHANGED' : 'INVALID') : 'VALID';
@@ -116,8 +119,9 @@ export async function validateBuyerOrderLines(
     summary: {
       totalItems,
       totalLines: validated.lines.length - changedLines.length,
-      subtotal,
-      currency: 'USD',
+      subtotal: subtotalNumber,
+      formattedSubtotal: formatMoney(subtotalDecimal, currency),
+      currency,
     },
   };
 }

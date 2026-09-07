@@ -53,7 +53,7 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
     expect(catalog.name).toBe('Summer Wholesale 2026');
     expect(catalog.status).toBe('DRAFT');
     expect(catalog.publicToken).toHaveLength(64);
-    expect(catalog.discountPercent).toBe(15);
+    expect(Number(catalog.discountPercent)).toBe(15);
     expect(catalog.sources).toHaveLength(2);
     expect(catalog.dataVersion).toBe(1);
   });
@@ -102,7 +102,7 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
 
     expect(updated.name).toBe('Updated Name');
     expect(updated.priceMode).toBe('PERCENT_DISCOUNT');
-    expect(updated.discountPercent).toBe(20);
+    expect(Number(updated.discountPercent)).toBe(20);
     expect(updated.sources).toHaveLength(1);
     expect(updated.sources[0].shopifyGid).toBe('gid://shopify/Collection/99');
     expect(updated.dataVersion).toBe(2);
