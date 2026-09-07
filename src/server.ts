@@ -1274,10 +1274,10 @@ app.get(['/', '/app', '/app/*'], (_req: Request, res: Response) => {
   }
 });
 
-const PORT = process.env.PORT || 8080;
+const PORT = Number(process.env.PORT || 8088);
 
-if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, () => {
+if (!process.env.VITEST) {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`[CatalogFlow Server] Running on port ${PORT}`);
   });
 }

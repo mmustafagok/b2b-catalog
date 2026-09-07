@@ -2,10 +2,10 @@
 name = "CatalogFlow Web App"
 roles = ["frontend", "backend"]
 webhooks_path = "/api/webhooks"
-port = 8080
+port = 8088
 
 [commands]
 dev = "npm run dev"
 
 [server]
-port = 8080
+port = 8088
