@@ -30,7 +30,7 @@ CatalogFlow follows the official Shopify Embedded App architecture with a dual-s
 - **Shopify Integration:** GraphQL Admin API `2026-07`
 - **Frontend:** React, Vite, Shopify Polaris
 - **Security:** AES-256-GCM authenticated encryption at rest for access tokens, HMAC SHA-256 webhook validation, JWT claim verification (aud, iss, dest, exp).
-- **Test Suite:** Vitest (54 unit and integration test cases)
+- **Test Suite:** Vitest (65 automated unit, integration, and security test cases)
 
 ---
 
@@ -72,15 +72,43 @@ npm run prisma:migrate
 
 ## 4. Shopify Lifecycle & Synchronization
 
-### 4.1 Shopify Managed Installation & Token Exchange
+### 4.1 Shopify Managed Installation, Expiring Offline Tokens & Refresh Rotation
 1. **Managed Installation Surface:** Installation consent and scope authorization (`read_products,read_inventory,write_draft_orders,read_draft_orders`) are natively owned and presented by Shopify without legacy authorization-code OAuth redirects or manual install forms.
-2. **App Bridge Session Identity & Token Exchange (RFC 8693):**
+2. **Token Exchange (RFC 8693) & Expiring Offline Token Contract:**
    - Embedded merchant admin loads with an App Bridge session token (ID token).
-   - Backend exchanges the session token for an offline access token via Shopify's Token Exchange endpoint (`urn:ietf:params:oauth:grant-type:token-exchange`).
-   - The acquired offline token is encrypted at rest using AES-256-GCM (`crypto.server.ts`).
-   - Reinstallations safely reactivate the shop record and refresh credentials.
-   - Transparently initializes background product & collection synchronization.
-3. **Session Token Validation:** Strict verification of HMAC signature, expiration (`exp`), not-before (`nbf`), audience (`aud`), and matching destination/issuer hosts (`iss`/`dest`).
+   - Backend performs token exchange against `POST https://{shop}.myshopify.com/admin/oauth/access_token` using `application/x-www-form-urlencoded`.
+   - Contract parameters:
+     - `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
+     - `subject_token=<session_token>`
+     - `subject_token_type=urn:ietf:params:oauth:token-type:id_token`
+     - `requested_token_type=urn:shopify:params:oauth:token-type:offline-access-token`
+     - `expiring=1`
+   - Response provides: `access_token`, `expires_in`, `scope`, `refresh_token`, and `refresh_token_expires_in`.
+3. **Double Credential Encryption at Rest (AES-256-GCM):**
+   - Both `accessToken` and `refreshToken` are sensitive credentials encrypted at rest with versioned authentication tags (`crypto.server.ts`).
+   - `Shop` database model tracks `accessToken`, `accessTokenExpiresAt`, `refreshToken`, `refreshTokenExpiresAt`, and `scopes`.
+   - Neither token is ever exposed to the client browser or written to application logs.
+4. **Centralized Credential Service & Refresh Token Rotation (`shopify-token.server.ts`):**
+   - `getValidOfflineAccessToken(shopId, options)` inspects token lifetime using a 5-minute safety buffer.
+   - Automatically executes refresh token rotation via `grant_type=refresh_token` when nearing expiry or on demand.
+   - Uses returned `expires_in` dynamically (no hardcoded lifetime).
+   - Atomically updates and persists the newly rotated access and refresh token pair and expiry timestamps.
+   - Prevents concurrent refresh storms via in-process in-flight refresh deduplication.
+   - Throws typed `ShopifyAuthRequiredError` if refresh credentials are revoked, prompting embedded re-authentication.
+5. **Token-Aware GraphQL Client (`shopify-client.server.ts`):**
+   - Resolves valid offline access tokens dynamically via `shopify-token.server.ts`.
+   - Automatically traps HTTP 401 unauthorized responses from Shopify, forces refresh rotation, and retries the request before failing.
+6. **App Bridge Invalid/Stale ID Token Retry Protocol:**
+   - On missing, untrusted, or expired ID tokens, the server responds with:
+     `HTTP 401`
+     `X-Shopify-Retry-Invalid-Session-Request: 1`
+   - If Shopify token exchange returns HTTP 400 for a stale ID token, the backend translates this upstream error into HTTP 401 with `X-Shopify-Retry-Invalid-Session-Request: 1`.
+   - This allows App Bridge to silently obtain a fresh session token and retry once without failing the merchant session.
+7. **Minimal Embedded Admin Shell & Bootstrap (`/` & `/api/admin/bootstrap`):**
+   - Embedded merchant admin loads App Bridge via CDN.
+   - Makes an authenticated bootstrap call to `POST /api/admin/bootstrap`.
+   - Verifies credentials, reactivates uninstalled shops, and kicks off initial sync in the background for new stores.
+   - Public buyer portal (`/c/:publicToken`) remains public, fast, and completely isolated from admin authentication.
 
 ### 4.2 Complete Collection & Variant Pagination
 - **Collection Membership Pagination:** Recursively pages through `collection.products(first: 100, after: $cursor)` until `hasNextPage: false`. Never truncates collection memberships; stale memberships are only replaced after the full membership set has resolved.

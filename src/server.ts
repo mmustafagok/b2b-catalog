@@ -36,6 +36,7 @@ import {
   verifyAppBridgeJwt,
   isValidShopifyDomain,
   exchangeSessionTokenForOfflineToken,
+  ShopifyStaleSessionTokenError,
 } from './services/auth.server.js';
 import {
   createRateLimiter,
@@ -82,7 +83,8 @@ const publicRateLimiter = createRateLimiter({
 
 /**
  * Handles Token Exchange (RFC 8693) for Shopify Managed Installation.
- * Exchanges App Bridge session token for an offline access token and triggers initial sync.
+ * Exchanges App Bridge session token for an expiring offline access token, persists refresh token,
+ * and triggers initial sync.
  */
 app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
   try {
@@ -98,21 +100,46 @@ app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
     const secret = process.env.SHOPIFY_API_SECRET || '';
     const decoded = verifyAppBridgeJwt(sessionToken, secret);
     if (!decoded) {
-      return res.status(401).json({ error: 'Invalid, expired, or untrusted session token' });
+      return res
+        .set('X-Shopify-Retry-Invalid-Session-Request', '1')
+        .status(401)
+        .json({ error: 'Invalid, expired, or untrusted session token' });
     }
 
     const shopDomain = decoded.shopDomain;
 
-    // Perform RFC 8693 Token Exchange with Shopify for offline access token
-    const tokenResult = await exchangeSessionTokenForOfflineToken({
-      shopDomain,
-      sessionToken,
-    });
+    // Perform RFC 8693 Token Exchange with Shopify for expiring offline access token
+    let tokenResult;
+    try {
+      tokenResult = await exchangeSessionTokenForOfflineToken({
+        shopDomain,
+        sessionToken,
+      });
+    } catch (exchangeErr: any) {
+      if (exchangeErr instanceof ShopifyStaleSessionTokenError) {
+        return res
+          .set('X-Shopify-Retry-Invalid-Session-Request', '1')
+          .status(401)
+          .json({ error: 'Stale ID token' });
+      }
+      throw exchangeErr;
+    }
 
-    // Install or reactivate shop record
+    const accessExpiry = tokenResult.expiresIn
+      ? new Date(Date.now() + tokenResult.expiresIn * 1000)
+      : null;
+    const refreshExpiry = tokenResult.refreshTokenExpiresIn
+      ? new Date(Date.now() + tokenResult.refreshTokenExpiresIn * 1000)
+      : null;
+
+    // Install or reactivate shop record with encrypted access and refresh tokens
     const shop = await installOrUpdateShop({
       shopDomain,
       accessToken: tokenResult.accessToken,
+      accessTokenExpiresAt: accessExpiry,
+      refreshToken: tokenResult.refreshToken,
+      refreshTokenExpiresAt: refreshExpiry,
+      scopes: tokenResult.scope,
     });
 
     // Trigger initial background sync asynchronously
@@ -442,7 +469,10 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
   }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing or malformed Authorization session token' });
+    return res
+      .set('X-Shopify-Retry-Invalid-Session-Request', '1')
+      .status(401)
+      .json({ error: 'Missing or malformed Authorization session token' });
   }
 
   const token = authHeader.replace('Bearer ', '');
@@ -450,7 +480,10 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
 
   const decoded = verifyAppBridgeJwt(token, secret);
   if (!decoded) {
-    return res.status(401).json({ error: 'Invalid, expired, or untrusted session token' });
+    return res
+      .set('X-Shopify-Retry-Invalid-Session-Request', '1')
+      .status(401)
+      .json({ error: 'Invalid, expired, or untrusted session token' });
   }
 
   let shop = await getActiveShopByDomain(decoded.shopDomain);
@@ -461,12 +494,30 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
         shopDomain: decoded.shopDomain,
         sessionToken: token,
       });
+
+      const accessExpiry = exchangeResult.expiresIn
+        ? new Date(Date.now() + exchangeResult.expiresIn * 1000)
+        : null;
+      const refreshExpiry = exchangeResult.refreshTokenExpiresIn
+        ? new Date(Date.now() + exchangeResult.refreshTokenExpiresIn * 1000)
+        : null;
+
       shop = await installOrUpdateShop({
         shopDomain: decoded.shopDomain,
         accessToken: exchangeResult.accessToken,
+        accessTokenExpiresAt: accessExpiry,
+        refreshToken: exchangeResult.refreshToken,
+        refreshTokenExpiresAt: refreshExpiry,
+        scopes: exchangeResult.scope,
       });
       performInitialShopSync(shop.id).catch(() => {});
-    } catch {
+    } catch (err: any) {
+      if (err instanceof ShopifyStaleSessionTokenError) {
+        return res
+          .set('X-Shopify-Retry-Invalid-Session-Request', '1')
+          .status(401)
+          .json({ error: 'Stale ID token during exchange' });
+      }
       return res.status(401).json({ error: 'Shop not found or inactive' });
     }
   }
@@ -565,6 +616,32 @@ app.get('/api/admin/quota', adminAuthMiddleware, async (req: any, res: Response)
   }
 });
 
+// Admin Bootstrap Endpoint (Embedded App Bridge launch)
+app.post('/api/admin/bootstrap', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const shop = req.shop;
+    const isNewOrReactivated = !shop.initialSyncAt;
+    if (isNewOrReactivated) {
+      performInitialShopSync(shop.id).catch((err) => {
+        console.error('Initial sync failed for shop during bootstrap:', shop.shopDomain, sanitizeErrorMessage(err));
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      shop: {
+        id: shop.id,
+        shopDomain: shop.shopDomain,
+        plan: shop.plan,
+        initialSyncAt: shop.initialSyncAt,
+        installed: !shop.uninstalledAt,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
 // ==========================================
 // STATIC FRONTEND SERVING
 // ==========================================
@@ -603,6 +680,39 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
         </body>
       </html>
     `);
+  }
+});
+
+// Serve Embedded Merchant Admin SPA for root / and /app
+app.get(['/', '/app', '/app/*'], (_req: Request, res: Response) => {
+  const htmlPath = path.join(clientDist, 'index.html');
+  if (fs.existsSync(htmlPath)) {
+    res.sendFile(htmlPath);
+  } else {
+    const rootHtml = path.resolve(process.cwd(), 'index.html');
+    if (fs.existsSync(rootHtml)) {
+      res.sendFile(rootHtml);
+    } else {
+      res.status(200).send(`
+        <!DOCTYPE html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <meta name="shopify-api-key" content="${process.env.SHOPIFY_API_KEY || ''}" />
+            <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+            <title>CatalogFlow: B2B Order Catalog</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+          </head>
+          <body>
+            <div id="root"></div>
+            <script type="module" src="/src/client/main.tsx"></script>
+          </body>
+        </html>
+      `);
+    }
   }
 });
 

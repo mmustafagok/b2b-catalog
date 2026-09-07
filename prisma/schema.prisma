@@ -11,6 +11,10 @@ model Shop {
   id                      String            @id @default(uuid())
   shopDomain              String            @unique
   accessToken             String            // Encrypted at rest: enc:v1:<iv>:<tag>:<ciphertext>
+  accessTokenExpiresAt    DateTime?
+  refreshToken            String?           // Encrypted at rest: enc:v1:<iv>:<tag>:<ciphertext>
+  refreshTokenExpiresAt   DateTime?
+  scopes                  String?
   currency                String            @default("USD")
   plan                    String            @default("STARTER") // STARTER, GROWTH, SCALE
   billingCycleAnchor      DateTime          @default(now())

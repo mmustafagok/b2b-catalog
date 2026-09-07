@@ -6,5 +6,10 @@
     "outDir": "./dist",
     "noEmit": false
   },
-  "include": ["src/server/**/*", "src/server.ts", "src/services/**/*", "src/types/**/*"]
+  "include": [
+    "src/server/**/*",
+    "src/server.ts",
+    "src/services/**/*",
+    "src/types/**/*"
+  ]
 }

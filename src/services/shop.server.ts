@@ -5,9 +5,14 @@ import { encryptToken, decryptToken } from './crypto.server.js';
 export async function installOrUpdateShop(data: {
   shopDomain: string;
   accessToken: string;
+  accessTokenExpiresAt?: Date | null;
+  refreshToken?: string | null;
+  refreshTokenExpiresAt?: Date | null;
+  scopes?: string | null;
   currency?: string;
 }) {
   const encryptedToken = encryptToken(data.accessToken);
+  const encryptedRefreshToken = data.refreshToken ? encryptToken(data.refreshToken) : null;
 
   const existingShop = await prisma.shop.findUnique({
     where: { shopDomain: data.shopDomain },
@@ -18,6 +23,10 @@ export async function installOrUpdateShop(data: {
       where: { shopDomain: data.shopDomain },
       data: {
         accessToken: encryptedToken,
+        accessTokenExpiresAt: data.accessTokenExpiresAt !== undefined ? data.accessTokenExpiresAt : existingShop.accessTokenExpiresAt,
+        refreshToken: encryptedRefreshToken !== null ? encryptedRefreshToken : existingShop.refreshToken,
+        refreshTokenExpiresAt: data.refreshTokenExpiresAt !== undefined ? data.refreshTokenExpiresAt : existingShop.refreshTokenExpiresAt,
+        scopes: data.scopes || existingShop.scopes,
         currency: data.currency || existingShop.currency,
         uninstalledAt: null, // Reactivate if uninstalled
         updatedAt: new Date(),
@@ -29,6 +38,10 @@ export async function installOrUpdateShop(data: {
     data: {
       shopDomain: data.shopDomain,
       accessToken: encryptedToken,
+      accessTokenExpiresAt: data.accessTokenExpiresAt || null,
+      refreshToken: encryptedRefreshToken || null,
+      refreshTokenExpiresAt: data.refreshTokenExpiresAt || null,
+      scopes: data.scopes || null,
       currency: data.currency || 'USD',
       plan: PlanTier.STARTER,
       billingCycleAnchor: new Date(),
@@ -53,6 +66,9 @@ export async function uninstallShop(shopDomain: string) {
     data: {
       uninstalledAt: new Date(),
       accessToken: '', // Clear token at rest
+      accessTokenExpiresAt: null,
+      refreshToken: null,
+      refreshTokenExpiresAt: null,
       updatedAt: new Date(),
     },
   });

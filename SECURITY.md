@@ -4,14 +4,25 @@ This document outlines the multi-layered security and compliance architecture im
 
 ---
 
-## 1. Access Token Protection at Rest
+## 1. Dual Credential Protection at Rest & Expiring Token Model
 
-- **Algorithm:** Authenticated AES-256-GCM (`aes-256-gcm`).
-- **Initialization Vector:** Unique cryptographically random 12-byte (96-bit) IV generated per encryption event.
-- **Authentication Tag:** 16-byte (128-bit) GCM authentication tag verifies payload integrity and authenticity.
-- **Envelope Format:** Versioned storage string: `enc:v1:<iv_hex>:<authTag_hex>:<ciphertext_hex>`.
-- **Key Management:** Derived deterministically from `ENCRYPTION_SECRET` via SHA-256 (32 bytes). Never committed to version control.
-- **Safe Failure:** Tampered payloads or incorrect keys throw a strict `CryptoError` preventing unauthorized token use.
+- **Expiring Offline Tokens:** CatalogFlow uses Shopify's modern expiring offline access token model (`expiring=1`). Access tokens are short-lived, minimizing the blast radius of any credential disclosure.
+- **Dual Credential Encryption (AES-256-GCM):**
+  - Both `accessToken` AND `refreshToken` are treated as high-sensitivity credentials and encrypted at rest with AES-256-GCM.
+  - Unique cryptographically random 12-byte (96-bit) IV generated per encryption event.
+  - 16-byte (128-bit) GCM authentication tag verifies payload integrity and authenticity.
+  - Envelope format: `enc:v1:<iv_hex>:<authTag_hex>:<ciphertext_hex>`.
+  - Keys derived deterministically from `ENCRYPTION_SECRET` via SHA-256 (32 bytes).
+- **Server-Side Token Refresh Rotation:**
+  - Token refresh occurs exclusively server-side in `shopify-token.server.ts`.
+  - When an access token is expiring or expired, the stored encrypted refresh token is used to obtain a new access and refresh token pair via `grant_type=refresh_token`.
+  - The new token pair and updated expiry timestamps are persisted atomically.
+  - In-process deduplication avoids concurrent refresh storms.
+  - Revoked refresh tokens raise `ShopifyAuthRequiredError`, requiring fresh merchant session authentication.
+- **Zero Client Exposure:** Neither access tokens nor refresh tokens are ever sent to client browsers or printed in log output.
+- **App Bridge Stale Token Retry Protocol:**
+  - When an App Bridge session token is invalid, expired, or rejected with HTTP 400 by Shopify, the server returns `HTTP 401` with `X-Shopify-Retry-Invalid-Session-Request: 1`, allowing App Bridge to automatically refresh the session token and retry.
+- **Safe Failure:** Tampered payloads or incorrect decryption keys throw a strict `CryptoError` preventing unauthorized token use.
 
 ---
 

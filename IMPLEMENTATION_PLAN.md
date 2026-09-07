@@ -60,9 +60,10 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 |                                APPLICATION BACKEND                                      |
 |  - Node.js (TypeScript) + Express / React Router Server Engine                          |
 |  - Centralized Services Layer:                                                          |
-|      * auth.server.ts          -> Token Exchange (RFC 8693), HMAC, strict JWT validation|
-|      * crypto.server.ts        -> AES-256-GCM token-at-rest authenticated encryption   |
-|      * shopify-client.server.ts-> Centralized GraphQL Admin client (retry, throttling) |
+|      * auth.server.ts          -> Token Exchange (RFC 8693 urlencoded, id_token, expiring=1)|
+|      * shopify-token.server.ts -> Centralized token rotation, atomic pair persistence   |
+|      * crypto.server.ts        -> AES-256-GCM dual credential authenticated encryption  |
+|      * shopify-client.server.ts-> Token-aware GraphQL client (auto 401 refresh & retry) |
 |      * sync.server.ts          -> Complete collection & variant pagination, sync engine |
 |      * pricing.server.ts       -> Deterministic Decimal arithmetic & currency formatting|
 |      * catalog.server.ts       -> Catalog CRUD, source resolution, snapshot generator   |
@@ -74,8 +75,9 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 |                                  DATA PERSISTENCE                                       |
 |  - PostgreSQL Database Engine (Production & Test with Prisma Migrations)                |
 |  - Exact Decimal Money Types: shopifyPrice, subtotalAmount, discountPercent             |
-|  - Relational Models: Shop, Catalog, CatalogSource, CollectionSnapshot,                 |
-|    CollectionProductMembership, ProductSnapshot, VariantSnapshot, OrderSubmission      |
+|  - Relational Models: Shop (with expiring access + refresh credentials & timestamps),    |
+|    Catalog, CatalogSource, CollectionSnapshot, CollectionProductMembership,              |
+|    ProductSnapshot, VariantSnapshot, OrderSubmission                                    |
 +-----------------------------------------------------------------------------------------+
 ```
 
@@ -83,7 +85,7 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 
 ## 3. Database Entities & Data Model (PostgreSQL)
 
-- **`Shop`**: `id`, `shopDomain`, `accessToken` (Encrypted at rest with AES-256-GCM envelope `enc:v1:...`), `currency` (e.g. USD, EUR, GBP), `plan`, `billingCycleAnchor`, `monthlySubmissionsCount`, `installedAt`, `uninstalledAt`.
+- **`Shop`**: `id`, `shopDomain`, `accessToken` (Encrypted at rest with AES-256-GCM `enc:v1:...`), `accessTokenExpiresAt`, `refreshToken` (Encrypted at rest with AES-256-GCM), `refreshTokenExpiresAt`, `scopes`, `currency` (e.g. USD, EUR, GBP), `plan`, `billingCycleAnchor`, `monthlySubmissionsCount`, `installedAt`, `uninstalledAt`.
 - **`Catalog`**: `id`, `shopId`, `name`, `publicToken` (256-bit unguessable hex), `status`, `priceMode`, `discountPercent` (Decimal 5, 2), `logoUrl`, `accentColor`, `showSku`, `showInventory`, `dataVersion`, `publishedAt`.
 - **`CatalogSource`**: `id`, `catalogId`, `type` (`COLLECTION` | `PRODUCT`), `shopifyGid`.
 - **`CollectionSnapshot`**: `id`, `shopId`, `shopifyCollectionId`, `title`, `handle`, `sourceUpdatedAt`, `syncedAt`.
@@ -116,6 +118,15 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
   - Mandatory compliance webhooks (`customers/data_request`, `customers/redact`, `shop/redact`).
   - Decimal monetary calculations and currency formatting.
   - Public endpoint rate limiting and log sanitization.
+- [x] **M4.5 Auth Patch: Expiring Offline Tokens, Refresh Rotation & Embedded Bootstrap** *(Complete)*
+  - Upgraded Token Exchange to RFC 8693 `application/x-www-form-urlencoded` with `subject_token_type=urn:ietf:params:oauth:token-type:id_token` and `expiring=1`.
+  - Non-destructive PostgreSQL migration (`20260907120642_expiring_offline_tokens`) for `accessTokenExpiresAt`, `refreshToken`, `refreshTokenExpiresAt`, `scopes`.
+  - Encrypted both `accessToken` AND `refreshToken` at rest using AES-256-GCM.
+  - Implemented centralized token rotation service (`shopify-token.server.ts`) with atomic token pair persistence, dynamic `expires_in` calculations, and in-flight deduplication.
+  - Updated `ShopifyAdminClient` to be token-aware with automatic 401 refresh rotation and retry.
+  - Implemented App Bridge invalid/stale ID token retry semantics (`HTTP 401` + `X-Shopify-Retry-Invalid-Session-Request: 1`) on both local validation failure and Shopify 400 rejection.
+  - Implemented minimal embedded admin shell (`MerchantAppShell.tsx`) with App Bridge session bootstrap (`POST /api/admin/bootstrap`) while preserving public buyer portal (`/c/:publicToken`).
+  - Added full test suite covering token exchange, token storage, token refresh rotation, App Bridge retry headers, and embedded bootstrap (65 total tests).
 - [ ] **M5: Submit-Time Revalidation, Draft Order Creation & Idempotency** *(Awaiting Approval)*
 - [ ] **M6: Submissions History & Merchant Operations**
 - [ ] **M7: App Billing, Quotas & Entitlements**

@@ -146,14 +146,24 @@ export function verifyAppBridgeJwt(
   }
 }
 
+export class ShopifyStaleSessionTokenError extends Error {
+  constructor(message: string = 'Shopify rejected session token as stale or invalid') {
+    super(message);
+    this.name = 'ShopifyStaleSessionTokenError';
+  }
+}
+
 export interface TokenExchangeResult {
   accessToken: string;
   scope: string;
+  expiresIn?: number;
+  refreshToken?: string;
+  refreshTokenExpiresIn?: number;
 }
 
 /**
- * Exchanges an App Bridge session token (ID token) for an offline access token
- * using Shopify Managed Installation token exchange (RFC 8693).
+ * Exchanges an App Bridge session token (ID token) for an expiring offline access token
+ * using Shopify Managed Installation token exchange (RFC 8693) with application/x-www-form-urlencoded.
  */
 export async function exchangeSessionTokenForOfflineToken(params: {
   shopDomain: string;
@@ -176,27 +186,32 @@ export async function exchangeSessionTokenForOfflineToken(params: {
 
   const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
   const tokenUrl = `https://${cleanDomain}/admin/oauth/access_token`;
-  const body = {
+
+  const paramsBody = new URLSearchParams({
     client_id: targetClientId,
     client_secret: targetClientSecret,
     grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
     subject_token: sessionToken,
-    subject_token_type: 'urn:ietf:params:oauth:token-type:id-token',
+    subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
     requested_token_type: 'urn:shopify:params:oauth:token-type:offline-access-token',
-  };
+    expiring: '1',
+  });
 
   const customFetch = fetchFn || fetch;
   const response = await customFetch(tokenUrl, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
       Accept: 'application/json',
     },
-    body: JSON.stringify(body),
+    body: paramsBody.toString(),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
+    if (response.status === 400) {
+      throw new ShopifyStaleSessionTokenError(`Token exchange failed (400): ${errorText}`);
+    }
     throw new Error(`Token exchange failed (${response.status}): ${errorText}`);
   }
 
@@ -208,6 +223,10 @@ export async function exchangeSessionTokenForOfflineToken(params: {
   return {
     accessToken: data.access_token,
     scope: data.scope || '',
+    expiresIn: data.expires_in ? Number(data.expires_in) : undefined,
+    refreshToken: data.refresh_token || undefined,
+    refreshTokenExpiresIn: data.refresh_token_expires_in ? Number(data.refresh_token_expires_in) : undefined,
   };
 }
+
 

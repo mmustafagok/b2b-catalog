@@ -35,23 +35,43 @@ npm run typecheck
 
 ---
 
-## 3. Test Suites & Coverage Summary (54 Tests)
+## 3. Test Suites & Coverage Summary (65 Tests)
 
-### 3.1 Milestone 1: Shop Lifecycle, Auth & Encryption (`tests/m1_lifecycle_and_auth.test.ts` — 15 Tests)
-- Initial shop installation with encrypted access token and default Starter plan.
-- Shop uninstallation setting `uninstalledAt` and revoking token.
-- Shop re-installation reactivating previously uninstalled shops.
-- Shop quota calculation for catalog limits and monthly order submissions.
-- AES-256-GCM authenticated encryption roundtrip with fresh random IVs.
-- AES-256-GCM failure on wrong decryption key or tampered envelope.
-- Shopify webhook HMAC SHA-256 validation (accepts valid, rejects tampered/empty).
-- Strict myshopify domain format validation.
-- App Bridge JWT session token verification (exp, nbf, aud, iss, dest host match).
-- **Shopify Managed Installation & Token Exchange (RFC 8693):**
-  - Session token exchange for offline access token.
-  - Managed install bootstrap via `POST /api/auth/token-exchange`.
+### 3.1 Milestone 1 & 4.5 Auth: Shop Lifecycle, Auth, Encryption & Token Rotation (`tests/m1_lifecycle_and_auth.test.ts` — 26 Tests)
+- **Lifecycle & Plans:**
+  - Initial shop installation with encrypted access token and default Starter plan.
+  - Shop uninstallation setting `uninstalledAt` and revoking token.
+  - Shop re-installation reactivating previously uninstalled shops.
+  - Shop quota calculation for catalog limits and monthly order submissions.
+- **Crypto & Webhooks:**
+  - AES-256-GCM authenticated encryption roundtrip with fresh random IVs.
+  - AES-256-GCM failure on wrong decryption key or tampered envelope (`CryptoError`).
+  - Shopify webhook HMAC SHA-256 validation (accepts valid, rejects tampered/empty).
+  - Strict myshopify domain format validation.
+  - App Bridge JWT session token verification (exp, nbf, aud, iss, dest host match).
+- **Shopify Managed Installation & Expiring Token Exchange (RFC 8693):**
+  - Exchange session token for expiring offline access token via `application/x-www-form-urlencoded`.
+  - Enforces `urn:ietf:params:oauth:token-type:id_token` subject token type and `expiring=1`.
+  - Parsed token response metadata (`expiresIn`, `scope`, `refreshToken`, `refreshTokenExpiresIn`).
+  - Stores encrypted access token, encrypted refresh token, and expiry timestamps in PostgreSQL.
+  - Token exchange endpoint (`POST /api/auth/token-exchange`) persists credentials and triggers initial sync.
   - Reinstallation safely refreshes and reactivates credentials.
-  - Legacy OAuth routes (`/auth/shopify`, `/auth/callback`) return 404 (removed).
+  - Legacy OAuth routes (`/auth/shopify`, `/auth/callback`) return 404.
+- **Server-Side Token Refresh Rotation (`shopify-token.server.ts`):**
+  - Does NOT refresh a valid access token far from expiry.
+  - Automatically refreshes near-expiry token (<5 min) using stored refresh token.
+  - Atomically persists rotated token pair and updated expiry timestamps in DB.
+  - Subsequent requests immediately use newly rotated token without re-fetching.
+  - Failed refresh with network/server 500 does NOT overwrite or wipe valid stored credentials.
+  - Rejection with 400/401 produces typed `ShopifyAuthRequiredError` (re-auth required).
+  - GraphQL client (`ShopifyAdminClient`) automatically handles 401, forces refresh, and retries once.
+- **App Bridge Stale Token Retry Semantics:**
+  - Invalid or expired ID token returns HTTP 401 with `X-Shopify-Retry-Invalid-Session-Request: 1`.
+  - Upstream Shopify token endpoint HTTP 400 (stale session token) translates to HTTP 401 with retry header.
+- **Embedded Admin Bootstrap & Public Portal Isolation:**
+  - Embedded admin bootstrap (`POST /api/admin/bootstrap`) authenticates, establishes credentials, and triggers sync.
+  - Uninstalled shops are reactivated upon embedded bootstrap.
+  - Public buyer portal (`/c/:publicToken` and `/api/public/catalog/:publicToken`) remains public, fast, and completely isolated without admin retry headers.
 
 ### 3.2 Milestone 2: Merchant Catalog Domain & CRUD (`tests/m2_catalog_domain.test.ts` — 5 Tests)
 - Catalog creation in `DRAFT` status with sources, 256-bit token, and data versioning.

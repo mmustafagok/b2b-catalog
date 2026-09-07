@@ -805,14 +805,21 @@ export async function performInitialShopSync(shopId: string, customClient?: Shop
 
     return { collectionsSynced, productsSynced, variantsSynced };
   } catch (err: any) {
-    await prisma.syncRun.update({
-      where: { id: syncRun.id },
-      data: {
-        status: 'FAILED',
-        finishedAt: new Date(),
-        statsJson: JSON.stringify({ error: err.message }),
-      },
-    });
+    try {
+      const existingRun = await prisma.syncRun.findUnique({ where: { id: syncRun.id } });
+      if (existingRun) {
+        await prisma.syncRun.update({
+          where: { id: syncRun.id },
+          data: {
+            status: 'FAILED',
+            finishedAt: new Date(),
+            statsJson: JSON.stringify({ error: err.message }),
+          },
+        });
+      }
+    } catch {
+      // Record may have been deleted by cascade on shop deletion
+    }
     throw err;
   }
 }
