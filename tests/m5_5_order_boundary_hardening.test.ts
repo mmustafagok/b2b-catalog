@@ -9,7 +9,7 @@ import { CatalogSourceType, PriceMode } from '../src/types/index.js';
 import { ShopifyAdminClient } from '../src/services/shopify-client.server.js';
 
 describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () => {
-  let shop: { id: string; shopDomain: string };
+  let shop: { id: string; shopDomain: string; billingCycleAnchor: Date };
   let catalogA: any;
   let clientRequestSpy: any;
 
@@ -1043,4 +1043,329 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
     const updatedShop = await prisma.shop.findUnique({ where: { id: shop.id } });
     expect(updatedShop?.initialSyncAt).toBeNull();
   });
+
+  // ==========================================
+  // 6. M5.7 RECONCILIATION, PROCESSING LEASE & QUOTA PERIOD REGRESSIONS
+  // ==========================================
+
+  describe('M5.7 Reconciliation, Processing Lease & Quota Period Correctness', () => {
+    it('1. reconciliation search empty -> RECONCILIATION_PENDING (no second mutation call)', async () => {
+      const { hashIdempotencyKey } = await import('../src/services/auth.server.js');
+      let draftOrderCreateCalls = 0;
+      let findDraftCalls = 0;
+
+      const key = 'test-rec-no-fallthrough-key';
+      const keyHash = hashIdempotencyKey(catalogA.id, key);
+
+      // Create a submission in REQUIRES_RECONCILIATION state
+      const existingSubmission = await prisma.orderSubmission.create({
+        data: {
+          shopId: shop.id,
+          catalogId: catalogA.id,
+          idempotencyKeyHash: keyHash,
+          status: 'REQUIRES_RECONCILIATION',
+          correlationRef: 'cf-sub:rec-test-1',
+          quotaReserved: true,
+          quotaCycleAnchor: shop.billingCycleAnchor,
+        },
+      });
+
+      clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+        if (query.includes('findDraftOrderByTag')) {
+          findDraftCalls++;
+          // Empty search response (draft order not yet indexed)
+          return { draftOrders: { edges: [] } };
+        }
+        if (query.includes('createDraftOrder')) {
+          draftOrderCreateCalls++;
+          return {
+            draftOrderCreate: {
+              draftOrder: { id: 'gid://shopify/DraftOrder/9999', name: '#D9999', totalPrice: '300.00', currencyCode: 'USD' },
+              userErrors: [],
+            },
+          };
+        }
+        return {};
+      });
+
+      const payload = {
+        dataVersion: catalogA.dataVersion,
+        buyer: { businessName: 'Recon Buyer', email: 'recon@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+      };
+
+      // Attempt retry with same idempotency key
+      const res = await request(app)
+        .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+        .set('Idempotency-Key', key)
+        .send(payload);
+
+      // Must return 409 RECONCILIATION_PENDING
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('RECONCILIATION_PENDING');
+      expect(res.body.error).toContain('still confirming the previous order attempt');
+
+      // Crucial: draftOrderCreate MUST NOT have been called!
+      expect(findDraftCalls).toBe(1);
+      expect(draftOrderCreateCalls).toBe(0);
+
+      // Submission status must REMAIN REQUIRES_RECONCILIATION
+      const subCheck = await prisma.orderSubmission.findUnique({ where: { id: existingSubmission.id } });
+      expect(subCheck?.status).toBe('REQUIRES_RECONCILIATION');
+      expect(subCheck?.quotaReserved).toBe(true);
+    });
+
+    it('2. reconciliation eventually finds original draft -> completes without draftOrderCreate call', async () => {
+      const { hashIdempotencyKey } = await import('../src/services/auth.server.js');
+      let draftOrderCreateCalls = 0;
+      let findDraftCalls = 0;
+
+      const key = 'test-rec-finds-original-key';
+      const keyHash = hashIdempotencyKey(catalogA.id, key);
+
+      const existingSubmission = await prisma.orderSubmission.create({
+        data: {
+          shopId: shop.id,
+          catalogId: catalogA.id,
+          idempotencyKeyHash: keyHash,
+          status: 'REQUIRES_RECONCILIATION',
+          correlationRef: 'cf-sub:rec-test-2',
+          quotaReserved: true,
+          quotaCycleAnchor: shop.billingCycleAnchor,
+        },
+      });
+
+      clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+        if (query.includes('findDraftOrderByTag')) {
+          findDraftCalls++;
+          return {
+            draftOrders: {
+              edges: [
+                {
+                  node: {
+                    id: 'gid://shopify/DraftOrder/7777',
+                    name: '#D7777',
+                    totalPrice: '300.00',
+                    currencyCode: 'USD',
+                  },
+                },
+              ],
+            },
+          };
+        }
+        if (query.includes('createDraftOrder')) {
+          draftOrderCreateCalls++;
+          return {};
+        }
+        return {};
+      });
+
+      const payload = {
+        dataVersion: catalogA.dataVersion,
+        buyer: { businessName: 'Recon Buyer', email: 'recon@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+      };
+
+      const res = await request(app)
+        .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+        .set('Idempotency-Key', key)
+        .send(payload);
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.draftOrderId).toBe('gid://shopify/DraftOrder/7777');
+      expect(res.body.isDuplicate).toBe(true);
+
+      // draftOrderCreate call count remains 0!
+      expect(findDraftCalls).toBe(1);
+      expect(draftOrderCreateCalls).toBe(0);
+
+      // Submission status transitions to COMPLETED
+      const subCheck = await prisma.orderSubmission.findUnique({ where: { id: existingSubmission.id } });
+      expect(subCheck?.status).toBe('COMPLETED');
+      expect(subCheck?.draftOrderId).toBe('gid://shopify/DraftOrder/7777');
+      expect(subCheck?.quotaReserved).toBe(true);
+      expect(subCheck?.processingStartedAt).toBeNull();
+    });
+
+    it('3. FAILED createdAt > 60s + fresh processingStartedAt -> concurrent retry blocked with 409 CONCURRENT_PROCESSING', async () => {
+      const { hashIdempotencyKey } = await import('../src/services/auth.server.js');
+      const key = 'test-lease-failed-concur-key';
+      const keyHash = hashIdempotencyKey(catalogA.id, key);
+
+      // Create a submission that failed 2 hours ago
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const sub = await prisma.orderSubmission.create({
+        data: {
+          shopId: shop.id,
+          catalogId: catalogA.id,
+          idempotencyKeyHash: keyHash,
+          status: 'FAILED',
+          createdAt: twoHoursAgo,
+          quotaReserved: false,
+        },
+      });
+
+      // Retry A transitions FAILED -> CREATING with fresh processingStartedAt = now
+      const now = new Date();
+      await prisma.orderSubmission.update({
+        where: { id: sub.id },
+        data: {
+          status: 'CREATING',
+          processingStartedAt: now,
+          quotaReserved: true,
+          quotaCycleAnchor: shop.billingCycleAnchor,
+        },
+      });
+
+      // Before A completes, Retry B arrives with same idempotency key
+      const payload = {
+        dataVersion: catalogA.dataVersion,
+        buyer: { businessName: 'Concurrent Buyer', email: 'concur@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+      };
+
+      let shopifyCalls = 0;
+      clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async () => {
+        shopifyCalls++;
+        return {};
+      });
+
+      const res = await request(app)
+        .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+        .set('Idempotency-Key', key)
+        .send(payload);
+
+      // Retry B MUST receive 409 CONCURRENT_PROCESSING (not assume stale based on createdAt > 60s!)
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('CONCURRENT_PROCESSING');
+      // Retry B must NOT reconcile and must NOT call Shopify
+      expect(shopifyCalls).toBe(0);
+    });
+
+    it('4. processing lease uses processingStartedAt, not createdAt: stale lease triggers reconciliation', async () => {
+      const { hashIdempotencyKey } = await import('../src/services/auth.server.js');
+      const key = 'test-lease-stale-key';
+      const keyHash = hashIdempotencyKey(catalogA.id, key);
+
+      // Created recently (e.g. 5 seconds ago), but processingStartedAt is 90 seconds ago (stale)
+      const ninetySecondsAgo = new Date(Date.now() - 90 * 1000);
+      const sub = await prisma.orderSubmission.create({
+        data: {
+          shopId: shop.id,
+          catalogId: catalogA.id,
+          idempotencyKeyHash: keyHash,
+          status: 'CREATING',
+          processingStartedAt: ninetySecondsAgo,
+          quotaReserved: true,
+          quotaCycleAnchor: shop.billingCycleAnchor,
+        },
+      });
+
+      let reconciliationQueryCalled = false;
+      clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+        if (query.includes('findDraftOrderByTag')) {
+          reconciliationQueryCalled = true;
+          return { draftOrders: { edges: [] } };
+        }
+        return {};
+      });
+
+      const payload = {
+        dataVersion: catalogA.dataVersion,
+        buyer: { businessName: 'Buyer', email: 'b@b.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+      };
+
+      const res = await request(app)
+        .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+        .set('Idempotency-Key', key)
+        .send(payload);
+
+      // Because processingStartedAt > 60s, it transitioned to reconciliation and returned RECONCILIATION_PENDING
+      expect(reconciliationQueryCalled).toBe(true);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('RECONCILIATION_PENDING');
+    });
+
+    it('5. old billing cycle reservation release cannot decrement new cycle usage', async () => {
+      const { releaseSubmissionQuotaReservation } = await import('../src/services/shop.server.js');
+
+      // Cycle A: 35 days ago
+      const cycleAAnchor = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+
+      // Create submission X reserved in Cycle A
+      const subX = await prisma.orderSubmission.create({
+        data: {
+          shopId: shop.id,
+          catalogId: catalogA.id,
+          idempotencyKeyHash: 'sub-x-hash',
+          status: 'FAILED',
+          quotaCycleAnchor: cycleAAnchor,
+          quotaReserved: true,
+        },
+      });
+
+      // Advance shop into Cycle B: anchor is now, usage is 1 (from Submission Y in Cycle B)
+      const cycleBAnchor = new Date();
+      await prisma.shop.update({
+        where: { id: shop.id },
+        data: {
+          billingCycleAnchor: cycleBAnchor,
+          monthlySubmissionsCount: 1,
+        },
+      });
+
+      // Release submission X's reservation (reserved in Cycle A)
+      const released = await releaseSubmissionQuotaReservation(subX.id);
+
+      // Cycle B usage MUST remain exactly 1!
+      const shopAfter = await prisma.shop.findUnique({ where: { id: shop.id } });
+      expect(shopAfter?.monthlySubmissionsCount).toBe(1);
+
+      // subX quotaReserved marker must be cleared to false
+      const subXAfter = await prisma.orderSubmission.findUnique({ where: { id: subX.id } });
+      expect(subXAfter?.quotaReserved).toBe(false);
+    });
+
+    it('6. duplicate release cannot decrement quota twice', async () => {
+      const { releaseSubmissionQuotaReservation } = await import('../src/services/shop.server.js');
+
+      // Current cycle anchor
+      const currentAnchor = new Date();
+      await prisma.shop.update({
+        where: { id: shop.id },
+        data: {
+          billingCycleAnchor: currentAnchor,
+          monthlySubmissionsCount: 5,
+        },
+      });
+
+      const sub = await prisma.orderSubmission.create({
+        data: {
+          shopId: shop.id,
+          catalogId: catalogA.id,
+          idempotencyKeyHash: 'sub-dup-release-hash',
+          status: 'FAILED',
+          quotaCycleAnchor: currentAnchor,
+          quotaReserved: true,
+        },
+      });
+
+      // First release should decrement from 5 to 4
+      const firstRelease = await releaseSubmissionQuotaReservation(sub.id);
+      expect(firstRelease).toBe(true);
+
+      const shopAfter1 = await prisma.shop.findUnique({ where: { id: shop.id } });
+      expect(shopAfter1?.monthlySubmissionsCount).toBe(4);
+
+      // Second release with same submission must NOT decrement again!
+      const secondRelease = await releaseSubmissionQuotaReservation(sub.id);
+      expect(secondRelease).toBe(false);
+
+      const shopAfter2 = await prisma.shop.findUnique({ where: { id: shop.id } });
+      expect(shopAfter2?.monthlySubmissionsCount).toBe(4);
+    });
+  });
 });
+

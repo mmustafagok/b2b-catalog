@@ -206,6 +206,69 @@ export async function reserveSubmissionQuotaSlot(shopId: string, limit: number):
 }
 
 /**
+ * Period-aware quota reservation release.
+ * Atomically clears quotaReserved on the submission, and ONLY decrements
+ * Shop.monthlySubmissionsCount if the active billing cycle still matches
+ * the cycle for which the slot was reserved.
+ * Returns true if usage was decremented, false if billing period already moved
+ * or if slot was not reserved / already released.
+ */
+export async function releaseSubmissionQuotaReservation(submissionId: string): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const submission = await tx.orderSubmission.findUnique({
+      where: { id: submissionId },
+      include: { shop: true },
+    });
+
+    if (!submission || !submission.quotaReserved || !submission.quotaCycleAnchor) {
+      return false; // Nothing to release or already released
+    }
+
+    // Atomically clear quotaReserved on the submission
+    await tx.orderSubmission.update({
+      where: { id: submissionId },
+      data: { quotaReserved: false },
+    });
+
+    const shopAnchor = submission.shop.billingCycleAnchor.getTime();
+    const reservedAnchor = submission.quotaCycleAnchor.getTime();
+
+    // Only decrement if active billing period matches the reserved period
+    if (shopAnchor === reservedAnchor) {
+      const updateRes = await tx.shop.updateMany({
+        where: {
+          id: submission.shopId,
+          billingCycleAnchor: submission.shop.billingCycleAnchor,
+          monthlySubmissionsCount: { gt: 0 },
+        },
+        data: {
+          monthlySubmissionsCount: { decrement: 1 },
+        },
+      });
+      return updateRes.count > 0;
+    }
+
+    return false;
+  });
+}
+
+/**
+ * Direct period-aware release when an initial pre-reservation database insert fails.
+ */
+export async function releaseSubmissionQuotaSlotDirect(shopId: string, anchor: Date): Promise<void> {
+  await prisma.shop.updateMany({
+    where: {
+      id: shopId,
+      billingCycleAnchor: anchor,
+      monthlySubmissionsCount: { gt: 0 },
+    },
+    data: {
+      monthlySubmissionsCount: { decrement: 1 },
+    },
+  });
+}
+
+/**
  * Releases a reserved quota slot if order creation fails before external Shopify side effects.
  */
 export async function releaseSubmissionQuotaSlot(shopId: string): Promise<void> {

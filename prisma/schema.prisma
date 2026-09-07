@@ -168,24 +168,27 @@ model VariantSnapshot {
 }
 
 model OrderSubmission {
-  id                 String   @id @default(uuid())
-  shopId             String
-  catalogId          String
-  status             String   @default("CREATING") // CREATING, COMPLETED, FAILED, REQUIRES_RECONCILIATION
-  draftOrderId       String?  // Shopify GID gid://shopify/DraftOrder/123
-  draftOrderName     String?  // e.g. #D1001
-  idempotencyKeyHash String   // SHA-256 hash
-  correlationRef     String?  // deterministic reference: cf-sub:<id>
-  itemCount          Int      @default(0)
-  lineCount          Int      @default(0)
-  subtotalAmount     Decimal  @default(0) @db.Decimal(12, 2)
-  currency           String   @default("USD")
-  lastError          String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @default(now()) @updatedAt
+  id                  String    @id @default(uuid())
+  shopId              String
+  catalogId           String
+  status              String    @default("CREATING") // CREATING, COMPLETED, FAILED, REQUIRES_RECONCILIATION
+  draftOrderId        String?   // Shopify GID gid://shopify/DraftOrder/123
+  draftOrderName      String?   // e.g. #D1001
+  idempotencyKeyHash  String    // SHA-256 hash
+  correlationRef      String?   // deterministic reference: cf-sub:<id>
+  processingStartedAt DateTime? // Explicit processing lease timestamp
+  quotaCycleAnchor    DateTime? // Billing cycle anchor for which quota was reserved
+  quotaReserved       Boolean   @default(false) // True if a quota slot is currently held
+  itemCount           Int       @default(0)
+  lineCount           Int       @default(0)
+  subtotalAmount      Decimal   @default(0) @db.Decimal(12, 2)
+  currency            String    @default("USD")
+  lastError           String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @default(now()) @updatedAt
 
-  shop               Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  catalog            Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  shop                Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  catalog             Catalog   @relation(fields: [catalogId], references: [id], onDelete: Cascade)
 
   @@unique([catalogId, idempotencyKeyHash])
   @@index([shopId])

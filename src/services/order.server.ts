@@ -6,6 +6,9 @@ import {
   checkShopQuota,
   reserveSubmissionQuotaSlot,
   releaseSubmissionQuotaSlot,
+  releaseSubmissionQuotaReservation,
+  releaseSubmissionQuotaSlotDirect,
+  getActiveShopById,
 } from './shop.server.js';
 import { resolveCatalogAllowedProductGids } from './sync.server.js';
 import { hashIdempotencyKey } from './auth.server.js';
@@ -158,17 +161,23 @@ export async function submitBuyerOrder(
     }
 
     if (submission.status === 'CREATING') {
-      const elapsedMs = Date.now() - submission.createdAt.getTime();
-      // Lock window: if currently processing within 60s, reject concurrent duplicates
-      if (elapsedMs < 60000) {
-        throw new OrderSubmissionError(
-          'Order submission is currently being processed by another worker',
-          409,
-          'CONCURRENT_PROCESSING'
-        );
+      const leaseStartedAt = submission.processingStartedAt;
+      if (!leaseStartedAt) {
+        // Missing processingStartedAt for legacy row: fail safe into reconciliation
+        needsReconciliation = true;
+      } else {
+        const elapsedMs = Date.now() - leaseStartedAt.getTime();
+        // Lock window: if currently processing within 60s, reject concurrent duplicates
+        if (elapsedMs < 60000) {
+          throw new OrderSubmissionError(
+            'Order submission is currently being processed by another worker',
+            409,
+            'CONCURRENT_PROCESSING'
+          );
+        }
+        // Stale attempt: ambiguous failure requiring reconciliation
+        needsReconciliation = true;
       }
-      // Stale attempt: ambiguous failure requiring reconciliation
-      needsReconciliation = true;
     } else if (submission.status === 'REQUIRES_RECONCILIATION') {
       needsReconciliation = true;
     } else if (submission.status === 'FAILED') {
@@ -183,10 +192,14 @@ export async function submitBuyerOrder(
           'QUOTA_EXCEEDED'
         );
       }
+      const activeShop = await getActiveShopById(catalog.shopId);
       submission = await prisma.orderSubmission.update({
         where: { id: submission.id },
         data: {
           status: 'CREATING',
+          processingStartedAt: new Date(),
+          quotaCycleAnchor: activeShop?.billingCycleAnchor || new Date(),
+          quotaReserved: true,
           lastError: null,
         },
       });
@@ -203,6 +216,9 @@ export async function submitBuyerOrder(
       );
     }
 
+    const activeShop = await getActiveShopById(catalog.shopId);
+    const activeAnchor = activeShop?.billingCycleAnchor || new Date();
+
     // Persist unique reservation BEFORE calling Shopify
     try {
       submission = await prisma.orderSubmission.create({
@@ -211,11 +227,14 @@ export async function submitBuyerOrder(
           catalogId: catalog.id,
           idempotencyKeyHash: keyHash,
           status: 'CREATING',
+          processingStartedAt: new Date(),
+          quotaCycleAnchor: activeAnchor,
+          quotaReserved: true,
           currency: catalog.shop.currency || 'USD',
         },
       });
     } catch (insertErr: any) {
-      await releaseSubmissionQuotaSlot(catalog.shopId);
+      await releaseSubmissionQuotaSlotDirect(catalog.shopId, activeAnchor);
       throw new OrderSubmissionError(
         'Order submission is currently being processed by another worker',
         409,
@@ -260,6 +279,8 @@ export async function submitBuyerOrder(
             correlationRef: correlationTag,
             subtotalAmount: subtotal,
             currency: foundDraft.currencyCode || catalog.shop.currency || 'USD',
+            processingStartedAt: null,
+            quotaReserved: true,
           },
         });
 
@@ -274,8 +295,20 @@ export async function submitBuyerOrder(
           isDuplicate: true,
         };
       }
-    } catch (reconcileSearchErr) {
-      // If query fails, keep attempt in CREATING and fail closed
+
+      // If edges.length === 0: Draft order not found in search yet!
+      // REQUIRES_RECONCILIATION must NEVER automatically call draftOrderCreate!
+      // Keep status REQUIRES_RECONCILIATION, keep quota slot reserved, throw RECONCILIATION_PENDING!
+      throw new OrderSubmissionError(
+        'We are still confirming the previous order attempt. Please retry shortly.',
+        409,
+        'RECONCILIATION_PENDING'
+      );
+    } catch (reconcileSearchErr: any) {
+      if (reconcileSearchErr instanceof OrderSubmissionError) {
+        throw reconcileSearchErr;
+      }
+      // If query fails, keep attempt in REQUIRES_RECONCILIATION and fail closed
       throw new OrderSubmissionError(
         'Unable to verify prior submission state with Shopify. Please retry in a moment.',
         502,
@@ -309,10 +342,10 @@ export async function submitBuyerOrder(
     const res: any = await client.request(liveVariantsQuery, { ids: variantGids });
     liveNodes = res.nodes || [];
   } catch (liveQueryErr: any) {
-    await releaseSubmissionQuotaSlot(catalog.shopId);
+    await releaseSubmissionQuotaReservation(submission.id);
     await prisma.orderSubmission.update({
       where: { id: submission.id },
-      data: { status: 'FAILED', lastError: 'Live variant verification failed' },
+      data: { status: 'FAILED', processingStartedAt: null, lastError: 'Live variant verification failed' },
     });
     throw new OrderSubmissionError(
       'Failed to verify current product inventory with Shopify. Please try again.',
@@ -387,10 +420,10 @@ export async function submitBuyerOrder(
   }
 
   if (changedLines.length > 0) {
-    await releaseSubmissionQuotaSlot(catalog.shopId);
+    await releaseSubmissionQuotaReservation(submission.id);
     await prisma.orderSubmission.update({
       where: { id: submission.id },
-      data: { status: 'FAILED', lastError: 'Catalog data changed during submit' },
+      data: { status: 'FAILED', processingStartedAt: null, lastError: 'Catalog data changed during submit' },
     });
     throw new CatalogDataChangedError(
       'Some product prices or inventory availability changed since this catalog was loaded. Please review updated lines.',
@@ -474,10 +507,10 @@ export async function submitBuyerOrder(
   } catch (mutationErr: any) {
     // Conclusive rejection: GraphQL userErrors returned by Shopify
     if (mutationErr instanceof ShopifyGraphQLError && mutationErr.userErrors && mutationErr.userErrors.length > 0) {
-      await releaseSubmissionQuotaSlot(catalog.shopId);
+      await releaseSubmissionQuotaReservation(submission.id);
       await prisma.orderSubmission.update({
         where: { id: submission.id },
-        data: { status: 'FAILED', lastError: 'Shopify rejected draft order creation' },
+        data: { status: 'FAILED', processingStartedAt: null, lastError: 'Shopify rejected draft order creation' },
       });
       throw new OrderSubmissionError(
         'Shopify Draft Order creation was rejected. Please review order items.',
@@ -494,6 +527,7 @@ export async function submitBuyerOrder(
       where: { id: submission.id },
       data: {
         status: 'REQUIRES_RECONCILIATION',
+        processingStartedAt: null,
         correlationRef: correlationTag,
         lastError: 'Ambiguous transport failure during draft order creation',
       },
@@ -506,10 +540,10 @@ export async function submitBuyerOrder(
   }
 
   if (draftRes.draftOrderCreate?.userErrors?.length > 0) {
-    await releaseSubmissionQuotaSlot(catalog.shopId);
+    await releaseSubmissionQuotaReservation(submission.id);
     await prisma.orderSubmission.update({
       where: { id: submission.id },
-      data: { status: 'FAILED', lastError: 'Shopify rejected draft order creation' },
+      data: { status: 'FAILED', processingStartedAt: null, lastError: 'Shopify rejected draft order creation' },
     });
     throw new OrderSubmissionError(
       'Shopify Draft Order creation was rejected. Please review order items.',
@@ -525,6 +559,7 @@ export async function submitBuyerOrder(
       where: { id: submission.id },
       data: {
         status: 'REQUIRES_RECONCILIATION',
+        processingStartedAt: null,
         correlationRef: correlationTag,
         lastError: 'Shopify returned ambiguous response without draft order id',
       },
@@ -549,6 +584,8 @@ export async function submitBuyerOrder(
         lineCount: validated.lines.length,
         subtotalAmount: subtotalDecimal,
         currency,
+        processingStartedAt: null,
+        quotaReserved: true,
       },
     });
   } catch (postMutationDbErr: any) {
@@ -559,6 +596,7 @@ export async function submitBuyerOrder(
         draftOrderId: createdDraft.id,
         draftOrderName: createdDraft.name || null,
         correlationRef: correlationTag,
+        processingStartedAt: null,
       },
     }).catch(() => {});
     throw postMutationDbErr;

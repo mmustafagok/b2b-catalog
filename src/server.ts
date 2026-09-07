@@ -244,6 +244,7 @@ app.post('/api/public/catalog/:publicToken/submit', submitRateLimiter, async (re
     if (error instanceof OrderSubmissionError) {
       switch (error.code) {
         case 'CONCURRENT_PROCESSING':
+        case 'RECONCILIATION_PENDING':
           return res.status(409).json({ error: error.message, code: error.code });
         case 'CATALOG_NOT_FOUND':
         case 'CATALOG_NOT_PUBLISHED':

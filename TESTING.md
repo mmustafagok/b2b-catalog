@@ -140,15 +140,26 @@ npm run typecheck
 - Filter submissions by `catalogId`.
 - Comprehensive sync health summary (`GET /api/admin/sync/health`).
 
-### 3.8 Milestone 5.5 & 5.6: Order Boundary Hardening, Concurrency Guarantees & Failure Classification (`tests/m5_5_order_boundary_hardening.test.ts` — 16 Tests)
+### 3.8 Milestone 5.5, 5.6 & 5.7: Order Boundary Hardening, Idempotency Lease & Quota Period Safety (`tests/m5_5_order_boundary_hardening.test.ts` — 22 Tests)
 - **Concurrency & Idempotency State Machine:**
   - Two concurrent same-key submissions (`Promise.all`) execute exactly one Shopify mutation; second receives in-progress/existing result.
   - Shopify mutation succeeds + DB update throws -> retry reconciles via correlation tag (`cf-sub:<id>`) with zero duplicate Draft Orders.
   - Different idempotency keys intentionally create separate Draft Orders.
-- **Ambiguous Failure Classification & Reconciliation (M5.6):**
+- **Ambiguous Failure Classification & Reconciliation (M5.6 & M5.7):**
   - E2E submit flow: timeout / network failure right after draftOrderCreate side effect sets local state to `REQUIRES_RECONCILIATION`.
   - Reserved quota slot is preserved (not prematurely released on ambiguous transport failure).
-  - Subsequent retry searches by `tag:cf-sub:<id>`, recovers original Draft Order, marks submission `COMPLETED`, and maintains draftOrderCreate call count at exactly 1.
+  - **No Fallthrough Invariant (M5.7):** Empty search response on reconciliation retry *never* falls through to `draftOrderCreate`. Returns `HTTP 409 RECONCILIATION_PENDING` while keeping quota slot reserved. Subsequent retry that finds original draft transitions to `COMPLETED` without incrementing mutation call count (remains 1).
+- **Processing Lease Age Correctness (`processingStartedAt`) (M5.7):**
+  - Uses explicit `processingStartedAt DateTime?` lease timestamp instead of `createdAt`.
+  - Initial reservation and `FAILED -> CREATING` retry both initialize `processingStartedAt = now`.
+  - Submissions created hours ago that retry receive fresh 60s lease window; concurrent retries are rejected with `409 CONCURRENT_PROCESSING`.
+  - Stale lease with `processingStartedAt > 60s` triggers deterministic reconciliation.
+  - Terminal transitions (`COMPLETED`, `FAILED`, `REQUIRES_RECONCILIATION`) clear lease (`processingStartedAt: null`).
+- **Period-Aware Quota Reservation & Release (M5.7):**
+  - `OrderSubmission` captures and records `quotaCycleAnchor DateTime?` and `quotaReserved Boolean @default(false)`.
+  - On release, `monthlySubmissionsCount` is *only* decremented if `Shop.billingCycleAnchor === submission.quotaCycleAnchor` AND `submission.quotaReserved === true`.
+  - Atomic release prevents old billing-cycle failure from decrementing new billing-cycle usage.
+  - Duplicate releases cannot decrement quota twice.
 - **FAILED Retry Quota Lifecycle (M5.6):**
   - Conclusive rejection (GraphQL `userErrors`) releases reserved quota and marks `FAILED`.
   - Same-key retry of a `FAILED` submission atomically re-reserves a quota slot before transitioning back to `CREATING`.
