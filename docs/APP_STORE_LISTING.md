@@ -32,12 +32,13 @@ Every submitted order automatically arrives in your Shopify Admin as a native **
 ---
 
 ## Key Feature Bullets
-1. **Share Live Wholesale Catalogs:** Share custom wholesale catalog links with buyers via email or messaging without requiring a buyer login.
-2. **Bulk Variant Grid Ordering:** Allow wholesale clients to enter quantities across multiple variants, colors, and sizes in a fast matrix view.
-3. **Automated Shopify Draft Orders:** Turn buyer submissions immediately into Shopify Draft Orders with applied discounts and custom PO metadata.
-4. **Automated Inventory & Price Sync:** Automatically synchronize product titles, prices, variants, and collection changes via background workers.
-5. **Idempotency & Stale Price Shield:** Prevent duplicate submissions and reject stale catalog data before Shopify mutations occur.
-6. **Commercial Funnel & Quota Analytics:** Monitor catalog views, order conversion rates, monthly draft order quotas, and sync health.
+1. **3-Step Catalog Creation Wizard:** Build catalogs in three guided steps — search and select Shopify collections or products, choose a pricing mode, then name and publish. No raw IDs or technical setup required.
+2. **Share Live Wholesale Catalogs:** Share custom wholesale catalog links with buyers via email or messaging without requiring a buyer login.
+3. **Bulk Variant Grid Ordering:** Allow wholesale clients to enter quantities across multiple variants, colors, and sizes in a fast matrix view.
+4. **Automated Shopify Draft Orders:** Turn buyer submissions immediately into Shopify Draft Orders with applied discounts and custom PO metadata.
+5. **Automated Inventory & Price Sync:** Automatically synchronize product titles, prices, variants, and collection changes via background workers.
+6. **Idempotency & Stale Price Shield:** Prevent duplicate submissions and reject stale catalog data before Shopify mutations occur.
+7. **Commercial Funnel & Quota Analytics:** Monitor catalog views, order conversion rates, monthly draft order quotas, and sync health.
 
 ---
 

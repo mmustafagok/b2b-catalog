@@ -171,15 +171,27 @@ export const MerchantAppShell: React.FC = () => {
   const [switchingPlan, setSwitchingPlan] = useState<boolean>(false);
   const [reconcilingId, setReconcilingId] = useState<string | null>(null);
 
-  // New catalog modal state
+  // ── Catalog creation wizard state ─────────────────────────────────────────
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
-  const [newCatalogName, setNewCatalogName] = useState<string>('');
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1);
+  const [creatingCatalog, setCreatingCatalog] = useState<boolean>(false);
+
+  // Step 1 — source selection
+  interface ResourceItem { id: string; title: string; imageUrl?: string | null; detail?: string | null }
+  const [searchTab, setSearchTab] = useState<'COLLECTION' | 'PRODUCT'>('COLLECTION');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchResults, setSearchResults] = useState<ResourceItem[]>([]);
+  const [searchLoading, setSearchLoading] = useState<boolean>(false);
+  const [selectedSources, setSelectedSources] = useState<Array<{ type: 'COLLECTION' | 'PRODUCT'; id: string; title: string }>>([]);
+
+  // Step 2 — pricing
   const [newPriceMode, setNewPriceMode] = useState<'SHOPIFY_PRICE' | 'PERCENT_DISCOUNT'>('SHOPIFY_PRICE');
   const [newDiscount, setNewDiscount] = useState<number>(10);
+
+  // Step 3 — details
+  const [newCatalogName, setNewCatalogName] = useState<string>('');
   const [newAccentColor, setNewAccentColor] = useState<string>('#108043');
-  const [newSourceType, setNewSourceType] = useState<'COLLECTION' | 'PRODUCT'>('COLLECTION');
-  const [newSourceGid, setNewSourceGid] = useState<string>('');
-  const [creatingCatalog, setCreatingCatalog] = useState<boolean>(false);
+  const [newPublish, setNewPublish] = useState<boolean>(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -351,41 +363,103 @@ export const MerchantAppShell: React.FC = () => {
     }
   };
 
-  const handleCreateCatalog = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newCatalogName.trim()) return;
+  // ── Wizard helpers ─────────────────────────────────────────────────────────
+  const openCreateWizard = () => {
+    setWizardStep(1);
+    setSearchTab('COLLECTION');
+    setSearchQuery('');
+    setSearchResults([]);
+    setSelectedSources([]);
+    setNewPriceMode('SHOPIFY_PRICE');
+    setNewDiscount(10);
+    setNewCatalogName('');
+    setNewAccentColor('#108043');
+    setNewPublish(false);
+    setShowCreateModal(true);
+  };
+
+  const runSearch = useCallback(async (tab: 'COLLECTION' | 'PRODUCT', q: string) => {
+    setSearchLoading(true);
+    setSearchResults([]);
+    try {
+      const headers = await getAuthHeaders();
+      const endpoint = tab === 'COLLECTION'
+        ? `/api/admin/collections/search?q=${encodeURIComponent(q)}&limit=20`
+        : `/api/admin/products/search?q=${encodeURIComponent(q)}&limit=20`;
+      const res = await fetch(endpoint, { headers });
+      if (!res.ok) throw new Error('Search failed');
+      const data = await res.json();
+      if (tab === 'COLLECTION') {
+        setSearchResults((data.collections || []).map((c: any) => ({
+          id: c.id, title: c.title, imageUrl: c.imageUrl,
+          detail: c.productsCount != null ? `${c.productsCount} products` : null,
+        })));
+      } else {
+        setSearchResults((data.products || []).map((p: any) => ({
+          id: p.id, title: p.title, imageUrl: p.imageUrl,
+          detail: p.price ? `From $${p.price}` : null,
+        })));
+      }
+    } catch {
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [getAuthHeaders]);
+
+  // Debounced search
+  useEffect(() => {
+    if (!showCreateModal || wizardStep !== 1) return;
+    const t = setTimeout(() => runSearch(searchTab, searchQuery), 350);
+    return () => clearTimeout(t);
+  }, [searchQuery, searchTab, showCreateModal, wizardStep, runSearch]);
+
+  const toggleSource = (item: ResourceItem) => {
+    setSelectedSources((prev) => {
+      const exists = prev.some((s) => s.id === item.id);
+      if (exists) return prev.filter((s) => s.id !== item.id);
+      return [...prev, { type: searchTab, id: item.id, title: item.title }];
+    });
+  };
+
+  const removeSource = (id: string) => setSelectedSources((prev) => prev.filter((s) => s.id !== id));
+
+  const handleCreateCatalog = async () => {
+    if (!newCatalogName.trim()) { showToast('Catalog name is required'); return; }
+    if (selectedSources.length === 0) { showToast('Select at least one product or collection'); return; }
     setCreatingCatalog(true);
     try {
       const headers = await getAuthHeaders();
-      const payload: any = {
+      const payload = {
         name: newCatalogName.trim(),
         priceMode: newPriceMode,
         discountPercent: newPriceMode === 'PERCENT_DISCOUNT' ? Number(newDiscount) : 0,
         accentColor: newAccentColor,
         showSku: true,
         showInventory: false,
-        sources: [
-          {
-            type: newSourceType,
-            shopifyGid: newSourceGid.trim() || 'gid://shopify/Collection/all',
-          },
-        ],
+        sources: selectedSources.map((s) => ({ type: s.type, shopifyGid: s.id })),
       };
-
       const res = await fetch('/api/admin/catalogs', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
+        method: 'POST', headers, body: JSON.stringify(payload),
       });
-
       if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to create catalog');
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to create catalog');
       }
-
-      showToast('Catalog created in Draft status!');
+      const { catalog: created } = await res.json();
+      // Optionally publish right away
+      if (newPublish && created?.id) {
+        const pubRes = await fetch(`/api/admin/catalogs/${created.id}/publish`, { method: 'POST', headers });
+        if (!pubRes.ok) {
+          const pd = await pubRes.json();
+          showToast(`Catalog created but could not publish: ${pd.error || 'unknown error'}`);
+        } else {
+          showToast('Catalog created and published!');
+        }
+      } else {
+        showToast('Catalog created in Draft status!');
+      }
       setShowCreateModal(false);
-      setNewCatalogName('');
       loadData();
     } catch (err: any) {
       showToast(`Error: ${err.message}`);
@@ -697,7 +771,7 @@ export const MerchantAppShell: React.FC = () => {
                   </div>
                   <button
                     className="cf-btn cf-btn-primary"
-                    onClick={() => setShowCreateModal(true)}
+                      onClick={openCreateWizard}
                     id="cf-create-catalog-btn"
                   >
                     + Create Catalog
@@ -709,7 +783,7 @@ export const MerchantAppShell: React.FC = () => {
                     <p>Create your first wholesale catalog in under 10 minutes.</p>
                     <button
                       className="cf-btn cf-btn-primary"
-                      onClick={() => setShowCreateModal(true)}
+                    onClick={openCreateWizard}
                     >
                       Create Your First Catalog
                     </button>
@@ -1126,115 +1200,255 @@ export const MerchantAppShell: React.FC = () => {
         )}
       </main>
 
-      {/* New Catalog Modal */}
+      {/* ── Catalog Creation Wizard ─────────────────────────────── */}
       {showCreateModal && (
         <div className="cf-modal-backdrop">
-          <div className="cf-modal">
+          <div className="cf-modal cf-modal-wide">
+            {/* Header */}
             <div className="cf-modal-header">
-              <h3>Create Wholesale Catalog</h3>
-              <button
-                type="button"
-                className="cf-close-btn"
-                onClick={() => setShowCreateModal(false)}
-              >
-                ✕
-              </button>
+              <div className="cf-wizard-header-inner">
+                <h3>Create Wholesale Catalog</h3>
+                <div className="cf-wizard-steps">
+                  {[1, 2, 3].map((s) => (
+                    <div key={s} className={`cf-wizard-step ${wizardStep === s ? 'active' : ''} ${wizardStep > s ? 'done' : ''}`}>
+                      <span className="cf-wizard-dot">{wizardStep > s ? '✓' : s}</span>
+                      <span className="cf-wizard-label">{s === 1 ? 'Sources' : s === 2 ? 'Pricing' : 'Details'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <button type="button" className="cf-close-btn" onClick={() => setShowCreateModal(false)}>✕</button>
             </div>
-            <form onSubmit={handleCreateCatalog}>
-              <div className="cf-modal-body">
-                <div className="cf-form-group">
-                  <label>Catalog Name</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Summer 2026 Wholesale"
-                    value={newCatalogName}
-                    onChange={(e) => setNewCatalogName(e.target.value)}
-                    className="cf-input"
-                  />
-                </div>
 
-                <div className="cf-form-group">
-                  <label>Pricing Mode</label>
-                  <select
-                    value={newPriceMode}
-                    onChange={(e: any) => setNewPriceMode(e.target.value)}
-                    className="cf-select"
-                  >
-                    <option value="SHOPIFY_PRICE">Shopify Retail Price (No discount)</option>
-                    <option value="PERCENT_DISCOUNT">Catalog-Wide % Wholesale Discount</option>
-                  </select>
-                </div>
+            <div className="cf-modal-body">
 
-                {newPriceMode === 'PERCENT_DISCOUNT' && (
-                  <div className="cf-form-group">
-                    <label>Discount Percentage (%)</label>
+              {/* ── STEP 1: Source Selector ──────────────────────── */}
+              {wizardStep === 1 && (
+                <div className="cf-wizard-pane">
+                  <p className="cf-wizard-hint">Select the Shopify collections or products to include in this catalog.</p>
+
+                  {/* Tab toggle */}
+                  <div className="cf-seg-tabs">
+                    <button
+                      type="button"
+                      className={`cf-seg-tab ${searchTab === 'COLLECTION' ? 'active' : ''}`}
+                      onClick={() => { setSearchTab('COLLECTION'); setSearchQuery(''); setSearchResults([]); }}
+                    >
+                      Collections
+                    </button>
+                    <button
+                      type="button"
+                      className={`cf-seg-tab ${searchTab === 'PRODUCT' ? 'active' : ''}`}
+                      onClick={() => { setSearchTab('PRODUCT'); setSearchQuery(''); setSearchResults([]); }}
+                    >
+                      Products
+                    </button>
+                  </div>
+
+                  {/* Search input */}
+                  <div className="cf-search-bar">
+                    <span className="cf-search-icon">🔍</span>
                     <input
-                      type="number"
-                      min="0"
-                      max="90"
-                      value={newDiscount}
-                      onChange={(e) => setNewDiscount(Number(e.target.value))}
-                      className="cf-input"
+                      id="cf-resource-search"
+                      type="search"
+                      className="cf-input cf-search-input"
+                      placeholder={searchTab === 'COLLECTION' ? 'Search collections…' : 'Search products…'}
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      autoFocus
                     />
                   </div>
-                )}
 
-                <div className="cf-form-group">
-                  <label>Accent Color</label>
-                  <input
-                    type="color"
-                    value={newAccentColor}
-                    onChange={(e) => setNewAccentColor(e.target.value)}
-                    className="cf-color-input"
-                  />
+                  {/* Results list */}
+                  <div className="cf-resource-list">
+                    {searchLoading && <div className="cf-resource-loading"><div className="cf-spinner-sm"></div> Searching…</div>}
+                    {!searchLoading && searchResults.length === 0 && searchQuery.length > 0 && (
+                      <div className="cf-resource-empty">No {searchTab === 'COLLECTION' ? 'collections' : 'products'} found for "{searchQuery}"</div>
+                    )}
+                    {!searchLoading && searchResults.length === 0 && searchQuery.length === 0 && (
+                      <div className="cf-resource-empty">Start typing to search your Shopify {searchTab === 'COLLECTION' ? 'collections' : 'products'}.</div>
+                    )}
+                    {searchResults.map((item) => {
+                      const selected = selectedSources.some((s) => s.id === item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={`cf-resource-row ${selected ? 'selected' : ''}`}
+                          onClick={() => toggleSource(item)}
+                        >
+                          <div className="cf-resource-thumb">
+                            {item.imageUrl
+                              ? <img src={item.imageUrl} alt="" />
+                              : <span className="cf-resource-placeholder">{searchTab === 'COLLECTION' ? '📂' : '📦'}</span>}
+                          </div>
+                          <div className="cf-resource-info">
+                            <span className="cf-resource-title">{item.title}</span>
+                            {item.detail && <span className="cf-resource-detail">{item.detail}</span>}
+                          </div>
+                          <div className="cf-resource-check">{selected ? '✓' : ''}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Selected sources summary */}
+                  {selectedSources.length > 0 && (
+                    <div className="cf-selected-sources">
+                      <p className="cf-selected-label">Selected ({selectedSources.length})</p>
+                      <div className="cf-source-chips">
+                        {selectedSources.map((s) => (
+                          <span key={s.id} className="cf-source-chip">
+                            {s.type === 'COLLECTION' ? '📂' : '📦'} {s.title}
+                            <button type="button" className="cf-chip-remove" onClick={() => removeSource(s.id)}>×</button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
+              )}
 
-                <div className="cf-form-group">
-                  <label>Product Source</label>
-                  <div className="cf-radio-group">
-                    <label>
+              {/* ── STEP 2: Pricing ─────────────────────────────── */}
+              {wizardStep === 2 && (
+                <div className="cf-wizard-pane">
+                  <p className="cf-wizard-hint">Choose how prices will be shown to your wholesale buyers.</p>
+
+                  <div className="cf-pricing-options">
+                    <label className={`cf-pricing-card ${newPriceMode === 'SHOPIFY_PRICE' ? 'selected' : ''}`}>
                       <input
                         type="radio"
-                        name="sourceType"
-                        value="COLLECTION"
-                        checked={newSourceType === 'COLLECTION'}
-                        onChange={() => setNewSourceType('COLLECTION')}
+                        name="priceMode"
+                        value="SHOPIFY_PRICE"
+                        checked={newPriceMode === 'SHOPIFY_PRICE'}
+                        onChange={() => setNewPriceMode('SHOPIFY_PRICE')}
                       />
-                      Collection (Recommended)
+                      <div className="cf-pricing-card-inner">
+                        <span className="cf-pricing-icon">🏷️</span>
+                        <span className="cf-pricing-name">Shopify Retail Price</span>
+                        <span className="cf-pricing-desc">Show prices exactly as set in your Shopify product listings.</span>
+                      </div>
+                    </label>
+
+                    <label className={`cf-pricing-card ${newPriceMode === 'PERCENT_DISCOUNT' ? 'selected' : ''}`}>
+                      <input
+                        type="radio"
+                        name="priceMode"
+                        value="PERCENT_DISCOUNT"
+                        checked={newPriceMode === 'PERCENT_DISCOUNT'}
+                        onChange={() => setNewPriceMode('PERCENT_DISCOUNT')}
+                      />
+                      <div className="cf-pricing-card-inner">
+                        <span className="cf-pricing-icon">💸</span>
+                        <span className="cf-pricing-name">Catalog-Wide Wholesale Discount</span>
+                        <span className="cf-pricing-desc">Apply a uniform % discount off Shopify prices for all items in this catalog.</span>
+                      </div>
                     </label>
                   </div>
-                </div>
 
-                <div className="cf-form-group">
-                  <label>Collection GID (Optional)</label>
-                  <input
-                    type="text"
-                    placeholder="gid://shopify/Collection/... (or leave blank for all)"
-                    value={newSourceGid}
-                    onChange={(e) => setNewSourceGid(e.target.value)}
-                    className="cf-input"
-                  />
+                  {newPriceMode === 'PERCENT_DISCOUNT' && (
+                    <div className="cf-form-group cf-discount-group">
+                      <label htmlFor="cf-discount-pct">Discount Percentage</label>
+                      <div className="cf-discount-row">
+                        <input
+                          id="cf-discount-pct"
+                          type="number"
+                          min={1}
+                          max={90}
+                          value={newDiscount}
+                          onChange={(e) => setNewDiscount(Math.min(90, Math.max(1, Number(e.target.value))))}
+                          className="cf-input cf-input-sm"
+                        />
+                        <span className="cf-discount-pct-label">% off retail</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
+              )}
 
-              <div className="cf-modal-footer">
+              {/* ── STEP 3: Details ─────────────────────────────── */}
+              {wizardStep === 3 && (
+                <div className="cf-wizard-pane">
+                  <p className="cf-wizard-hint">Name your catalog and set branding. You can publish immediately or save as a draft first.</p>
+
+                  <div className="cf-form-group">
+                    <label htmlFor="cf-catalog-name">Catalog Name <span className="cf-required">*</span></label>
+                    <input
+                      id="cf-catalog-name"
+                      type="text"
+                      required
+                      placeholder="e.g. Summer 2026 Wholesale"
+                      value={newCatalogName}
+                      onChange={(e) => setNewCatalogName(e.target.value)}
+                      className="cf-input"
+                      autoFocus
+                    />
+                  </div>
+
+                  <div className="cf-form-group">
+                    <label htmlFor="cf-accent-color">Buyer Portal Accent Color</label>
+                    <div className="cf-color-row">
+                      <input
+                        id="cf-accent-color"
+                        type="color"
+                        value={newAccentColor}
+                        onChange={(e) => setNewAccentColor(e.target.value)}
+                        className="cf-color-input"
+                      />
+                      <span className="cf-color-hex">{newAccentColor}</span>
+                    </div>
+                  </div>
+
+                  {/* Summary */}
+                  <div className="cf-wizard-summary">
+                    <h4>Summary</h4>
+                    <div className="cf-summary-row"><span>Sources</span><span>{selectedSources.length} selected</span></div>
+                    <div className="cf-summary-row"><span>Pricing</span><span>{newPriceMode === 'SHOPIFY_PRICE' ? 'Shopify Price' : `${newDiscount}% Discount`}</span></div>
+                  </div>
+
+                  <label className="cf-publish-toggle">
+                    <input
+                      type="checkbox"
+                      checked={newPublish}
+                      onChange={(e) => setNewPublish(e.target.checked)}
+                      id="cf-publish-on-create"
+                    />
+                    <span>Publish immediately after creation</span>
+                  </label>
+                </div>
+              )}
+
+            </div>{/* cf-modal-body */}
+
+            {/* Footer nav */}
+            <div className="cf-modal-footer">
+              {wizardStep === 1 && (
+                <button type="button" className="cf-btn cf-btn-secondary" onClick={() => setShowCreateModal(false)}>Cancel</button>
+              )}
+              {wizardStep > 1 && (
+                <button type="button" className="cf-btn cf-btn-secondary" onClick={() => setWizardStep((wizardStep - 1) as 1 | 2 | 3)}>← Back</button>
+              )}
+              {wizardStep < 3 && (
                 <button
                   type="button"
-                  className="cf-btn cf-btn-secondary"
-                  onClick={() => setShowCreateModal(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
                   className="cf-btn cf-btn-primary"
-                  disabled={creatingCatalog}
+                  disabled={wizardStep === 1 && selectedSources.length === 0}
+                  onClick={() => setWizardStep((wizardStep + 1) as 2 | 3)}
                 >
-                  {creatingCatalog ? 'Creating...' : 'Create Catalog'}
+                  Next →
                 </button>
-              </div>
-            </form>
+              )}
+              {wizardStep === 3 && (
+                <button
+                  type="button"
+                  className="cf-btn cf-btn-primary"
+                  disabled={creatingCatalog || !newCatalogName.trim()}
+                  onClick={handleCreateCatalog}
+                >
+                  {creatingCatalog ? 'Creating…' : newPublish ? 'Create & Publish' : 'Create Draft'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

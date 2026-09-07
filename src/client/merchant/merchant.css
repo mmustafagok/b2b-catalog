@@ -754,3 +754,476 @@ body {
   gap: 0.75rem;
 }
 
+/* ══════════════════════════════════════════════════════════════
+   CATALOG CREATION WIZARD — 3-STEP
+══════════════════════════════════════════════════════════════ */
+
+/* Wide modal variant for the wizard */
+.cf-modal-wide {
+  max-width: 680px;
+}
+
+/* Wizard header layout */
+.cf-wizard-header-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1;
+}
+
+.cf-wizard-steps {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.cf-wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--cf-text-muted);
+  transition: color 0.2s;
+}
+
+.cf-wizard-step.active {
+  color: var(--cf-primary);
+}
+
+.cf-wizard-step.done {
+  color: #008060;
+}
+
+.cf-wizard-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #e8e8ed;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--cf-text-muted);
+  transition: background 0.2s, color 0.2s;
+}
+
+.cf-wizard-step.active .cf-wizard-dot {
+  background: var(--cf-primary);
+  color: #fff;
+}
+
+.cf-wizard-step.done .cf-wizard-dot {
+  background: #008060;
+  color: #fff;
+}
+
+.cf-wizard-label {
+  font-size: 0.78rem;
+}
+
+/* Wizard pane */
+.cf-wizard-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.cf-wizard-hint {
+  font-size: 0.85rem;
+  color: var(--cf-text-muted);
+  margin: 0;
+}
+
+/* Segmented tabs for Collections / Products */
+.cf-seg-tabs {
+  display: flex;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.cf-seg-tab {
+  padding: 0.45rem 1rem;
+  background: #fafafa;
+  border: none;
+  font-size: 0.83rem;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--cf-text-muted);
+  transition: background 0.15s, color 0.15s;
+}
+
+.cf-seg-tab:not(:last-child) {
+  border-right: 1px solid var(--cf-border);
+}
+
+.cf-seg-tab.active {
+  background: #ffffff;
+  color: var(--cf-text-main);
+  font-weight: 600;
+}
+
+/* Search bar */
+.cf-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  padding: 0 0.75rem;
+  background: #fff;
+  transition: border-color 0.15s;
+}
+
+.cf-search-bar:focus-within {
+  border-color: var(--cf-primary);
+}
+
+.cf-search-icon {
+  font-size: 0.85rem;
+  opacity: 0.5;
+}
+
+.cf-search-input {
+  border: none !important;
+  padding: 0.55rem 0 !important;
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  font-size: 0.88rem;
+}
+
+.cf-search-input:focus {
+  outline: none;
+  border-color: transparent !important;
+}
+
+/* Resource list */
+.cf-resource-list {
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #fff;
+}
+
+.cf-resource-loading,
+.cf-resource-empty {
+  padding: 1.5rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--cf-text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.cf-spinner-sm {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--cf-border);
+  border-top-color: var(--cf-primary);
+  border-radius: 50%;
+  animation: cfSpin 0.7s linear infinite;
+}
+
+@keyframes cfSpin {
+  to { transform: rotate(360deg); }
+}
+
+.cf-resource-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.65rem 0.9rem;
+  border: none;
+  border-bottom: 1px solid var(--cf-border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+}
+
+.cf-resource-row:last-child {
+  border-bottom: none;
+}
+
+.cf-resource-row:hover {
+  background: #f4faf8;
+}
+
+.cf-resource-row.selected {
+  background: #ebf7f3;
+}
+
+.cf-resource-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #f4f6f8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf-resource-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cf-resource-placeholder {
+  font-size: 1.1rem;
+}
+
+.cf-resource-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.cf-resource-title {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--cf-text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf-resource-detail {
+  font-size: 0.75rem;
+  color: var(--cf-text-muted);
+}
+
+.cf-resource-check {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid var(--cf-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  color: #fff;
+  background: transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.cf-resource-row.selected .cf-resource-check {
+  background: var(--cf-primary);
+  border-color: var(--cf-primary);
+}
+
+/* Selected sources chips */
+.cf-selected-sources {
+  border-top: 1px solid var(--cf-border);
+  padding-top: 0.75rem;
+}
+
+.cf-selected-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--cf-text-muted);
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cf-source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.cf-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: #e8f5f0;
+  border: 1px solid #b4dfd4;
+  border-radius: 20px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #006e52;
+}
+
+.cf-chip-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  color: #006e52;
+  padding: 0 0 0 2px;
+  opacity: 0.7;
+  transition: opacity 0.12s;
+}
+
+.cf-chip-remove:hover {
+  opacity: 1;
+}
+
+/* Step 2: Pricing cards */
+.cf-pricing-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.cf-pricing-card {
+  border: 2px solid var(--cf-border);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.cf-pricing-card:hover {
+  border-color: #b4dfd4;
+  background: #fafdfc;
+}
+
+.cf-pricing-card.selected {
+  border-color: var(--cf-primary);
+  background: #f0fdf8;
+}
+
+.cf-pricing-card input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--cf-primary);
+}
+
+.cf-pricing-card-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.cf-pricing-icon {
+  font-size: 1.3rem;
+}
+
+.cf-pricing-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.cf-pricing-desc {
+  font-size: 0.8rem;
+  color: var(--cf-text-muted);
+  line-height: 1.5;
+}
+
+.cf-discount-group {
+  padding: 0.75rem 1rem;
+  background: #f6f6f7;
+  border-radius: 8px;
+}
+
+.cf-discount-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.cf-input-sm {
+  max-width: 80px;
+}
+
+.cf-discount-pct-label {
+  font-size: 0.85rem;
+  color: var(--cf-text-muted);
+}
+
+/* Step 3: Summary & publish toggle */
+.cf-wizard-summary {
+  background: #f4f6f8;
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.cf-wizard-summary h4 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--cf-text-muted);
+  margin-bottom: 0.35rem;
+  font-weight: 700;
+}
+
+.cf-summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--cf-text-main);
+}
+
+.cf-summary-row span:first-child {
+  color: var(--cf-text-muted);
+}
+
+.cf-publish-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--cf-text-main);
+  user-select: none;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  transition: background 0.12s;
+}
+
+.cf-publish-toggle:hover {
+  background: #f4faf8;
+}
+
+.cf-publish-toggle input {
+  accent-color: var(--cf-primary);
+}
+
+/* Color row */
+.cf-color-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.cf-color-hex {
+  font-size: 0.82rem;
+  font-family: monospace;
+  color: var(--cf-text-muted);
+}
+
+/* Required asterisk */
+.cf-required {
+  color: var(--cf-error);
+}
+
+/* Wizard modal-body override */
+.cf-modal-wide .cf-modal-body {
+  max-height: 52vh;
+  overflow-y: auto;
+}
+

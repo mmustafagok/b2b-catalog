@@ -84,15 +84,16 @@ export const BuyerInfoSchema = z.object({
   note: z.string().trim().max(1000, 'Note exceeds maximum length').optional().nullable(),
 });
 
+// Shopify Draft Orders support at most 500 line items; cap at 499 to stay safely within the limit.
 export const BuyerSubmitOrderSchema = z.object({
   dataVersion: z.number().int().positive(),
-  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(500, 'Maximum allowable line items per order is 500'),
+  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(499, 'Maximum allowable line items per order is 499 (Shopify limit)'),
   buyer: BuyerInfoSchema,
 });
 
 export const BuyerValidateOrderSchema = z.object({
   dataVersion: z.number().int().positive(),
-  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(500, 'Maximum allowable line items per order is 500'),
+  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(499, 'Maximum allowable line items per order is 499 (Shopify limit)'),
 });
 
 export type BuyerOrderLine = z.infer<typeof BuyerOrderLineSchema>;

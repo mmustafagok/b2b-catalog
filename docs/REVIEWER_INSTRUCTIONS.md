@@ -20,16 +20,29 @@
 2. Verify the embedded admin app opens seamlessly without redirection outside Shopify Admin.
 3. Confirm that CatalogFlow initiates an automated initial sync, creating snapshots of the store's active products, variants, and collections.
 
-### 2. Create a Wholesale Catalog
+### 2. Create a Wholesale Catalog (3-Step Wizard)
 1. Click the **Catalogs** tab in the top navigation.
-2. Click **Create New Catalog**.
-3. Fill in the catalog details:
-   - **Catalog Name:** e.g., `Wholesale Spring 2026`
-   - **Price Mode:** Select **Wholesale % Discount Mode** (e.g., `20% Off`).
-   - **Catalog Sources:** Select one or more products or collections.
-   - **Display Options:** Check **Show SKU** and **Show Inventory Count**.
-4. Click **Save & Publish Catalog**.
-5. Verify the catalog status transitions to **PUBLISHED** and a public buyer link is generated.
+2. Click **Create New Catalog** (or **Create Your First Catalog**).
+3. The 3-step wizard opens:
+
+   **Step 1 — Sources:**
+   - Toggle between **Collections** and **Products** using the segmented tab.
+   - Type in the search box to find Shopify collections or products by name. Results are loaded from your Shopify store's live Admin API.
+   - Click any result row to select it (a ✓ checkmark appears). Selected sources appear as chips at the bottom.
+   - You must select at least one source to proceed. The **Next →** button is disabled until a source is selected.
+
+   **Step 2 — Pricing:**
+   - Choose **Shopify Retail Price** (no modification) or **Catalog-Wide Wholesale Discount** (uniform % off retail).
+   - If discount is selected, set the percentage (1–90%).
+
+   **Step 3 — Details:**
+   - Enter a **Catalog Name** (e.g., `Wholesale Spring 2026`).
+   - Pick an **Accent Color** for the buyer portal branding.
+   - Review the summary (sources count, pricing mode).
+   - Optionally tick **Publish immediately after creation**.
+   - Click **Create Draft** or **Create & Publish**.
+
+4. Verify the catalog appears in the list with the correct status (DRAFT or PUBLISHED).
 
 ### 3. Open Wholesale Buyer Portal
 1. Click **Copy Buyer Link** (or click **Open Buyer Portal ↗**).

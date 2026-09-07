@@ -140,21 +140,49 @@ describe('Milestone 9: Production Hardening, Reliability, Edge Cases, Performanc
       expect(res.headers).toHaveProperty('x-ratelimit-remaining');
     });
 
-    it('rejects submissions with over 500 line items with 400 Bad Request', async () => {
+    it('accepts exactly 499 line items (Shopify limit)', async () => {
       const cat = await createCatalog(shopA.id, {
-        name: 'Public Cat',
+        name: 'Public Cat 499',
         sources: [{ type: CatalogSourceType.COLLECTION, shopifyGid: 'gid://shopify/Collection/111' }],
       });
       await publishCatalog(shopA.id, cat.id);
 
-      const hugeLines = Array.from({ length: 501 }, (_, i) => ({
-        variantId: `gid://shopify/ProductVariant/${1000 + i}`,
+      const lines499 = Array.from({ length: 499 }, (_, i) => ({
+        variantId: `gid://shopify/ProductVariant/${2000 + i}`,
+        quantity: 1,
+      }));
+
+      // This should NOT be rejected by schema validation (may fail on catalog auth/quota but not on line count)
+      const res = await request(app)
+        .post(`/api/public/catalog/${cat.publicToken}/submit`)
+        .set('Idempotency-Key', 'line-limit-499-test')
+        .send({
+          dataVersion: cat.dataVersion,
+          buyer: { businessName: 'Big Order Corp', email: 'orders@bigcorp.com' },
+          lines: lines499,
+        });
+
+      // Must NOT be a 400 caused by "maximum allowable line items" validation
+      if (res.status === 400) {
+        expect(res.body.error).not.toMatch(/maximum allowable line items/i);
+      }
+    });
+
+    it('rejects submissions with 500 or more line items with 400 Bad Request', async () => {
+      const cat = await createCatalog(shopA.id, {
+        name: 'Public Cat 500',
+        sources: [{ type: CatalogSourceType.COLLECTION, shopifyGid: 'gid://shopify/Collection/111' }],
+      });
+      await publishCatalog(shopA.id, cat.id);
+
+      const hugeLines = Array.from({ length: 500 }, (_, i) => ({
+        variantId: `gid://shopify/ProductVariant/${3000 + i}`,
         quantity: 1,
       }));
 
       const res = await request(app)
         .post(`/api/public/catalog/${cat.publicToken}/submit`)
-        .set('Idempotency-Key', 'huge-lines-test')
+        .set('Idempotency-Key', 'line-limit-500-test')
         .send({
           dataVersion: cat.dataVersion,
           buyer: { businessName: 'Big Order Corp', email: 'orders@bigcorp.com' },
@@ -384,6 +412,67 @@ describe('Milestone 9: Production Hardening, Reliability, Edge Cases, Performanc
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty('status', 'ready');
       expect(res.body).toHaveProperty('database', 'connected');
+    });
+  });
+
+  // ─── Phase A: Public Legal Routes ──────────────────────────────────────────
+
+  describe('A5: Public Legal / Support Routes', () => {
+    it('GET /privacy returns 200 with HTML content (no auth required)', async () => {
+      const res = await request(app).get('/privacy');
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/text\/html/);
+      expect(res.text).toMatch(/privacy/i);
+      expect(res.text).toMatch(/CatalogFlow/i);
+    });
+
+    it('GET /terms returns 200 with HTML content (no auth required)', async () => {
+      const res = await request(app).get('/terms');
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/text\/html/);
+      expect(res.text).toMatch(/terms/i);
+      expect(res.text).toMatch(/CatalogFlow/i);
+    });
+
+    it('GET /support returns 200 with HTML content (no auth required)', async () => {
+      const res = await request(app).get('/support');
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/text\/html/);
+      expect(res.text).toMatch(/support/i);
+      expect(res.text).toMatch(/CatalogFlow/i);
+    });
+  });
+
+  // ─── Phase A: Empty Catalog Publish Validation ──────────────────────────────
+
+  describe('A3: Empty catalog cannot be published', () => {
+    it('rejects publishing a catalog with no sources with 422 NO_SOURCES', async () => {
+      // Create a catalog without sources by bypassing the Zod validation at API level
+      // (sources are required by Zod on creation, so inject directly via service)
+      const { prisma: db } = await import('../src/db.js');
+      const { generateOpaqueToken } = await import('../src/services/auth.server.js');
+      const token = generateOpaqueToken();
+      const emptyCat = await db.catalog.create({
+        data: {
+          shopId: shopA.id,
+          name: 'Empty Cat',
+          publicToken: token,
+          status: 'DRAFT',
+          priceMode: 'SHOPIFY_PRICE',
+          discountPercent: 0,
+          accentColor: '#108043',
+          showSku: true,
+          showInventory: false,
+          dataVersion: 1,
+        },
+      });
+
+      const { publishCatalog: pub } = await import('../src/services/catalog.server.js');
+      await expect(pub(shopA.id, emptyCat.id)).rejects.toMatchObject({
+        code: 'NO_SOURCES',
+      });
+
+      await db.catalog.delete({ where: { id: emptyCat.id } });
     });
   });
 });

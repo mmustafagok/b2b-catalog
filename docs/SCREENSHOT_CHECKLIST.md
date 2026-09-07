@@ -14,15 +14,16 @@
 - **Visual:** Active catalog cards, commercial funnel metrics (Catalog Views $\rightarrow$ Draft Orders Created), monthly quota progress bar, and recent buyer submissions table.
 - **Key Caption:** "Real-time wholesale overview: track buyer engagement, conversion funnels, and draft order quotas."
 
-### 2. Wholesale Catalog Creation & Rules
-- **Location:** Catalog Creation Modal / Form
-- **Visual:** Catalog name, wholesale % discount selector, collection and product source selectors, SKU and inventory display toggles.
-- **Key Caption:** "Curate wholesale catalogs in seconds using collections, explicit products, or percentage discounts."
+### 2. 3-Step Catalog Creation Wizard — Step 1: Sources
+- **Location:** Create Catalog wizard, Step 1
+- **Visual:** Wizard header with step indicators (Sources ✓, Pricing, Details), segmented tab toggle between Collections and Products, search input box with results list showing collection/product thumbnails, names, and product counts. Selected sources shown as chips.
+- **Key Caption:** "Build a wholesale catalog in 3 steps: search and select Shopify collections or products with a real-time search selector."
 
-### 3. Product & Collection Sourcing
-- **Location:** Sourced Collection / Product Selector
-- **Visual:** Clean list of mirrored Shopify products and smart collections available for inclusion.
-- **Key Caption:** "Automatically synchronize with Shopify inventory and smart collections."
+### 3. Catalog Creation Wizard — Step 2 & 3: Pricing + Details
+- **Location:** Create Catalog wizard, Steps 2 and 3
+- **Visual (Step 2):** Two pricing option cards — "Shopify Retail Price" and "Catalog-Wide Wholesale Discount" (with % input visible when selected).
+- **Visual (Step 3):** Catalog name input, accent color picker with hex preview, summary card showing sources count and pricing mode, "Publish immediately" checkbox, and "Create & Publish" CTA.
+- **Key Caption:** "Choose a pricing mode and name your catalog — then publish or save as a draft."
 
 ### 4. Wholesale Buyer Portal (Public View)
 - **Location:** Buyer Portal (`/c/:token`)

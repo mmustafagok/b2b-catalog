@@ -693,6 +693,83 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
   return next();
 }
 
+// ==========================================
+// ADMIN: PRODUCT & COLLECTION SEARCH (A1)
+// Used by wizard Step 1 ResourceSelector — merchant-facing, no raw GID entry.
+// ==========================================
+
+app.get('/api/admin/products/search', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 100);
+    const limit = Math.min(Number(req.query.limit) || 10, 50);
+    const { createShopifyClient } = await import('./services/shopify-client.server.js');
+    const client = createShopifyClient(req.shop);
+    const gqlQuery = `
+      query searchProducts($query: String!, $first: Int!) {
+        products(query: $query, first: $first) {
+          edges {
+            node {
+              id
+              title
+              handle
+              status
+              featuredImage { url }
+              variants(first: 1) { edges { node { price } } }
+            }
+          }
+        }
+      }
+    `;
+    const data: any = await client.request(gqlQuery, { query: q ? `title:*${q}*` : 'status:ACTIVE', first: limit });
+    const products = (data?.products?.edges || []).map((e: any) => ({
+      id: e.node.id,
+      title: e.node.title,
+      handle: e.node.handle,
+      status: e.node.status,
+      imageUrl: e.node.featuredImage?.url || null,
+      price: e.node.variants?.edges?.[0]?.node?.price || null,
+    }));
+    return res.status(200).json({ products });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.get('/api/admin/collections/search', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 100);
+    const limit = Math.min(Number(req.query.limit) || 10, 50);
+    const { createShopifyClient } = await import('./services/shopify-client.server.js');
+    const client = createShopifyClient(req.shop);
+    const gqlQuery = `
+      query searchCollections($query: String!, $first: Int!) {
+        collections(query: $query, first: $first) {
+          edges {
+            node {
+              id
+              title
+              handle
+              productsCount { count }
+              image { url }
+            }
+          }
+        }
+      }
+    `;
+    const data: any = await client.request(gqlQuery, { query: q ? `title:*${q}*` : '', first: limit });
+    const collections = (data?.collections?.edges || []).map((e: any) => ({
+      id: e.node.id,
+      title: e.node.title,
+      handle: e.node.handle,
+      productsCount: e.node.productsCount?.count ?? null,
+      imageUrl: e.node.image?.url || null,
+    }));
+    return res.status(200).json({ collections });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
 app.get('/api/admin/catalogs', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
     const catalogs = await getCatalogsByShop(req.shop.id);
@@ -902,6 +979,146 @@ app.post('/api/admin/sync/trigger', adminAuthMiddleware, async (req: any, res: R
     }
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }
+});
+
+// ==========================================
+// PUBLIC LEGAL / SUPPORT PAGES (A5)
+// Required for Shopify App Store submission.
+// Must be accessible without authentication.
+// ==========================================
+
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@catalogflow.app';
+const APP_DOMAIN = process.env.APP_DOMAIN || 'catalogflow.app';
+
+function legalPageHtml(title: string, body: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${title} — CatalogFlow</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;padding:2rem 1rem}
+    .wrap{max-width:760px;margin:0 auto}
+    header{margin-bottom:2.5rem;padding-bottom:1.5rem;border-bottom:1px solid #1e293b}
+    .logo{font-size:1.1rem;font-weight:700;color:#6366f1;letter-spacing:.5px;margin-bottom:.5rem}
+    h1{font-size:2rem;font-weight:700;margin-bottom:.5rem}
+    .updated{color:#64748b;font-size:.875rem}
+    h2{font-size:1.2rem;font-weight:600;color:#a5b4fc;margin:2rem 0 .65rem}
+    p,li{font-size:.9375rem;line-height:1.75;color:#cbd5e1;margin-bottom:.75rem}
+    ul{padding-left:1.5rem;margin-bottom:.75rem}
+    a{color:#818cf8}
+    footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid #1e293b;color:#475569;font-size:.85rem;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">⚡ CatalogFlow</div>
+      <h1>${title}</h1>
+      <p class="updated">Last updated: September 2026</p>
+    </header>
+    ${body}
+    <footer>© 2026 CatalogFlow &nbsp;·&nbsp; <a href="/privacy">Privacy</a> &nbsp;·&nbsp; <a href="/terms">Terms</a> &nbsp;·&nbsp; <a href="/support">Support</a></footer>
+  </div>
+</body>
+</html>`;
+}
+
+app.get('/privacy', (_req: Request, res: Response) => {
+  const body = `
+    <h2>1. What We Collect</h2>
+    <p>CatalogFlow collects only the Shopify store data required to operate the app: product and collection snapshots from your Shopify catalogue, order submissions made by your wholesale buyers (business name, email, PO number, note, and ordered line items), and usage metadata required for billing entitlement and quota enforcement.</p>
+    <p>We do <strong>not</strong> collect end-consumer payment card data. Payment and financial data is handled exclusively by Shopify.</p>
+
+    <h2>2. How We Use Your Data</h2>
+    <ul>
+      <li>Product and collection snapshots are stored locally to build live wholesale catalog pages for your buyers without querying Shopify on every page load.</li>
+      <li>Buyer order submission data (name, email, line items) is forwarded to Shopify as a Draft Order and retained in the app database for order history and reconciliation.</li>
+      <li>Usage metrics (submissions count, catalog count, variant count) are used to enforce plan quota limits.</li>
+    </ul>
+
+    <h2>3. Data Retention</h2>
+    <p>Buyer order submissions (including business name and email) are retained for operational purposes. Product snapshots are refreshed via Shopify webhooks and are removed when a product or collection is deleted in Shopify. When you uninstall CatalogFlow, all shop data is scheduled for deletion within 48 hours, in compliance with Shopify GDPR webhook requirements (<code>shop/redact</code>, <code>customers/redact</code>).</p>
+
+    <h2>4. Data Sharing</h2>
+    <p>We do not sell, rent, or share your data with third parties for marketing purposes. Data is shared only as required to operate the service: with Shopify (to create Draft Orders on your behalf) and with our infrastructure provider (Railway) for application hosting. Railway is a SOC 2 compliant platform.</p>
+
+    <h2>5. Security</h2>
+    <p>All Shopify access tokens are encrypted at rest using AES-256-GCM before database storage. Data in transit is protected by TLS 1.2+. We apply rate limiting on all public endpoints and enforce strict per-shop tenant isolation to prevent cross-merchant data access.</p>
+
+    <h2>6. Your Rights</h2>
+    <p>You may request data export or deletion at any time by contacting us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>. Uninstalling the app from your Shopify Admin automatically triggers our GDPR data deletion workflow.</p>
+
+    <h2>7. Contact</h2>
+    <p>For privacy inquiries: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>
+  `;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(legalPageHtml('Privacy Policy', body));
+});
+
+app.get('/terms', (_req: Request, res: Response) => {
+  const body = `
+    <h2>1. Acceptance</h2>
+    <p>By installing or using CatalogFlow ("the App"), you agree to these Terms of Service. If you do not agree, please uninstall the App from your Shopify Admin.</p>
+
+    <h2>2. Description of Service</h2>
+    <p>CatalogFlow enables Shopify merchants to create wholesale product catalogs and accept bulk variant orders from B2B buyers. Buyer submissions are created as Shopify Draft Orders in the merchant's Shopify Admin. The App does not process payments; all payment and fulfillment remain under Shopify's control.</p>
+
+    <h2>3. Subscription and Billing</h2>
+    <p>CatalogFlow is offered on a subscription basis through Shopify App Pricing. Your plan determines the number of live catalogs, maximum variants per catalog, and monthly order submission limits. Billing, upgrades, and cancellations are managed through your Shopify account under Shopify's standard billing terms.</p>
+
+    <h2>4. Acceptable Use</h2>
+    <ul>
+      <li>You must not use the App to create catalogs or solicit orders for products that violate Shopify's Acceptable Use Policy.</li>
+      <li>You must not attempt to circumvent plan quota limits, rate limiting, or authentication mechanisms.</li>
+      <li>You are responsible for ensuring product pricing, availability, and descriptions in your Shopify store are accurate.</li>
+    </ul>
+
+    <h2>5. Intellectual Property</h2>
+    <p>All App software, design, and documentation is the property of CatalogFlow. You are granted a limited, non-exclusive, non-transferable license to use the App for its intended purpose during your active subscription.</p>
+
+    <h2>6. Limitation of Liability</h2>
+    <p>To the maximum extent permitted by law, the App is provided "as is" without warranties of any kind. We are not liable for lost orders, buyer disputes, revenue impacts, or data loss arising from App downtime, data synchronization delays, or Shopify API outages.</p>
+
+    <h2>7. Termination</h2>
+    <p>Either party may terminate this agreement at any time. You may uninstall the App from your Shopify Admin. We may suspend access for violations of these Terms.</p>
+
+    <h2>8. Changes to Terms</h2>
+    <p>We may update these Terms with reasonable advance notice. Continued use of the App after changes take effect constitutes acceptance of the updated Terms.</p>
+
+    <h2>9. Contact</h2>
+    <p>Legal inquiries: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>
+  `;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(legalPageHtml('Terms of Service', body));
+});
+
+app.get('/support', (_req: Request, res: Response) => {
+  const body = `
+    <h2>Get Help with CatalogFlow</h2>
+    <p>We're here to help you get the most out of your wholesale catalog setup. Reach out via the channel below.</p>
+
+    <h2>📧 Email Support</h2>
+    <p><a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>
+    <p>We typically respond within 1–2 business days (Monday–Friday).</p>
+
+    <h2>📚 Common Questions</h2>
+    <ul>
+      <li><strong>How do I create a catalog?</strong> — In the CatalogFlow app, click "Create Catalog", search and select your products or collections in Step 1, choose a pricing mode in Step 2, then set a catalog name and publish in Step 3.</li>
+      <li><strong>How do buyers place orders?</strong> — Share your catalog link with buyers. They browse products, select variants and quantities, fill in their business details, and submit. The order appears as a Shopify Draft Order in your Shopify Admin.</li>
+      <li><strong>How do I upgrade my plan?</strong> — Go to the Billing &amp; Quotas tab in CatalogFlow. Plan changes are handled through Shopify App Pricing in your existing Shopify account.</li>
+      <li><strong>Why is my order showing as "Requires Reconciliation"?</strong> — This means the order was submitted but Shopify confirmation could not be verified immediately. Use the Reconcile button in the Submissions tab to check the order status. Contact support if reconciliation fails repeatedly.</li>
+      <li><strong>How do I delete my data?</strong> — Uninstall the App from your Shopify Admin. All data is deleted within 48 hours per our Privacy Policy. You may also email us to request earlier deletion.</li>
+    </ul>
+
+    <h2>🌐 App Information</h2>
+    <p>App domain: ${APP_DOMAIN}</p>
+    <p><a href="/privacy">Privacy Policy</a> &nbsp;·&nbsp; <a href="/terms">Terms of Service</a></p>
+  `;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(legalPageHtml('Support', body));
 });
 
 // ==========================================
