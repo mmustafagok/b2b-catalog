@@ -11,6 +11,7 @@ export async function installOrUpdateShop(data: {
   scopes?: string | null;
   currency?: string;
   initialSyncAt?: Date | null;
+  plan?: PlanTier;
 }) {
   const encryptedToken = encryptToken(data.accessToken);
   const encryptedRefreshToken = data.refreshToken ? encryptToken(data.refreshToken) : null;
@@ -30,6 +31,7 @@ export async function installOrUpdateShop(data: {
         refreshTokenExpiresAt: data.refreshTokenExpiresAt !== undefined ? data.refreshTokenExpiresAt : existingShop.refreshTokenExpiresAt,
         scopes: data.scopes || existingShop.scopes,
         currency: data.currency || existingShop.currency,
+        plan: data.plan || existingShop.plan,
         initialSyncAt: isReinstall ? null : (data.initialSyncAt !== undefined ? data.initialSyncAt : existingShop.initialSyncAt),
         uninstalledAt: null, // Reactivate if uninstalled
         updatedAt: new Date(),
@@ -46,7 +48,7 @@ export async function installOrUpdateShop(data: {
       refreshTokenExpiresAt: data.refreshTokenExpiresAt || null,
       scopes: data.scopes || null,
       currency: data.currency || 'USD',
-      plan: PlanTier.STARTER,
+      plan: data.plan || PlanTier.STARTER,
       billingCycleAnchor: new Date(),
       monthlySubmissionsCount: 0,
       initialSyncAt: data.initialSyncAt || null,

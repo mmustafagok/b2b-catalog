@@ -16,6 +16,13 @@ import {
 } from './services/sync.server.js';
 import { validateBuyerOrderLines } from './services/validation.server.js';
 import {
+  submitBuyerOrder,
+  getSubmissionsByShop,
+  getSyncHealthSummary,
+  OrderSubmissionError,
+  CatalogDataChangedError,
+} from './services/order.server.js';
+import {
   createCatalog,
   updateCatalog,
   publishCatalog,
@@ -76,6 +83,12 @@ const publicRateLimiter = createRateLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 120, // 120 requests per minute per IP
   message: 'Too many catalog requests. Please wait a moment.',
+});
+
+const submitRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30, // 30 order submit attempts per minute per IP
+  message: 'Too many order submissions. Please wait a moment.',
 });
 
 // ==========================================
@@ -198,6 +211,55 @@ app.post('/api/public/catalog/:publicToken/validate', publicRateLimiter, async (
     return res.status(200).json(result);
   } catch (error: any) {
     return res.status(400).json({ error: sanitizeErrorMessage(error) });
+  }
+});
+
+// 3. Buyer Order Submission (M5)
+app.post('/api/public/catalog/:publicToken/submit', submitRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { publicToken } = req.params;
+    const idempotencyKey = (req.get('Idempotency-Key') || req.get('idempotency-key') || '').trim();
+
+    if (!isValidPublicToken(publicToken)) {
+      return res.status(400).json({ error: 'Invalid catalog token format' });
+    }
+
+    if (!idempotencyKey) {
+      return res.status(400).json({ error: 'Missing required Idempotency-Key header' });
+    }
+
+    const result = await submitBuyerOrder(publicToken, idempotencyKey, req.body);
+    return res.status(201).json(result);
+  } catch (error: any) {
+    if (error instanceof CatalogDataChangedError) {
+      return res.status(409).json({
+        error: error.message,
+        code: error.code,
+        changedLines: error.changedLines,
+      });
+    }
+
+    if (error instanceof OrderSubmissionError) {
+      switch (error.code) {
+        case 'CATALOG_NOT_FOUND':
+        case 'CATALOG_NOT_PUBLISHED':
+          return res.status(404).json({ error: error.message, code: error.code });
+        case 'QUOTA_EXCEEDED':
+          return res.status(403).json({ error: error.message, code: error.code });
+        case 'EMPTY_ORDER':
+        case 'INVALID_INPUT':
+        case 'VALIDATION_FAILED':
+          return res.status(422).json({ error: error.message, code: error.code, details: error.details });
+        case 'SHOP_UNAVAILABLE':
+          return res.status(503).json({ error: error.message, code: error.code });
+        case 'SHOPIFY_API_ERROR':
+          return res.status(502).json({ error: error.message, code: error.code, details: error.details });
+        default:
+          return res.status(400).json({ error: error.message, code: error.code });
+      }
+    }
+
+    return res.status(500).json({ error: sanitizeErrorMessage(error) });
   }
 });
 
@@ -635,6 +697,43 @@ app.post('/api/admin/bootstrap', adminAuthMiddleware, async (req: any, res: Resp
         installed: !shop.uninstalledAt,
       },
     });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Submissions history (M6)
+app.get('/api/admin/submissions', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const page = parseInt(req.query.page as string, 10) || 1;
+    const pageSize = parseInt(req.query.pageSize as string, 10) || 20;
+    const catalogId = req.query.catalogId ? String(req.query.catalogId) : undefined;
+
+    const result = await getSubmissionsByShop(req.shop.id, { page, pageSize, catalogId });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Sync health overview (M6)
+app.get('/api/admin/sync/health', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const health = await getSyncHealthSummary(req.shop.id);
+    return res.status(200).json(health);
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Manual Sync Trigger (M6)
+app.post('/api/admin/sync/trigger', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    performInitialShopSync(req.shop.id).catch((err) => {
+      console.error('Manual sync failed for shop:', req.shop.shopDomain, sanitizeErrorMessage(err));
+    });
+
+    return res.status(200).json({ success: true, message: 'Sync initiated' });
   } catch (err: any) {
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }

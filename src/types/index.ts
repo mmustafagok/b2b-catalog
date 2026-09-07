@@ -87,3 +87,9 @@ export const BuyerValidateOrderSchema = z.object({
   dataVersion: z.number().int().positive(),
   lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required'),
 });
+
+export type BuyerOrderLine = z.infer<typeof BuyerOrderLineSchema>;
+export type BuyerInfo = z.infer<typeof BuyerInfoSchema>;
+export type BuyerSubmitOrderInput = z.infer<typeof BuyerSubmitOrderSchema>;
+export type BuyerValidateOrderInput = z.infer<typeof BuyerValidateOrderSchema>;
+
