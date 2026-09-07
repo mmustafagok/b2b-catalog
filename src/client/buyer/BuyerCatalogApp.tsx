@@ -210,10 +210,59 @@ export const BuyerCatalogApp: React.FC = () => {
   }
 
   if (error || !data) {
+    const isUnpublished = error?.toLowerCase().includes('inactive') || error?.toLowerCase().includes('not found');
+    const isStoreInactive = error?.toLowerCase().includes('store');
+    const isQuota = error?.toLowerCase().includes('quota') || error?.toLowerCase().includes('limit');
+
     return (
-      <div className="portal-container" style={{ textAlign: 'center', padding: '4rem' }}>
-        <h2 style={{ fontSize: '1.5rem', marginBottom: '0.5rem', color: '#0f172a' }}>Catalog Unavailable</h2>
-        <p style={{ color: '#64748b' }}>{error || 'Catalog not found'}</p>
+      <div className="portal-container" style={{ maxWidth: '600px', margin: '4rem auto', textAlign: 'center' }}>
+        <div
+          style={{
+            background: '#ffffff',
+            padding: '3rem 2rem',
+            borderRadius: '16px',
+            border: '1px solid #e2e8f0',
+            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)',
+          }}
+        >
+          <div
+            style={{
+              width: '64px',
+              height: '64px',
+              background: isQuota ? '#fef3c7' : '#fee2e2',
+              borderRadius: '50%',
+              margin: '0 auto 1.5rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '1.75rem',
+              color: isQuota ? '#d97706' : '#dc2626',
+            }}
+          >
+            {isQuota ? '⚠️' : '🔒'}
+          </div>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.75rem', color: '#0f172a' }}>
+            {isQuota
+              ? 'Catalog Temporarily Unavailable'
+              : isStoreInactive
+              ? 'Store Temporarily Inactive'
+              : isUnpublished
+              ? 'Catalog Unavailable'
+              : 'Catalog Unavailable'}
+          </h2>
+          <p style={{ color: '#64748b', lineHeight: 1.6, marginBottom: '1.5rem' }}>
+            {error ||
+              'This wholesale catalog is either unpublished, private, or has reached its ordering limit. Please contact the merchant directly for assistance.'}
+          </p>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => window.location.reload()}
+            style={{ padding: '0.65rem 1.25rem', fontSize: '0.9rem' }}
+          >
+            ↻ Try Refreshing Page
+          </button>
+        </div>
       </div>
     );
   }
@@ -327,8 +376,16 @@ export const BuyerCatalogApp: React.FC = () => {
 
       {/* Product List */}
       <div className="product-list">
-        {filteredProducts.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '3rem', background: '#fff', borderRadius: '12px' }}>
+        {data.products.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '4rem 2rem', background: '#fff', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+            <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>📦</div>
+            <h3 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>Catalog in Preparation</h3>
+            <p style={{ color: '#64748b', maxWidth: '400px', margin: '0 auto' }}>
+              Products are currently being prepared for wholesale by {data.shop.shopDomain}. Please check back shortly.
+            </p>
+          </div>
+        ) : filteredProducts.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '3rem', background: '#fff', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
             <p style={{ color: '#64748b' }}>No products matching "{searchQuery}"</p>
           </div>
         ) : (

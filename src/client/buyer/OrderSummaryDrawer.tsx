@@ -214,7 +214,26 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                 marginBottom: '1rem',
               }}
             >
-              {clientError || errorMessage}
+              <div>{clientError || errorMessage}</div>
+              {errorMessage && errorMessage.toLowerCase().includes('changed') && (
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  style={{
+                    marginTop: '0.5rem',
+                    background: '#b91c1c',
+                    color: '#ffffff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '0.35rem 0.75rem',
+                    fontSize: '0.8rem',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                  }}
+                >
+                  ↻ Refresh Catalog with Latest Prices
+                </button>
+              )}
             </div>
           )}
 

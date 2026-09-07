@@ -36,6 +36,13 @@ export enum CatalogStatus {
   ARCHIVED = 'ARCHIVED',
 }
 
+export enum SubmissionStatus {
+  CREATING = 'CREATING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+  REQUIRES_RECONCILIATION = 'REQUIRES_RECONCILIATION',
+}
+
 export enum PriceMode {
   SHOPIFY_PRICE = 'SHOPIFY_PRICE',
   PERCENT_DISCOUNT = 'PERCENT_DISCOUNT',
@@ -66,26 +73,26 @@ export const CreateCatalogInputSchema = z.object({
 export const UpdateCatalogInputSchema = CreateCatalogInputSchema.partial();
 
 export const BuyerOrderLineSchema = z.object({
-  variantId: z.string().min(1, 'Variant ID is required'),
-  quantity: z.number().int().positive('Quantity must be an integer greater than 0'),
+  variantId: z.string().min(1, 'Variant ID is required').max(150, 'Variant ID exceeds maximum length'),
+  quantity: z.number().int().min(1, 'Quantity must be at least 1').max(100000, 'Quantity exceeds maximum allowable line limit (100,000)'),
 });
 
 export const BuyerInfoSchema = z.object({
-  businessName: z.string().trim().min(1, 'Business name is required').max(150),
-  email: z.string().trim().email('Valid buyer email is required'),
-  poNumber: z.string().trim().max(50).optional().nullable(),
-  note: z.string().trim().max(1000).optional().nullable(),
+  businessName: z.string().trim().min(1, 'Business name is required').max(150, 'Business name exceeds maximum length'),
+  email: z.string().trim().email('Valid buyer email is required').max(150, 'Email exceeds maximum length'),
+  poNumber: z.string().trim().max(50, 'PO number exceeds maximum length').optional().nullable(),
+  note: z.string().trim().max(1000, 'Note exceeds maximum length').optional().nullable(),
 });
 
 export const BuyerSubmitOrderSchema = z.object({
   dataVersion: z.number().int().positive(),
-  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(499, 'Shopify Draft Order line item limit is 499'),
+  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(500, 'Maximum allowable line items per order is 500'),
   buyer: BuyerInfoSchema,
 });
 
 export const BuyerValidateOrderSchema = z.object({
   dataVersion: z.number().int().positive(),
-  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required'),
+  lines: z.array(BuyerOrderLineSchema).min(1, 'At least one line item is required').max(500, 'Maximum allowable line items per order is 500'),
 });
 
 export type BuyerOrderLine = z.infer<typeof BuyerOrderLineSchema>;

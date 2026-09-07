@@ -185,3 +185,42 @@ npm run typecheck
 - **Privacy & Metadata:**
   - Draft Order custom attributes strictly exclude `CatalogFlow Public Token` and raw idempotency key.
   - Local database stores no raw buyer email or notes.
+
+### 3.9 Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Analytics (`tests/m7_m8_billing_and_analytics.test.ts` — 29 Tests)
+- Plan tier models (Starter, Growth, Scale) with defined limits for live catalogs, variants, and monthly submissions.
+- Commercial entitlement boundary enforcement:
+  - Max live catalogs enforcement on publishing.
+  - Max variants per catalog limit enforcement.
+  - Monthly submission hard quotas resolved through `BillingProvider`.
+- Self-service plan changes blocked in production (Shopify App Pricing model).
+- Dev/test plan overrides permitted strictly in non-production environments.
+- Downgrade prevention if active resource counts exceed target plan limit.
+- Product analytics funnel tracking:
+  - `catalog_viewed`
+  - `order_summary_started`
+  - `order_submitted`
+  - `draft_order_created` (North Star metric)
+- PII-free allowlist metadata sanitization.
+
+### 3.10 Milestone 9: Production Hardening, Reliability & Operational Polish (`tests/m9_production_hardening.test.ts` — 13 Tests)
+- **Multi-Tenant Security Isolation (M9.1):**
+  - Cross-tenant catalog access and mutation rejection.
+  - Cross-tenant submission view and reconciliation rejection.
+- **Tiered Public Rate Limiting (M9.2):**
+  - Standard `X-RateLimit-*` and `Retry-After` headers.
+  - SHA-256 hashed bucket keys with route and public token isolation.
+- **Input Bounds & DoS Prevention (M9.3):**
+  - Rejects orders exceeding 500 line items with 400 Bad Request.
+  - Rejects item quantities exceeding 100,000 with 400 Bad Request.
+- **Webhook Fast-Ack & Background Job Queue (M9.4 & M9.5):**
+  - Fast response (<500ms) with persistent PostgreSQL job queueing.
+  - Standalone worker execution via `runWorkerOnce()`.
+  - Poison job capping at `maxAttempts`.
+  - Safely drops pending jobs for uninstalled/inactive shops.
+- **Merchant Submission Reconciliation (M9.7):**
+  - Reconciles `REQUIRES_RECONCILIATION` to `COMPLETED` when found in Shopify by tag `cf-sub:<id>`.
+  - Emits North Star analytics event upon reconciliation.
+  - Leaves status as `REQUIRES_RECONCILIATION` when unconfirmed (NEVER calls `draftOrderCreate`).
+- **Observability & Probes (M9.15):**
+  - `/health` liveness probe returns 200 OK with uptime.
+  - `/ready` readiness probe verifies database connectivity.

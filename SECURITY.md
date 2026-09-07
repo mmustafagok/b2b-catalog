@@ -131,3 +131,35 @@ Embedded Admin requests require a Bearer token issued by Shopify App Bridge. The
   - `Submission Reference` (`CatalogFlow-Submission:<submissionId>`)
 - **Strict Exclusion:** The public catalog token (`publicToken`) and raw `Idempotency-Key` are strictly excluded from Shopify Draft Order metadata and tags.
 
+---
+
+## 12. Hashed Bucket IP Rate Limiting (M9.2)
+
+- **Non-Reversible Hashed Keys:** To comply with privacy standards and prevent raw IP persistence, rate-limiting buckets use SHA-256 HMAC-style hashed keys:
+  `sha256(rawIp + ':' + routeCategory + ':' + publicToken)`
+- **Isolated Buyer Buckets:** Distinct bucket scoping prevents an abusive client on one catalog from exhausting quotas for other wholesale buyers.
+- **Tiered Endpoint Capacities:**
+  - `GET /api/public/catalog/:token`: 120 req/min
+  - `POST /api/public/catalog/:token/validate`: 60 req/min
+  - `POST /api/public/catalog/:token/submit`: 30 req/min
+  - `POST /api/public/catalog/:token/event`: 60 req/min
+- **Standard Headers:** Returns `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers on all responses.
+
+---
+
+## 13. Input Bounds & DoS Protection (M9.3)
+
+- **Line Count Cap:** Orders are strictly bounded to a maximum of 500 lines per submission.
+- **Quantity Cap:** Line item quantities are validated between `1` and `100,000` units.
+- **String Length Limits:** Buyer fields enforce strict string length bounds (`businessName` <= 150, `email` <= 150, `poNumber` <= 50, `note` <= 1000).
+
+---
+
+## 14. Fail-Fast Environment Validation (M9.16)
+
+- On application launch (`server.ts` and `worker.ts`), `validateEnvironment()` validates:
+  - `DATABASE_URL`: Must be present and a valid URL.
+  - `ENCRYPTION_SECRET`: Must be a valid non-placeholder string of at least 32 characters.
+  - In `NODE_ENV === 'production'`: Validates `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, and `HOST`/`SHOPIFY_APP_URL`.
+- Any missing or invalid production requirement aborts initialization immediately.
+

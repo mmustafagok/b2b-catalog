@@ -818,3 +818,117 @@ export async function getSyncHealthSummary(shopId: string) {
     },
   };
 }
+
+/**
+ * Merchant-initiated submission reconciliation (M9.7).
+ * Checks Shopify for existing Draft Order by deterministic correlation tag (cf-sub:<submissionId>).
+ * If found: marks COMPLETED and records North Star analytics event.
+ * If not found: leaves status as REQUIRES_RECONCILIATION.
+ * INVARIANT: NEVER calls draftOrderCreate or creates duplicate orders.
+ */
+export async function reconcileSubmission(
+  shopId: string,
+  submissionId: string,
+  customClient?: ShopifyAdminClient
+) {
+  const submission = await prisma.orderSubmission.findFirst({
+    where: { id: submissionId, shopId },
+    include: {
+      catalog: {
+        include: { shop: true },
+      },
+    },
+  });
+
+  if (!submission) {
+    throw new OrderSubmissionError('Submission not found or unauthorized', 404, 'NOT_FOUND');
+  }
+
+  if (submission.status === 'COMPLETED') {
+    return {
+      reconciled: true,
+      status: 'COMPLETED',
+      draftOrderId: submission.draftOrderId,
+      draftOrderName: submission.draftOrderName,
+      message: 'Submission is already completed.',
+    };
+  }
+
+  if (submission.status !== 'REQUIRES_RECONCILIATION') {
+    throw new OrderSubmissionError(
+      `Cannot reconcile submission with status: ${submission.status}`,
+      400,
+      'INVALID_STATUS'
+    );
+  }
+
+  const shop = submission.catalog.shop;
+  const client = customClient || new ShopifyAdminClient({ shopId: shop.id, shopDomain: shop.shopDomain });
+  const correlationTag = `cf-sub:${submission.id}`;
+
+  const findDraftQuery = `
+    query findDraftOrderByCorrelationTag($query: String!) {
+      draftOrders(first: 1, query: $query) {
+        edges {
+          node {
+            id
+            name
+            totalPrice
+            currencyCode
+          }
+        }
+      }
+    }
+  `;
+
+  const searchRes: any = await client.request(findDraftQuery, { query: `tag:${correlationTag}` });
+  const edges = searchRes?.draftOrders?.edges || [];
+
+  if (edges.length > 0 && edges[0]?.node?.id) {
+    const foundDraft = edges[0].node;
+    const subtotal = new Prisma.Decimal(foundDraft.totalPrice || '0.00');
+
+    const updated = await prisma.orderSubmission.update({
+      where: { id: submission.id },
+      data: {
+        status: 'COMPLETED',
+        draftOrderId: foundDraft.id,
+        draftOrderName: foundDraft.name || null,
+        correlationRef: correlationTag,
+        subtotalAmount: subtotal,
+        currency: foundDraft.currencyCode || shop.currency || 'USD',
+        processingStartedAt: null,
+        quotaReserved: true,
+        lastError: null,
+      },
+    });
+
+    // Record idempotent North Star event on reconciliation recovery
+    await recordAnalyticsEvent(
+      shop.id,
+      ANALYTICS_EVENTS.DRAFT_ORDER_CREATED,
+      submission.catalogId,
+      {
+        submissionId: updated.id,
+        subtotal: Number(updated.subtotalAmount),
+        currency: updated.currency,
+      },
+      `draft_order_created:${updated.id}`
+    );
+
+    return {
+      reconciled: true,
+      status: 'COMPLETED',
+      draftOrderId: foundDraft.id,
+      draftOrderName: foundDraft.name,
+      message: 'Draft order successfully recovered from Shopify!',
+    };
+  }
+
+  // Not found yet: remain in REQUIRES_RECONCILIATION, never create a draft order!
+  return {
+    reconciled: false,
+    status: 'REQUIRES_RECONCILIATION',
+    message: 'Draft order not yet found in Shopify. Mutation may still be in transit or was rejected upstream.',
+  };
+}

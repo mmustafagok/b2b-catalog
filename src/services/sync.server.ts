@@ -207,7 +207,8 @@ export async function syncProductSnapshot(shopId: string, product: ShopifyWebhoo
     });
 
     // Prune variants not present in the complete incoming variant list
-    const incomingVariantGids = product.variants.map((v) => normalizeShopifyGid('ProductVariant', v.id));
+    const incomingVariants = product.variants || [];
+    const incomingVariantGids = incomingVariants.map((v) => normalizeShopifyGid('ProductVariant', v.id));
     await tx.variantSnapshot.deleteMany({
       where: {
         shopId,
@@ -219,7 +220,7 @@ export async function syncProductSnapshot(shopId: string, product: ShopifyWebhoo
     });
 
     // Upsert variant snapshots, strictly preserving selectedOptions
-    for (const v of product.variants) {
+    for (const v of incomingVariants) {
       const shopifyVariantId = normalizeShopifyGid('ProductVariant', v.id);
       const priceDecimal = toDecimal(v.price || 0);
 
@@ -936,25 +937,32 @@ export async function resolveCatalogAllowedProductGids(
   sources: Array<{ type: CatalogSourceType | string; shopifyGid: string }>
 ): Promise<Set<string>> {
   const allowedProductGids = new Set<string>();
+  const collectionGids: string[] = [];
 
   for (const source of sources) {
     if (source.type === CatalogSourceType.PRODUCT) {
       allowedProductGids.add(source.shopifyGid);
     } else if (source.type === CatalogSourceType.COLLECTION) {
-      const coll = await prisma.collectionSnapshot.findFirst({
-        where: {
-          shopId,
-          shopifyCollectionId: source.shopifyGid,
-        },
-        include: {
-          productMemberships: true,
-        },
-      });
+      collectionGids.push(source.shopifyGid);
+    }
+  }
 
-      if (coll) {
-        for (const membership of coll.productMemberships) {
-          allowedProductGids.add(membership.shopifyProductId);
-        }
+  if (collectionGids.length > 0) {
+    const collections = await prisma.collectionSnapshot.findMany({
+      where: {
+        shopId,
+        shopifyCollectionId: { in: collectionGids },
+      },
+      include: {
+        productMemberships: {
+          select: { shopifyProductId: true },
+        },
+      },
+    });
+
+    for (const coll of collections) {
+      for (const membership of coll.productMemberships) {
+        allowedProductGids.add(membership.shopifyProductId);
       }
     }
   }

@@ -160,7 +160,20 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
   - Strict analytics metadata privacy allowlist (`ORDER_SUMMARY_STARTED`: `itemCount`, `lineCount`; Server order events: `submissionId`, `itemCount`, `lineCount`, `subtotal`, `currency`). All PII and unknown keys discarded.
   - Accurate North Star event (`draft_order_created_from_buyer_submission`) recorded idempotently once across normal completion and reconciliation via deterministic `eventKey`.
   - Non-blocking buyer catalog analytics (`void recordAnalyticsEvent(...)`) and bounded query validation (`1 <= days <= 90`).
-- [ ] **M9: Security / Reliability / Edge Cases / Performance / Visual Polish** *(NEXT MILESTONE)*
-- [ ] **M10: Shopify Integration, Real E2E, App Store Readiness & Submission**
+- [x] **M9: Security / Reliability / Edge Cases / Performance / Visual Polish** *(Complete)*
+  - Non-reversible hashed IP sliding window rate limiting (`sha256(ip + ':' + routeCategory + ':' + publicToken)`).
+  - Strict input limits and DoS protection (500 lines cap, 100,000 qty cap, string length limits).
+  - Webhook fast-ack (<500ms) with persistent PostgreSQL `BackgroundJob` queue (`FOR UPDATE SKIP LOCKED`).
+  - Standalone worker daemon (`src/worker.ts`) with poison-job circuit breaker and uninstalled shop dropping.
+  - Merchant submission reconciliation endpoint & UI action ("Check Shopify ↻") with zero duplicate order risk.
+  - N+1 query elimination in collection membership lookups.
+  - Shopify GraphQL client throttling detection with exponential backoff and jitter.
+  - Human buyer error states (unpublished, inactive store, empty catalog, stale data version refresh).
+  - Accessible variant matrix table with keyboard navigation.
+  - Health (`/health`) and readiness (`/ready`) observability probes.
+  - Fail-fast environment configuration validation.
+  - Complete test suite across 10 test files with 143 passing tests.
+  - Operations runbook documentation (`OPERATIONS.md`).
+- [ ] **M10: Shopify Integration, Real E2E, App Store Readiness & Submission** *(NEXT MILESTONE)*
   - Partner Dashboard app credentials & Shopify App Pricing live setup.
   - End-to-end production validation & Shopify App Store review pre-submission checklist.

@@ -181,12 +181,21 @@ npm run prisma:migrate
 - **Accurate & Idempotent North Star:** `draft_order_created_from_buyer_submission` is recorded exactly once across normal and reconciled orders using a deterministic `eventKey`.
 - **Non-Blocking Buyer Analytics:** Catalog view analytics are fire-and-forget, ensuring zero latency impact on buyer portal loads.
 
+### 4.9 Production Hardening, Worker & Reliability (M9)
+- **Fast-Ack Webhook Queue:** Shopify webhooks acknowledge (<500ms) with 200 OK after inserting into a persistent PostgreSQL `BackgroundJob` table.
+- **Standalone Background Worker Daemon (`src/worker.ts`):** Polls jobs concurrency-safely via `FOR UPDATE SKIP LOCKED`, handles retries with exponential backoff, and safely drops jobs for uninstalled stores.
+- **Merchant Submission Reconciliation:** Single-click "Check Shopify ↻" button safely checks for `tag:cf-sub:<id>` without ever calling `draftOrderCreate` or risking duplicate orders.
+- **Privacy-Preserving Rate Limiting:** Non-reversible hashed bucket keys (`sha256(ip + ':' + routeCategory + ':' + publicToken)`) with standard `Retry-After` headers.
+- **Input Bounds & DoS Protection:** 500 line items cap per order, 100,000 maximum quantity per line, and bounded string inputs.
+- **Observability Probes:** `/health` (liveness with uptime) and `/ready` (database connectivity probe).
+- **Environment Fail-Fast Validation:** Validates required configuration keys and minimum secret lengths before server/worker boot.
+
 ---
 
 ## 5. Development & Testing Commands
 
 ```bash
-# Run full automated test suite
+# Run full automated test suite (10 test suites, 143+ tests)
 npm test
 
 # Run TypeScript typecheck
@@ -195,6 +204,9 @@ npm run typecheck
 # Build client and server bundles
 npm run build
 
-# Start production server
+# Start background worker daemon
+npm run worker
+
+# Start web server
 npm start
 ```

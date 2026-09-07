@@ -163,6 +163,7 @@ export const MerchantAppShell: React.FC = () => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [switchingPlan, setSwitchingPlan] = useState<boolean>(false);
+  const [reconcilingId, setReconcilingId] = useState<string | null>(null);
 
   // New catalog modal state
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -316,6 +317,31 @@ export const MerchantAppShell: React.FC = () => {
       showToast(`Billing error: ${err.message}`);
     } finally {
       setSwitchingPlan(false);
+    }
+  };
+
+  const handleReconcileSubmission = async (submissionId: string) => {
+    setReconcilingId(submissionId);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/admin/submissions/${submissionId}/reconcile`, {
+        method: 'POST',
+        headers,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Reconciliation request failed');
+      }
+      if (data.reconciled) {
+        showToast(`Order confirmed! Shopify Draft Order: ${data.draftOrderName || data.draftOrderId}`);
+      } else {
+        showToast(data.message || 'Draft order not yet confirmed in Shopify. Please retry shortly.');
+      }
+      loadData();
+    } catch (err: any) {
+      showToast(`Reconciliation error: ${err.message}`);
+    } finally {
+      setReconcilingId(null);
     }
   };
 
@@ -850,6 +876,15 @@ export const MerchantAppShell: React.FC = () => {
                                 >
                                   Open in Shopify ↗
                                 </a>
+                              ) : sub.status === 'REQUIRES_RECONCILIATION' ? (
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-warning"
+                                  onClick={() => handleReconcileSubmission(sub.id)}
+                                  disabled={reconcilingId === sub.id}
+                                  title="Check if Shopify has processed the order mutation"
+                                >
+                                  {reconcilingId === sub.id ? 'Checking...' : 'Check Shopify ↻'}
+                                </button>
                               ) : (
                                 <span className="cf-text-muted">No Shopify Link</span>
                               )}

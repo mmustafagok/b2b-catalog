@@ -60,14 +60,14 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
         </div>
       </div>
 
-      <table className="variant-table">
+      <table className="variant-table" role="table" aria-label={`Variants for ${product.title}`}>
         <thead>
-          <tr>
-            <th>Variant / Options</th>
-            {showSku && <th>SKU</th>}
-            {showInventory && <th>Stock</th>}
-            <th>Wholesale Price</th>
-            <th style={{ width: '150px', textAlign: 'right' }}>Quantity</th>
+          <tr role="row">
+            <th scope="col">Variant / Options</th>
+            {showSku && <th scope="col">SKU</th>}
+            {showInventory && <th scope="col">Stock</th>}
+            <th scope="col">Wholesale Price</th>
+            <th scope="col" style={{ width: '150px', textAlign: 'right' }}>Quantity</th>
           </tr>
         </thead>
         <tbody>
@@ -76,7 +76,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
             const hasDiscount = variant.displayPrice < variant.basePrice;
 
             return (
-              <tr key={variant.shopifyVariantId}>
+              <tr key={variant.shopifyVariantId} role="row">
                 <td>
                   <span style={{ fontWeight: 500 }}>{variant.title}</span>
                 </td>
@@ -113,6 +113,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     <button
                       type="button"
                       className="qty-btn"
+                      aria-label={`Decrease quantity for ${variant.title}`}
                       disabled={currentQty <= 0}
                       onClick={() => onQuantityChange(variant.shopifyVariantId, Math.max(0, currentQty - 1))}
                     >
@@ -121,14 +122,25 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     <input
                       type="number"
                       min="0"
+                      aria-label={`Quantity for ${variant.title}`}
                       className="qty-input"
                       value={currentQty === 0 ? '' : currentQty}
                       placeholder="0"
                       onChange={(e) => handleInputChange(variant.shopifyVariantId, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          onQuantityChange(variant.shopifyVariantId, currentQty + 1);
+                        } else if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          onQuantityChange(variant.shopifyVariantId, Math.max(0, currentQty - 1));
+                        }
+                      }}
                     />
                     <button
                       type="button"
                       className="qty-btn"
+                      aria-label={`Increase quantity for ${variant.title}`}
                       onClick={() => onQuantityChange(variant.shopifyVariantId, currentQty + 1)}
                     >
                       +

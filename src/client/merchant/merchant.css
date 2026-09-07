@@ -333,6 +333,21 @@ body {
   border-radius: 6px;
 }
 
+.cf-btn-warning {
+  background: #fef08a;
+  color: #854d0e;
+  border: 1px solid #facc15;
+}
+
+.cf-btn-warning:hover:not(:disabled) {
+  background: #fde047;
+}
+
+.cf-btn-warning:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* Section Header */
 .cf-section-header {
   display: flex;

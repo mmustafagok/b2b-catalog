@@ -141,8 +141,16 @@ export class ShopifyAdminClient {
 
         const json: any = await response.json();
 
-        // Check top-level GraphQL errors
+        // Check top-level GraphQL errors (detect THROTTLED cost budget errors for retry)
         if (json.errors && json.errors.length > 0) {
+          const isThrottled = json.errors.some((e: any) =>
+            e.extensions?.code === 'THROTTLED' || e.message?.toLowerCase().includes('throttled')
+          );
+          if (isThrottled && attempt < maxRetries) {
+            const delayMs = Math.min(5000, Math.pow(2, attempt) * 500);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+          }
           const errorMsg = json.errors.map((e: any) => e.message).join('; ');
           throw new ShopifyGraphQLError(`Shopify GraphQL Error: ${errorMsg}`, json.errors);
         }

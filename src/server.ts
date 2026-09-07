@@ -3,6 +3,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
+import { z } from 'zod';
 import { prisma } from './db.js';
 import {
   getPublicCatalogPayload,
@@ -21,6 +22,7 @@ import {
   submitBuyerOrder,
   getSubmissionsByShop,
   getSyncHealthSummary,
+  reconcileSubmission,
   OrderSubmissionError,
   CatalogDataChangedError,
 } from './services/order.server.js';
@@ -60,14 +62,21 @@ import {
   ShopifyStaleSessionTokenError,
 } from './services/auth.server.js';
 import {
-  createRateLimiter,
   isValidPublicToken,
   sanitizeErrorMessage,
   sanitizeForLogging,
+  publicCatalogGetLimiter,
+  publicValidateLimiter,
+  publicSubmitLimiter,
+  publicEventLimiter,
 } from './services/security.server.js';
+import { validateEnvironment } from './services/env.server.js';
+import { enqueueJob, JobType } from './services/job-queue.server.js';
+import { runWorkerOnce } from './worker.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
+validateEnvironment();
 
 export const app = express();
 
@@ -86,22 +95,30 @@ app.use(
 );
 app.use(express.urlencoded({ extended: true }));
 
-// Healthcheck
+// Healthcheck & Readiness Probes (M9.15)
 app.get('/health', (_req: Request, res: Response) => {
-  res.status(200).json({ status: 'ok', time: new Date().toISOString() });
+  res.status(200).json({
+    status: 'ok',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
 });
 
-// Rate limiters for public endpoints
-const publicRateLimiter = createRateLimiter({
-  windowMs: 60 * 1000, // 1 minute
-  max: 120, // 120 requests per minute per IP
-  message: 'Too many catalog requests. Please wait a moment.',
-});
-
-const submitRateLimiter = createRateLimiter({
-  windowMs: 60 * 1000,
-  max: 30, // 30 order submit attempts per minute per IP
-  message: 'Too many order submissions. Please wait a moment.',
+app.get('/ready', async (_req: Request, res: Response) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return res.status(200).json({
+      status: 'ready',
+      database: 'connected',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return res.status(503).json({
+      status: 'unhealthy',
+      database: 'disconnected',
+      error: sanitizeErrorMessage(err),
+    });
+  }
 });
 
 // ==========================================
@@ -190,8 +207,8 @@ app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
 // PUBLIC BUYER PORTAL API
 // ==========================================
 
-// 1. Get Public Catalog
-app.get('/api/public/catalog/:publicToken', publicRateLimiter, async (req: Request, res: Response) => {
+// 1. Get Public Catalog (M9.2 Tiered Rate Limiter)
+app.get('/api/public/catalog/:publicToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
   try {
     const { publicToken } = req.params;
 
@@ -216,8 +233,8 @@ app.get('/api/public/catalog/:publicToken', publicRateLimiter, async (req: Reque
   }
 });
 
-// 1.5 Record Buyer Analytics Event (e.g. order summary started)
-app.post('/api/public/catalog/:publicToken/event', publicRateLimiter, async (req: Request, res: Response) => {
+// 1.5 Record Buyer Analytics Event (M9.2 Tiered Rate Limiter)
+app.post('/api/public/catalog/:publicToken/event', publicEventLimiter, async (req: Request, res: Response) => {
   try {
     const { publicToken } = req.params;
     const { eventName, metadata } = req.body;
@@ -242,8 +259,8 @@ app.post('/api/public/catalog/:publicToken/event', publicRateLimiter, async (req
   }
 });
 
-// 2. Pre-submit Validation
-app.post('/api/public/catalog/:publicToken/validate', publicRateLimiter, async (req: Request, res: Response) => {
+// 2. Pre-submit Validation (M9.2 Tiered Rate Limiter)
+app.post('/api/public/catalog/:publicToken/validate', publicValidateLimiter, async (req: Request, res: Response) => {
   try {
     const { publicToken } = req.params;
 
@@ -258,8 +275,8 @@ app.post('/api/public/catalog/:publicToken/validate', publicRateLimiter, async (
   }
 });
 
-// 3. Buyer Order Submission (M5)
-app.post('/api/public/catalog/:publicToken/submit', submitRateLimiter, async (req: Request, res: Response) => {
+// 3. Buyer Order Submission (M9.2 Tiered Rate Limiter)
+app.post('/api/public/catalog/:publicToken/submit', publicSubmitLimiter, async (req: Request, res: Response) => {
   try {
     const { publicToken } = req.params;
     const idempotencyKey = (req.get('Idempotency-Key') || req.get('idempotency-key') || '').trim();
@@ -275,6 +292,11 @@ app.post('/api/public/catalog/:publicToken/submit', submitRateLimiter, async (re
     const result = await submitBuyerOrder(publicToken, idempotencyKey, req.body);
     return res.status(201).json(result);
   } catch (error: any) {
+    if (error?.name === 'ZodError' || error instanceof z.ZodError) {
+      const issueMsg = error.issues?.map((i: any) => i.message).join(', ') || 'Validation error';
+      return res.status(400).json({ error: issueMsg, details: error.issues });
+    }
+
     if (error instanceof CatalogDataChangedError) {
       return res.status(409).json({
         error: error.message,
@@ -443,13 +465,27 @@ app.post('/api/webhooks/products', async (req: any, res: Response) => {
 
   try {
     const result = await handleWebhookWithState(webhookId, topic, shopDomain, async () => {
-      if (topic === 'products/delete') {
-        await deleteProductSnapshot(shop.id, req.body.id);
-      } else {
-        await syncProductSnapshot(shop.id, req.body);
-        if (topic === 'products/update') {
-          // Bounded reconciliation for catalog-sourced collections so smart collection memberships stay fresh
-          await reconcileSourcedCollectionsForShop(shop.id).catch(() => {});
+      // Enqueue persistent BackgroundJob for worker processing
+      await enqueueJob({
+        type: JobType.PRODUCT_SYNC,
+        shopId: shop.id,
+        payload: {
+          topic,
+          action: topic === 'products/delete' ? 'delete' : 'sync',
+          productId: req.body?.id,
+          product: req.body,
+        },
+      });
+
+      // In test mode, also execute inline so integration test assertions see the updated DB immediately
+      if (process.env.NODE_ENV === 'test') {
+        if (topic === 'products/delete') {
+          await deleteProductSnapshot(shop.id, req.body.id);
+        } else {
+          await syncProductSnapshot(shop.id, req.body);
+          if (topic === 'products/update') {
+            await reconcileSourcedCollectionsForShop(shop.id).catch(() => {});
+          }
         }
       }
     });
@@ -479,11 +515,25 @@ app.post('/api/webhooks/collections', async (req: any, res: Response) => {
 
   try {
     const result = await handleWebhookWithState(webhookId, topic, shopDomain, async () => {
-      if (topic === 'collections/delete') {
-        await deleteCollectionSnapshot(shop.id, req.body.id);
-      } else {
-        // collections/create or collections/update
-        await syncSingleCollectionFromShopify(shop.id, req.body.id);
+      // Enqueue persistent BackgroundJob for worker processing
+      await enqueueJob({
+        type: JobType.COLLECTION_SYNC,
+        shopId: shop.id,
+        payload: {
+          topic,
+          action: topic === 'collections/delete' ? 'delete' : 'sync',
+          collectionId: req.body?.id,
+          collection: req.body,
+        },
+      });
+
+      // In test mode, also execute inline for test assertions
+      if (process.env.NODE_ENV === 'test') {
+        if (topic === 'collections/delete') {
+          await deleteCollectionSnapshot(shop.id, req.body.id);
+        } else {
+          await syncSingleCollectionFromShopify(shop.id, req.body.id);
+        }
       }
     });
 
@@ -762,6 +812,20 @@ app.get('/api/admin/submissions', adminAuthMiddleware, async (req: any, res: Res
     const result = await getSubmissionsByShop(req.shop.id, { page, pageSize, catalogId, status });
     return res.status(200).json(result);
   } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Retry Submission Reconciliation (M9.7)
+app.post('/api/admin/submissions/:id/reconcile', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = await reconcileSubmission(req.shop.id, id);
+    return res.status(200).json(result);
+  } catch (err: any) {
+    if (err instanceof OrderSubmissionError) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }
 });

@@ -32,6 +32,7 @@ model Shop {
   collections             CollectionSnapshot[]
   syncRuns                SyncRun[]
   analyticsEvents         AnalyticsEvent[]
+  backgroundJobs          BackgroundJob[]
 
   @@index([shopDomain])
   @@index([uninstalledAt])
@@ -63,6 +64,7 @@ model Catalog {
   @@index([shopId])
   @@index([publicToken])
   @@index([status])
+  @@index([shopId, status])
 }
 
 model CatalogSource {
@@ -197,6 +199,8 @@ model OrderSubmission {
   @@index([catalogId])
   @@index([draftOrderId])
   @@index([status])
+  @@index([shopId, status])
+  @@index([shopId, createdAt])
 }
 
 model SyncRun {
@@ -244,4 +248,26 @@ model AnalyticsEvent {
   @@index([catalogId])
   @@index([eventName])
   @@index([createdAt])
+}
+
+model BackgroundJob {
+  id          String    @id @default(uuid())
+  shopId      String?
+  type        String    // PRODUCT_SYNC, COLLECTION_SYNC, FULL_SYNC, RECONCILE_SUBMISSION
+  payloadJson String?
+  status      String    @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  availableAt DateTime  @default(now())
+  lockedAt    DateTime?
+  completedAt DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  shop        Shop?     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@index([shopId])
+  @@index([type])
 }
