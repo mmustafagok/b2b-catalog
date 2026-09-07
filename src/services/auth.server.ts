@@ -146,29 +146,68 @@ export function verifyAppBridgeJwt(
   }
 }
 
-/**
- * Validates Shopify OAuth callback query signature.
- */
-export function verifyShopifyOauthHmac(queryParams: Record<string, string | string[]>, secret: string): boolean {
-  const { hmac, ...rest } = queryParams;
-  if (!hmac || typeof hmac !== 'string' || !secret) {
-    return false;
-  }
-
-  // Sort keys alphabetically and format as key=value
-  const message = Object.keys(rest)
-    .sort()
-    .map((key) => {
-      const val = Array.isArray(rest[key]) ? (rest[key] as string[]).join(',') : rest[key];
-      return `${key}=${val}`;
-    })
-    .join('&');
-
-  const generatedHmac = crypto.createHmac('sha256', secret).update(message).digest('hex');
-
-  try {
-    return crypto.timingSafeEqual(Buffer.from(generatedHmac, 'utf8'), Buffer.from(hmac, 'utf8'));
-  } catch {
-    return false;
-  }
+export interface TokenExchangeResult {
+  accessToken: string;
+  scope: string;
 }
+
+/**
+ * Exchanges an App Bridge session token (ID token) for an offline access token
+ * using Shopify Managed Installation token exchange (RFC 8693).
+ */
+export async function exchangeSessionTokenForOfflineToken(params: {
+  shopDomain: string;
+  sessionToken: string;
+  clientId?: string;
+  clientSecret?: string;
+  fetchFn?: typeof fetch;
+}): Promise<TokenExchangeResult> {
+  const { shopDomain, sessionToken, clientId, clientSecret, fetchFn } = params;
+  const targetClientId = clientId || process.env.SHOPIFY_API_KEY;
+  const targetClientSecret = clientSecret || process.env.SHOPIFY_API_SECRET;
+
+  if (!targetClientId || !targetClientSecret) {
+    throw new Error('Shopify client ID or secret is not configured');
+  }
+
+  if (!isValidShopifyDomain(shopDomain)) {
+    throw new Error(`Invalid shop domain: ${shopDomain}`);
+  }
+
+  const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const tokenUrl = `https://${cleanDomain}/admin/oauth/access_token`;
+  const body = {
+    client_id: targetClientId,
+    client_secret: targetClientSecret,
+    grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    subject_token: sessionToken,
+    subject_token_type: 'urn:ietf:params:oauth:token-type:id-token',
+    requested_token_type: 'urn:shopify:params:oauth:token-type:offline-access-token',
+  };
+
+  const customFetch = fetchFn || fetch;
+  const response = await customFetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Token exchange failed (${response.status}): ${errorText}`);
+  }
+
+  const data: any = await response.json();
+  if (!data.access_token) {
+    throw new Error('Token exchange response missing access_token');
+  }
+
+  return {
+    accessToken: data.access_token,
+    scope: data.scope || '',
+  };
+}
+

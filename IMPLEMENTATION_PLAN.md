@@ -48,7 +48,7 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 +----------------------------------------------------+   +--------------------------------+
 |           MERCHANT EMBEDDED ADMIN                  |   |      PUBLIC BUYER PORTAL       |
 |  - Shopify App Bridge + React + Polaris Components |   |  - Fast, responsive web UI     |
-|  - Real Shopify OAuth & JWT claim verification     |   |  - URL: /c/:publicToken        |
+|  - Managed Installation & Token Exchange (RFC 8693)|   |  - URL: /c/:publicToken        |
 |  - 3-Step Wizard: Sources -> Pricing -> Brand      |   |  - Search & Collection Filter  |
 |  - Submissions History & Draft Order Deep Links    |   |  - Variant Quantity Matrix     |
 |  - Quota & Billing Management                      |   |  - Sticky Order Summary & Cart |
@@ -60,10 +60,10 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 |                                APPLICATION BACKEND                                      |
 |  - Node.js (TypeScript) + Express / React Router Server Engine                          |
 |  - Centralized Services Layer:                                                          |
-|      * auth.server.ts          -> OAuth, HMAC, JWT claim verification (aud, iss, dest)  |
+|      * auth.server.ts          -> Token Exchange (RFC 8693), HMAC, strict JWT validation|
 |      * crypto.server.ts        -> AES-256-GCM token-at-rest authenticated encryption   |
 |      * shopify-client.server.ts-> Centralized GraphQL Admin client (retry, throttling) |
-|      * sync.server.ts          -> Paginated initial sync & exact collection membership  |
+|      * sync.server.ts          -> Complete collection & variant pagination, sync engine |
 |      * pricing.server.ts       -> Deterministic Decimal arithmetic & currency formatting|
 |      * catalog.server.ts       -> Catalog CRUD, source resolution, snapshot generator   |
 |      * security.server.ts      -> Token validation, rate limiting, log sanitization     |
@@ -92,7 +92,7 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 - **`VariantSnapshot`**: `id`, `shopId`, `shopifyVariantId`, `shopifyProductId`, `title`, `sku`, `barcode`, `shopifyPrice` (Decimal 12, 2), `inventoryQuantity`, `availableForSale`, `selectedOptionsJson`, `imageUrl`, `sourceUpdatedAt`, `syncedAt`.
 - **`OrderSubmission`**: `id`, `shopId`, `catalogId`, `draftOrderId`, `draftOrderName`, `idempotencyKeyHash`, `itemCount`, `lineCount`, `subtotalAmount` (Decimal 12, 2), `currency`, `createdAt`. **Zero raw buyer PII persisted.**
 - **`SyncRun`**: `id`, `shopId`, `type`, `status` (`PENDING` | `IN_PROGRESS` | `COMPLETED` | `FAILED`), `statsJson`, `startedAt`, `finishedAt`.
-- **`WebhookReceipt`**: `id`, `webhookId` (Unique), `topic`, `shopDomain`, `processedAt`.
+- **`WebhookReceipt`**: `id`, `webhookId` (Unique), `topic`, `shopDomain`, `status` (`PROCESSING`, `COMPLETED`, `FAILED`), `attempts`, `lastError`, `processedAt`, `completedAt`.
 
 ---
 
@@ -104,12 +104,15 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
 - [x] **M3: Product Sync, Snapshots & Deterministic Pricing** *(Complete)*
 - [x] **M4: Buyer Ordering Surface & UX** *(Complete)*
 - [x] **M4.5: Foundation Correction & Shopify Integration Hardening** *(Complete)*
-  - PostgreSQL migration created and deployed.
+  - PostgreSQL migration created and deployed (`catalogflow` and `catalogflow_test`).
+  - Shopify Managed Installation and Token Exchange (RFC 8693) implemented; legacy OAuth routes removed.
   - Token-at-rest encryption using authenticated AES-256-GCM.
   - Strict App Bridge session token validation (aud, iss, dest, exp).
-  - Exact collection membership representation and resolution.
-  - Real initial shop sync via Shopify Admin GraphQL API.
-  - Fail-closed webhooks and `WebhookReceipt` deduplication.
+  - Complete collection product pagination (>100 products multi-page).
+  - Complete product variant pagination (>50 variants multi-page).
+  - Selected options preservation (`Size=M` / `Color=Black`) through GraphQL sync into public buyer payload.
+  - Collection webhook synchronization (`collections/create`, `collections/update`, `collections/delete`) and automatic membership reconciliation.
+  - Webhook idempotency state machine (`PROCESSING` $\rightarrow$ `COMPLETED` / `FAILED`, retry support, concurrent lock protection).
   - Mandatory compliance webhooks (`customers/data_request`, `customers/redact`, `shop/redact`).
   - Decimal monetary calculations and currency formatting.
   - Public endpoint rate limiting and log sanitization.

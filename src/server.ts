@@ -8,6 +8,9 @@ import {
   getPublicCatalogPayload,
   syncProductSnapshot,
   deleteProductSnapshot,
+  syncSingleCollectionFromShopify,
+  deleteCollectionSnapshot,
+  reconcileSourcedCollectionsForShop,
   performInitialShopSync,
 } from './services/sync.server.js';
 import { validateBuyerOrderLines } from './services/validation.server.js';
@@ -31,8 +34,8 @@ import {
 import {
   verifyShopifyWebhookHmac,
   verifyAppBridgeJwt,
-  verifyShopifyOauthHmac,
   isValidShopifyDomain,
+  exchangeSessionTokenForOfflineToken,
 } from './services/auth.server.js';
 import {
   createRateLimiter,
@@ -74,93 +77,60 @@ const publicRateLimiter = createRateLimiter({
 });
 
 // ==========================================
-// REAL SHOPIFY OAUTH / INSTALLATION
+// SHOPIFY MANAGED INSTALLATION / TOKEN EXCHANGE
 // ==========================================
 
-app.get('/auth/shopify', (req: Request, res: Response) => {
-  const shop = req.query.shop as string;
-
-  if (!isValidShopifyDomain(shop)) {
-    return res.status(400).send('Invalid shop domain. Must be a valid myshopify.com domain.');
-  }
-
-  const clientId = process.env.SHOPIFY_API_KEY;
-  const scopes = process.env.SCOPES || 'read_products,read_inventory,write_draft_orders,read_draft_orders';
-  const host = process.env.HOST || 'http://localhost:8080';
-  const redirectUri = `${host}/auth/callback`;
-
-  // State parameter for CSRF prevention
-  const state = Math.random().toString(36).substring(2);
-
-  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${clientId}&scope=${encodeURIComponent(
-    scopes
-  )}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
-
-  return res.redirect(installUrl);
-});
-
-app.get('/auth/callback', async (req: Request, res: Response) => {
-  const query = req.query as Record<string, string>;
-  const shop = query.shop;
-  const code = query.code;
-  const secret = process.env.SHOPIFY_API_SECRET;
-
-  if (!secret) {
-    return res.status(500).send('App secret not configured.');
-  }
-
-  if (!isValidShopifyDomain(shop)) {
-    return res.status(400).send('Invalid shop domain.');
-  }
-
-  if (!verifyShopifyOauthHmac(query, secret)) {
-    return res.status(401).send('OAuth signature verification failed.');
-  }
-
-  if (!code) {
-    return res.status(400).send('Missing authorization code.');
-  }
-
+/**
+ * Handles Token Exchange (RFC 8693) for Shopify Managed Installation.
+ * Exchanges App Bridge session token for an offline access token and triggers initial sync.
+ */
+app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
   try {
-    // Exchange code for offline access token
-    const tokenUrl = `https://${shop}/admin/oauth/access_token`;
-    const tokenResponse = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: process.env.SHOPIFY_API_KEY,
-        client_secret: secret,
-        code,
-      }),
-    });
+    const authHeader = req.get('Authorization');
+    const sessionToken = authHeader?.startsWith('Bearer ')
+      ? authHeader.replace('Bearer ', '')
+      : req.body?.sessionToken;
 
-    if (!tokenResponse.ok) {
-      const errText = await tokenResponse.text();
-      return res.status(400).send(`Failed to exchange token: ${errText}`);
+    if (!sessionToken) {
+      return res.status(400).json({ error: 'Missing session token' });
     }
 
-    const tokenData: any = await tokenResponse.json();
-    const accessToken = tokenData.access_token;
+    const secret = process.env.SHOPIFY_API_SECRET || '';
+    const decoded = verifyAppBridgeJwt(sessionToken, secret);
+    if (!decoded) {
+      return res.status(401).json({ error: 'Invalid, expired, or untrusted session token' });
+    }
 
-    // Install or reactivate shop
-    const installedShop = await installOrUpdateShop({
-      shopDomain: shop,
-      accessToken,
+    const shopDomain = decoded.shopDomain;
+
+    // Perform RFC 8693 Token Exchange with Shopify for offline access token
+    const tokenResult = await exchangeSessionTokenForOfflineToken({
+      shopDomain,
+      sessionToken,
     });
 
-    // Trigger initial product sync in background
-    performInitialShopSync(installedShop.id).catch((err) => {
-      console.error('Initial sync failed for shop:', shop, sanitizeErrorMessage(err));
+    // Install or reactivate shop record
+    const shop = await installOrUpdateShop({
+      shopDomain,
+      accessToken: tokenResult.accessToken,
     });
 
-    // Redirect to Shopify Admin embedded app
-    const apiKey = process.env.SHOPIFY_API_KEY;
-    const embeddedUrl = `https://${shop}/admin/apps/${apiKey}`;
-    return res.redirect(embeddedUrl);
-  } catch (err: any) {
-    return res.status(500).send(`Installation failed: ${sanitizeErrorMessage(err)}`);
+    // Trigger initial background sync asynchronously
+    performInitialShopSync(shop.id).catch((err) => {
+      console.error('Initial sync failed for shop:', shopDomain, sanitizeErrorMessage(err));
+    });
+
+    return res.status(200).json({
+      success: true,
+      shopDomain,
+      installed: true,
+    });
+  } catch (error: any) {
+    console.error('Token exchange error:', sanitizeErrorMessage(error));
+    return res.status(500).json({ error: sanitizeErrorMessage(error) });
   }
 });
+
 
 // ==========================================
 // PUBLIC BUYER PORTAL API
@@ -204,30 +174,114 @@ app.post('/api/public/catalog/:publicToken/validate', publicRateLimiter, async (
 });
 
 // ==========================================
-// SHOPIFY WEBHOOKS (FAIL CLOSED & IDEMPOTENT)
+// SHOPIFY WEBHOOKS (FAIL CLOSED & IDEMPOTENCY STATE MACHINE)
 // ==========================================
 
-async function handleWebhookIdempotency(webhookId: string, topic: string, shopDomain: string): Promise<boolean> {
-  if (!webhookId) return false;
+export interface WebhookExecutionResult {
+  status: 'ALREADY_COMPLETED' | 'CONCURRENT_PROCESSING' | 'PROCESSED' | 'FAILED';
+  httpStatus: number;
+  message: string;
+}
+
+/**
+ * Robust webhook idempotency state machine tracking PROCESSING -> COMPLETED | FAILED.
+ * - COMPLETED duplicate: safely acknowledge without reprocessing.
+ * - FAILED delivery: Shopify retry allowed to reprocess.
+ * - PROCESSING concurrent duplicate: avoids concurrent execution without losing event.
+ * - Only COMPLETED means successfully applied.
+ */
+export async function handleWebhookWithState<T>(
+  webhookId: string,
+  topic: string,
+  shopDomain: string,
+  fn: () => Promise<T>
+): Promise<WebhookExecutionResult> {
+  if (!webhookId) {
+    await fn();
+    return { status: 'PROCESSED', httpStatus: 200, message: 'Processed without webhookId' };
+  }
 
   const existing = await prisma.webhookReceipt.findUnique({
     where: { webhookId },
   });
+
   if (existing) {
-    return false; // Already processed
+    if (existing.status === 'COMPLETED') {
+      return { status: 'ALREADY_COMPLETED', httpStatus: 200, message: 'Webhook already processed' };
+    }
+
+    if (existing.status === 'PROCESSING') {
+      const elapsedMs = Date.now() - existing.processedAt.getTime();
+      // Lock window: if under 60 seconds, reject concurrent execution so Shopify retries later
+      if (elapsedMs < 60000) {
+        return {
+          status: 'CONCURRENT_PROCESSING',
+          httpStatus: 429,
+          message: 'Webhook currently being processed by another worker',
+        };
+      }
+      // If stale lock (> 60s), allow retry to proceed
+    }
+
+    // Previous attempt FAILED or stale lock: transition to PROCESSING and increment attempts
+    await prisma.webhookReceipt.update({
+      where: { webhookId },
+      data: {
+        status: 'PROCESSING',
+        attempts: { increment: 1 },
+        processedAt: new Date(),
+        lastError: null,
+      },
+    });
+  } else {
+    try {
+      await prisma.webhookReceipt.create({
+        data: {
+          webhookId,
+          topic,
+          shopDomain,
+          status: 'PROCESSING',
+          attempts: 1,
+          processedAt: new Date(),
+        },
+      });
+    } catch {
+      // Race condition fallback on unique constraint
+      const concurrent = await prisma.webhookReceipt.findUnique({ where: { webhookId } });
+      if (concurrent?.status === 'COMPLETED') {
+        return { status: 'ALREADY_COMPLETED', httpStatus: 200, message: 'Webhook already processed' };
+      }
+      return {
+        status: 'CONCURRENT_PROCESSING',
+        httpStatus: 429,
+        message: 'Concurrent webhook registration',
+      };
+    }
   }
 
   try {
-    await prisma.webhookReceipt.create({
+    await fn();
+
+    await prisma.webhookReceipt.update({
+      where: { webhookId },
       data: {
-        webhookId,
-        topic,
-        shopDomain,
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        lastError: null,
       },
     });
-    return true; // First time seeing this webhook
-  } catch {
-    return false; // Already processed concurrently
+
+    return { status: 'PROCESSED', httpStatus: 200, message: 'OK' };
+  } catch (err: any) {
+    const sanitized = sanitizeErrorMessage(err).slice(0, 500);
+    await prisma.webhookReceipt.update({
+      where: { webhookId },
+      data: {
+        status: 'FAILED',
+        lastError: sanitized,
+      },
+    });
+    throw err;
   }
 }
 
@@ -243,13 +297,40 @@ app.post('/api/webhooks/products', async (req: any, res: Response) => {
     return res.status(401).send('Webhook authentication failed');
   }
 
-  // Check webhook idempotency
-  if (webhookId) {
-    const isNew = await handleWebhookIdempotency(webhookId, topic, shopDomain);
-    if (!isNew) {
-      // Safely acknowledge duplicate delivery
-      return res.status(200).send('Webhook already processed');
-    }
+  const shop = await getActiveShopByDomain(shopDomain);
+  if (!shop) {
+    return res.status(200).send('Shop not active');
+  }
+
+  try {
+    const result = await handleWebhookWithState(webhookId, topic, shopDomain, async () => {
+      if (topic === 'products/delete') {
+        await deleteProductSnapshot(shop.id, req.body.id);
+      } else {
+        await syncProductSnapshot(shop.id, req.body);
+        if (topic === 'products/update') {
+          // Bounded reconciliation for catalog-sourced collections so smart collection memberships stay fresh
+          await reconcileSourcedCollectionsForShop(shop.id).catch(() => {});
+        }
+      }
+    });
+
+    return res.status(result.httpStatus).send(result.message);
+  } catch (err: any) {
+    console.error('Webhook product sync error:', sanitizeErrorMessage(err));
+    return res.status(500).send('Sync failed');
+  }
+});
+
+app.post('/api/webhooks/collections', async (req: any, res: Response) => {
+  const hmacHeader = req.get('X-Shopify-Hmac-Sha256') || '';
+  const shopDomain = req.get('X-Shopify-Shop-Domain') || '';
+  const topic = req.get('X-Shopify-Topic') || '';
+  const webhookId = req.get('X-Shopify-Webhook-Id') || '';
+  const secret = process.env.SHOPIFY_API_SECRET;
+
+  if (!secret || !verifyShopifyWebhookHmac(req.rawBody, hmacHeader, secret)) {
+    return res.status(401).send('Webhook authentication failed');
   }
 
   const shop = await getActiveShopByDomain(shopDomain);
@@ -258,14 +339,18 @@ app.post('/api/webhooks/products', async (req: any, res: Response) => {
   }
 
   try {
-    if (topic === 'products/delete') {
-      await deleteProductSnapshot(shop.id, req.body.id);
-    } else {
-      await syncProductSnapshot(shop.id, req.body);
-    }
-    return res.status(200).send('OK');
+    const result = await handleWebhookWithState(webhookId, topic, shopDomain, async () => {
+      if (topic === 'collections/delete') {
+        await deleteCollectionSnapshot(shop.id, req.body.id);
+      } else {
+        // collections/create or collections/update
+        await syncSingleCollectionFromShopify(shop.id, req.body.id);
+      }
+    });
+
+    return res.status(result.httpStatus).send(result.message);
   } catch (err: any) {
-    console.error('Webhook product sync error:', sanitizeErrorMessage(err));
+    console.error('Webhook collection sync error:', sanitizeErrorMessage(err));
     return res.status(500).send('Sync failed');
   }
 });
@@ -280,16 +365,12 @@ app.post('/api/webhooks/app/uninstalled', async (req: any, res: Response) => {
     return res.status(401).send('Webhook authentication failed');
   }
 
-  if (webhookId) {
-    const isNew = await handleWebhookIdempotency(webhookId, 'app/uninstalled', shopDomain);
-    if (!isNew) {
-      return res.status(200).send('Webhook already processed');
-    }
-  }
-
   try {
-    await uninstallShop(shopDomain);
-    return res.status(200).send('Uninstalled recorded');
+    const result = await handleWebhookWithState(webhookId, 'app/uninstalled', shopDomain, async () => {
+      await uninstallShop(shopDomain);
+    });
+
+    return res.status(result.httpStatus).send(result.message);
   } catch (err: any) {
     return res.status(500).send('Uninstall error');
   }
@@ -372,9 +453,22 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
     return res.status(401).json({ error: 'Invalid, expired, or untrusted session token' });
   }
 
-  const shop = await getActiveShopByDomain(decoded.shopDomain);
+  let shop = await getActiveShopByDomain(decoded.shopDomain);
   if (!shop) {
-    return res.status(401).json({ error: 'Shop not found or inactive' });
+    // Transparent token exchange for managed install/reinstall on embedded launch
+    try {
+      const exchangeResult = await exchangeSessionTokenForOfflineToken({
+        shopDomain: decoded.shopDomain,
+        sessionToken: token,
+      });
+      shop = await installOrUpdateShop({
+        shopDomain: decoded.shopDomain,
+        accessToken: exchangeResult.accessToken,
+      });
+      performInitialShopSync(shop.id).catch(() => {});
+    } catch {
+      return res.status(401).json({ error: 'Shop not found or inactive' });
+    }
   }
 
   req.shop = shop;

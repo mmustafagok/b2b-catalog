@@ -30,7 +30,7 @@ CatalogFlow follows the official Shopify Embedded App architecture with a dual-s
 - **Shopify Integration:** GraphQL Admin API `2026-07`
 - **Frontend:** React, Vite, Shopify Polaris
 - **Security:** AES-256-GCM authenticated encryption at rest for access tokens, HMAC SHA-256 webhook validation, JWT claim verification (aud, iss, dest, exp).
-- **Test Suite:** Vitest (41 unit and integration test cases)
+- **Test Suite:** Vitest (54 unit and integration test cases)
 
 ---
 
@@ -72,30 +72,33 @@ npm run prisma:migrate
 
 ## 4. Shopify Lifecycle & Synchronization
 
-### 4.1 Installation & Authentication
-1. **OAuth Initiation (`/auth/shopify`):** Initiates Shopify OAuth with scopes `read_products,read_inventory,write_draft_orders,read_draft_orders`.
-2. **Callback (`/auth/callback`):**
-   - Validates query HMAC signature.
-   - Exchanges authorization code for permanent offline access token.
-   - Encrypts access token at rest using AES-256-GCM.
-   - Ingests shop metadata and primary currency.
-   - Automatically triggers initial catalog synchronization.
+### 4.1 Shopify Managed Installation & Token Exchange
+1. **Managed Installation Surface:** Installation consent and scope authorization (`read_products,read_inventory,write_draft_orders,read_draft_orders`) are natively owned and presented by Shopify without legacy authorization-code OAuth redirects or manual install forms.
+2. **App Bridge Session Identity & Token Exchange (RFC 8693):**
+   - Embedded merchant admin loads with an App Bridge session token (ID token).
+   - Backend exchanges the session token for an offline access token via Shopify's Token Exchange endpoint (`urn:ietf:params:oauth:grant-type:token-exchange`).
+   - The acquired offline token is encrypted at rest using AES-256-GCM (`crypto.server.ts`).
+   - Reinstallations safely reactivate the shop record and refresh credentials.
+   - Transparently initializes background product & collection synchronization.
+3. **Session Token Validation:** Strict verification of HMAC signature, expiration (`exp`), not-before (`nbf`), audience (`aud`), and matching destination/issuer hosts (`iss`/`dest`).
 
-### 4.2 Initial Product & Collection Sync
-- A newly installed merchant's products are immediately synced via the centralized `ShopifyAdminClient` using GraphQL Admin API `2026-07`.
-- Sync runs in the background with cursor pagination (`products`, `collections`, `variants`).
-- Normalized into `ProductSnapshot`, `VariantSnapshot`, and `CollectionProductMembership`.
-- Sync status and counts are audited in `SyncRun`.
+### 4.2 Complete Collection & Variant Pagination
+- **Collection Membership Pagination:** Recursively pages through `collection.products(first: 100, after: $cursor)` until `hasNextPage: false`. Never truncates collection memberships; stale memberships are only replaced after the full membership set has resolved.
+- **Product Variant Pagination:** Recursively pages through `product.variants(first: 100, after: $cursor)` until `hasNextPage: false`. Supports Shopify's high-variant products; variants are never pruned prematurely.
+- **Selected Options Preservation:** GraphQL `selectedOptions` (`[{ name: 'Size', value: 'M' }, { name: 'Color', value: 'Black' }]`) are strictly preserved in `VariantSnapshot.selectedOptionsJson` and exposed in the public buyer payload.
 
-### 4.3 Exact Collection Membership Resolution
-- When a catalog sources a Shopify Collection, it resolves **only** the products that belong to that specific collection via `CollectionProductMembership`.
-- Mixed sources (e.g. Collection A + explicit Product C) are unioned without duplicates.
-- Product removal from collections in Shopify automatically updates resolved catalog contents.
+### 4.3 Webhook Idempotency State Machine
+- `WebhookReceipt` state machine tracks `PROCESSING` -> `COMPLETED` | `FAILED`:
+  - `PROCESSING`: Marks initial receipt; concurrent duplicates within lock window are rejected with `429` to avoid race conditions without losing events.
+  - `FAILED`: On processing exceptions, the endpoint returns non-2xx; Shopify retries re-enter `PROCESSING` and can succeed on retry.
+  - `COMPLETED`: Only successfully applied mutations are marked `COMPLETED`. Duplicate deliveries are acknowledged with `200 OK` without re-executing mutations.
+  - Last failure messages are sanitized (PII-free).
 
-### 4.4 Hardened & Idempotent Webhooks
-- Webhook endpoints fail closed: any request with missing secrets or invalid HMAC is rejected with `401 Unauthorized`.
-- Deduplication is guaranteed via `WebhookReceipt`: duplicate deliveries of `X-Shopify-Webhook-Id` are safely acknowledged with `200 OK` without duplicate processing.
-- Handled topics: `products/create`, `products/update`, `products/delete`, `app/uninstalled`.
+### 4.4 Collection & Product Webhook Synchronization
+- Subscribes to: `collections/create`, `collections/update`, `collections/delete`, `products/create`, `products/update`, `products/delete`, `app/uninstalled`.
+- `collections/update` / `create`: Fetches collection details and fully paginates product memberships, updating `CollectionSnapshot` and incrementing catalog `dataVersion`.
+- `collections/delete`: Removes snapshot and cascaded memberships, incrementing `dataVersion`.
+- `products/update`: Triggers targeted membership reconciliation for catalog-sourced collections so smart collections stay fresh.
 
 ### 4.5 Mandatory Compliance Webhooks
 - `customers/data_request`: Acknowledged (CatalogFlow retains zero customer PII).

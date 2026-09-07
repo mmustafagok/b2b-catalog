@@ -18,7 +18,7 @@ scopes = "read_products,read_inventory,write_draft_orders,read_draft_orders"
 
 [auth]
 redirect_urls = [
-  "https://app.catalogflow.io/auth/callback"
+  "https://app.catalogflow.io"
 ]
 
 [webhooks]
@@ -27,6 +27,10 @@ api_version = "2026-07"
 [[webhooks.subscriptions]]
 topics = [ "products/create", "products/update", "products/delete" ]
 uri = "/api/webhooks/products"
+
+[[webhooks.subscriptions]]
+topics = [ "collections/create", "collections/update", "collections/delete" ]
+uri = "/api/webhooks/collections"
 
 [[webhooks.subscriptions]]
 topics = [ "app/uninstalled" ]
@@ -43,3 +47,4 @@ uri = "/api/webhooks/compliance/customers-redact"
 [[webhooks.subscriptions]]
 compliance_topics = [ "shop/redact" ]
 uri = "/api/webhooks/compliance/shop-redact"
+

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import request from 'supertest';
+import { app } from '../src/server.js';
 import { prisma } from '../src/db.js';
 import {
   installOrUpdateShop,
@@ -14,6 +16,7 @@ import {
   hashIdempotencyKey,
   verifyAppBridgeJwt,
   isValidShopifyDomain,
+  exchangeSessionTokenForOfflineToken,
 } from '../src/services/auth.server.js';
 import { encryptToken, decryptToken, CryptoError } from '../src/services/crypto.server.js';
 import crypto from 'crypto';
@@ -223,4 +226,170 @@ describe('Milestone 1: Shop Lifecycle, Encryption & Auth Hardening', () => {
       expect(verifyAppBridgeJwt(`${header}.${expiredPayload}.${expiredSignature}`, secret, clientId)).toBeNull();
     });
   });
+
+  describe('Shopify Managed Installation & Token Exchange Boundary', () => {
+    const secret = 'managed_install_test_secret_123';
+    const clientId = 'managed_install_client_id_456';
+    const managedDomain = 'managed-store.myshopify.com';
+
+    beforeEach(async () => {
+      process.env.SHOPIFY_API_SECRET = secret;
+      process.env.SHOPIFY_API_KEY = clientId;
+      await prisma.shop.deleteMany({ where: { shopDomain: managedDomain } });
+    });
+
+    function createValidSessionToken(shopDomain: string = managedDomain): string {
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const now = Math.floor(Date.now() / 1000);
+      const payloadObj = {
+        dest: `https://${shopDomain}`,
+        iss: `https://${shopDomain}/admin`,
+        aud: clientId,
+        sub: 'user_456',
+        exp: now + 3600,
+        nbf: now - 10,
+        iat: now,
+        jti: 'jwt_id_456',
+        sid: 'session_456',
+      };
+      const payload = Buffer.from(JSON.stringify(payloadObj)).toString('base64url');
+      const signature = crypto
+        .createHmac('sha256', secret)
+        .update(`${header}.${payload}`)
+        .digest('base64url');
+      return `${header}.${payload}.${signature}`;
+    }
+
+    it('should exchange session token for offline access token via RFC 8693 token exchange', async () => {
+      const sessionToken = createValidSessionToken();
+
+      // Mock fetch response from Shopify token exchange
+      const mockFetch: any = async (url: string, options: any) => {
+        expect(url).toBe(`https://${managedDomain}/admin/oauth/access_token`);
+        const body = JSON.parse(options.body);
+        expect(body.client_id).toBe(clientId);
+        expect(body.client_secret).toBe(secret);
+        expect(body.grant_type).toBe('urn:ietf:params:oauth:grant-type:token-exchange');
+        expect(body.subject_token).toBe(sessionToken);
+        expect(body.requested_token_type).toBe('urn:shopify:params:oauth:token-type:offline-access-token');
+
+        return {
+          ok: true,
+          json: async () => ({
+            access_token: 'shpat_offline_exchanged_token_789',
+            scope: 'read_products,read_inventory,write_draft_orders,read_draft_orders',
+          }),
+        };
+      };
+
+      const result = await exchangeSessionTokenForOfflineToken({
+        shopDomain: managedDomain,
+        sessionToken,
+        clientId,
+        clientSecret: secret,
+        fetchFn: mockFetch,
+      });
+
+      expect(result.accessToken).toBe('shpat_offline_exchanged_token_789');
+      expect(result.scope).toContain('read_products');
+    });
+
+    it('should complete managed install via /api/auth/token-exchange endpoint', async () => {
+      const sessionToken = createValidSessionToken();
+
+      // Intercept global fetch for token exchange
+      const originalFetch = global.fetch;
+      global.fetch = async (url: any, options: any) => {
+        if (typeof url === 'string' && url.includes('/admin/oauth/access_token')) {
+          return {
+            ok: true,
+            json: async () => ({
+              access_token: 'shpat_offline_exchanged_token_endpoint',
+              scope: 'read_products',
+            }),
+            text: async () => '',
+          } as any;
+        }
+        return originalFetch(url, options);
+      };
+
+      try {
+        const res = await request(app)
+          .post('/api/auth/token-exchange')
+          .set('Authorization', `Bearer ${sessionToken}`)
+          .send();
+
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(res.body.shopDomain).toBe(managedDomain);
+        expect(res.body.installed).toBe(true);
+
+        // Verify shop was installed in DB
+        const shop = await prisma.shop.findUnique({ where: { shopDomain: managedDomain } });
+        expect(shop).not.toBeNull();
+        expect(shop?.uninstalledAt).toBeNull();
+
+        // Verify access token is encrypted
+        const decrypted = await getDecryptedAccessToken(shop!.id);
+        expect(decrypted).toBe('shpat_offline_exchanged_token_endpoint');
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it('should reactivate credentials on reinstall via token exchange', async () => {
+      // 1. Initial install
+      await installOrUpdateShop({
+        shopDomain: managedDomain,
+        accessToken: 'shpat_old_revoked_token',
+      });
+
+      // 2. Merchant uninstalls
+      await uninstallShop(managedDomain);
+      let shop = await prisma.shop.findUnique({ where: { shopDomain: managedDomain } });
+      expect(shop?.uninstalledAt).not.toBeNull();
+
+      // 3. Merchant reinstalls through Shopify admin (triggers token exchange)
+      const sessionToken = createValidSessionToken();
+      const originalFetch = global.fetch;
+      global.fetch = async (url: any, options: any) => {
+        if (typeof url === 'string' && url.includes('/admin/oauth/access_token')) {
+          return {
+            ok: true,
+            json: async () => ({
+              access_token: 'shpat_freshly_reinstalled_token',
+              scope: 'read_products',
+            }),
+            text: async () => '',
+          } as any;
+        }
+        return originalFetch(url, options);
+      };
+
+      try {
+        const res = await request(app)
+          .post('/api/auth/token-exchange')
+          .set('Authorization', `Bearer ${sessionToken}`)
+          .send();
+
+        expect(res.status).toBe(200);
+        shop = await prisma.shop.findUnique({ where: { shopDomain: managedDomain } });
+        expect(shop?.uninstalledAt).toBeNull();
+
+        const activeToken = await getDecryptedAccessToken(shop!.id);
+        expect(activeToken).toBe('shpat_freshly_reinstalled_token');
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it('should reject legacy OAuth routes with 404 (authorization-code flow removed)', async () => {
+      const resShopify = await request(app).get('/auth/shopify?shop=test.myshopify.com');
+      expect(resShopify.status).toBe(404);
+
+      const resCallback = await request(app).get('/auth/callback?shop=test.myshopify.com&code=123');
+      expect(resCallback.status).toBe(404);
+    });
+  });
 });
+

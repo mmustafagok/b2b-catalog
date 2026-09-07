@@ -199,11 +199,16 @@ model SyncRun {
 }
 
 model WebhookReceipt {
-  id          String   @id @default(uuid())
-  webhookId   String   @unique
+  id          String    @id @default(uuid())
+  webhookId   String    @unique
   topic       String
   shopDomain  String
-  processedAt DateTime @default(now())
+  status      String    @default("PROCESSING") // PROCESSING, COMPLETED, FAILED
+  attempts    Int       @default(1)
+  lastError   String?
+  processedAt DateTime  @default(now())
+  completedAt DateTime?
 
   @@index([webhookId])
+  @@index([status])
 }

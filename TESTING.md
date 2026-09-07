@@ -35,9 +35,9 @@ npm run typecheck
 
 ---
 
-## 3. Test Suites & Coverage Summary (41 Tests)
+## 3. Test Suites & Coverage Summary (54 Tests)
 
-### 3.1 Milestone 1: Shop Lifecycle, Auth & Encryption (`tests/m1_lifecycle_and_auth.test.ts` — 11 Tests)
+### 3.1 Milestone 1: Shop Lifecycle, Auth & Encryption (`tests/m1_lifecycle_and_auth.test.ts` — 15 Tests)
 - Initial shop installation with encrypted access token and default Starter plan.
 - Shop uninstallation setting `uninstalledAt` and revoking token.
 - Shop re-installation reactivating previously uninstalled shops.
@@ -47,6 +47,11 @@ npm run typecheck
 - Shopify webhook HMAC SHA-256 validation (accepts valid, rejects tampered/empty).
 - Strict myshopify domain format validation.
 - App Bridge JWT session token verification (exp, nbf, aud, iss, dest host match).
+- **Shopify Managed Installation & Token Exchange (RFC 8693):**
+  - Session token exchange for offline access token.
+  - Managed install bootstrap via `POST /api/auth/token-exchange`.
+  - Reinstallation safely refreshes and reactivates credentials.
+  - Legacy OAuth routes (`/auth/shopify`, `/auth/callback`) return 404 (removed).
 
 ### 3.2 Milestone 2: Merchant Catalog Domain & CRUD (`tests/m2_catalog_domain.test.ts` — 5 Tests)
 - Catalog creation in `DRAFT` status with sources, 256-bit token, and data versioning.
@@ -72,14 +77,26 @@ npm run typecheck
 - Out-of-stock detection during pre-submit validation.
 - Merchant Admin API authentication middleware and tenant scoping.
 
-### 3.5 Milestone 4.5: Collections, Initial Sync & Webhooks (`tests/m4_5_collections_and_sync.test.ts` — 12 Tests)
+### 3.5 Milestone 4.5: Collections, Initial Sync & Webhooks (`tests/m4_5_collections_and_sync.test.ts` — 21 Tests)
 - **Exact Collection Resolution:** Sourcing Collection A resolves only products in Collection A, never products from Collection B.
 - **Mixed Sourcing:** Collection A + explicit Product C resolves without duplicates.
 - **Dynamic Membership:** Removing a product from a collection removes it from resolved catalogs.
+- **Collection Pagination:** Fully paginates collection product memberships (>100 products across multiple pages) without dropping products.
+- **Variant Pagination:** Fully paginates product variants (>50 variants across multiple pages) without premature pruning.
+- **Selected Options Preservation:** Preserves GraphQL `selectedOptions` (`Size=M` / `Color=Black`) through snapshot sync into public buyer payload.
 - **Initial Sync:** Paginated Shopify Admin GraphQL sync for collections, products, variants, and currency.
 - **Sync Failure Audit:** Records `SyncRun` status = `FAILED` on Shopify API errors.
 - **Webhook Fail-Closed:** Webhooks without valid HMAC or secret return `401`.
-- **Webhook Idempotency:** Duplicate `X-Shopify-Webhook-Id` is recognized and safely acknowledged.
+- **Webhook Idempotency State Machine:**
+  - `FAILED` delivery records failure status and allows Shopify retry.
+  - Retried webhook succeeds and transitions to `COMPLETED`.
+  - Duplicate delivery of `COMPLETED` webhook safely acknowledges with 200 without re-executing.
+  - Concurrent delivery while `PROCESSING` returns 429 lock protection.
+- **Collection Webhook Synchronization:**
+  - `collections/update` adds product to collection and updates public catalog payload.
+  - `collections/update` removes product from collection and updates public catalog payload.
+  - `collections/delete` deletes collection snapshot and increments catalog `dataVersion`.
+  - `products/update` reconciles catalog-sourced collections.
 - **Compliance Webhooks:**
   - `customers/data_request` returns 200 acknowledgment.
   - `customers/redact` returns 200 acknowledgment.

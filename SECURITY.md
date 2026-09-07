@@ -34,10 +34,16 @@ Embedded Admin requests require a Bearer token issued by Shopify App Bridge. The
 
 ---
 
-## 4. Webhook Security & Idempotency
+## 4. Webhook Security & Idempotency State Machine
 
 - **Fail-Closed Execution:** If `SHOPIFY_API_SECRET` is missing, or if HMAC signature verification fails, requests return `401 Unauthorized`.
-- **Idempotency Guard:** Uses `WebhookReceipt` indexed by `X-Shopify-Webhook-Id`. Duplicate deliveries are acknowledged immediately with HTTP 200 without executing duplicate database mutations.
+- **State Machine Idempotency Guard (`WebhookReceipt`):**
+  - Tracks `PROCESSING`, `COMPLETED`, and `FAILED` states indexed uniquely by `X-Shopify-Webhook-Id`.
+  - **COMPLETED Duplicates:** Safely acknowledged immediately with HTTP 200 without duplicate mutation execution.
+  - **FAILED Deliveries:** If a mutation fails (e.g. transient network or DB timeout), the endpoint returns HTTP 500, marking the receipt `FAILED`. Subsequent Shopify retries are allowed to re-enter `PROCESSING` and succeed.
+  - **Concurrent PROCESSING Duplicates:** Incoming duplicates while a prior delivery is actively `PROCESSING` within the lock window return HTTP 429 to avoid race conditions without losing the delivery.
+  - **Sanitized Failure Metadata:** Error messages stored on failure are sanitized and truncated (PII-free).
+
 
 ---
 
