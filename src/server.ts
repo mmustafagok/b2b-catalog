@@ -501,7 +501,7 @@ app.post('/api/webhooks/products', async (req: any, res: Response) => {
         } else {
           await syncProductSnapshot(shop.id, req.body);
           if (topic === 'products/update') {
-            await reconcileSourcedCollectionsForShop(shop.id).catch(() => {});
+            await reconcileSourcedCollectionsForShop(shop.id).catch(() => { });
           }
         }
       }
@@ -689,7 +689,7 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
         refreshTokenExpiresAt: refreshExpiry,
         scopes: exchangeResult.scope,
       });
-      ensureInitialShopSync(shop.id).catch(() => {});
+      ensureInitialShopSync(shop.id).catch(() => { });
     } catch (err: any) {
       if (err instanceof ShopifyStaleSessionTokenError) {
         return res
@@ -1224,7 +1224,7 @@ function sendRenderedIndexHtml(res: Response, filePath: string) {
   try {
     let html = fs.readFileSync(filePath, 'utf-8');
     const apiKey = process.env.SHOPIFY_API_KEY || process.env.VITE_SHOPIFY_API_KEY || '';
-    
+
     // Replace %VITE_SHOPIFY_API_KEY% placeholder
     html = html.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
 
@@ -1274,7 +1274,7 @@ app.get(['/', '/app', '/app/*'], (_req: Request, res: Response) => {
   }
 });
 
-const PORT = Number(process.env.PORT || 8088);
+const PORT = Number(process.env.PORT || 8080);
 
 if (!process.env.VITEST) {
   app.listen(PORT, '0.0.0.0', () => {
