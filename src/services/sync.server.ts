@@ -8,7 +8,7 @@ export interface ShopifyWebhookProductVariant {
   title: string;
   price: string | number;
   sku: string | null;
-  barcode: string | null;
+  barcode?: string | null;
   inventory_quantity?: number;
   available?: boolean;
   image_id?: number | null;

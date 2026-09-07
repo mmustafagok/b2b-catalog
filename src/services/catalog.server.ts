@@ -10,8 +10,8 @@ import {
 import { generateOpaqueToken } from './auth.server.js';
 import { z } from 'zod';
 
-export type CreateCatalogInput = z.infer<typeof CreateCatalogInputSchema>;
-export type UpdateCatalogInput = z.infer<typeof UpdateCatalogInputSchema>;
+export type CreateCatalogInput = z.input<typeof CreateCatalogInputSchema>;
+export type UpdateCatalogInput = z.input<typeof UpdateCatalogInputSchema>;
 
 export class CatalogError extends Error {
   constructor(message: string, public statusCode: number = 400, public code: string = 'CATALOG_ERROR') {
