@@ -131,16 +131,17 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
   - Real-time catalog validation against PostgreSQL snapshots before Shopify mutation.
   - GraphQL `draftOrderCreate` mutation with exact decimal unit pricing, discount titles, buyer notes, and shipping address.
   - Returns draft order ID, draft order name, total items, and formatted subtotal.
-- [x] **M5.5: Order Boundary Hardening & Concurrency Safety** *(Complete)*
+- [x] **M5.5 & M5.6: Order Boundary Hardening, Failure Classification & Concurrency Safety** *(Complete)*
   - Rebuilt order idempotency as a formal state machine (`CREATING` $\rightarrow$ `COMPLETED` | `FAILED` | `REQUIRES_RECONCILIATION`).
   - Pre-Shopify database reservation prevents concurrent duplicate Draft Orders (`409 CONCURRENT_PROCESSING`).
+  - Strict failure classification: conclusive GraphQL `userErrors` mark `FAILED` and release quota; ambiguous transport timeouts / 5xx mark `REQUIRES_RECONCILIATION` and preserve reserved quota.
   - Deterministic non-PII correlation reference (`cf-sub:<submissionId>`) on tags and custom attributes allows zero-duplicate Shopify-side GraphQL reconciliation.
+  - FAILED retry quota re-reservation: retrying a `FAILED` submission atomically re-reserves a quota slot before transitioning to `CREATING`; prevents usage bypass.
+  - Billing cycle rollover Compare-And-Set (CAS): atomic conditional SQL update prevents concurrent callers from overwriting active counts across 30-day boundary.
+  - Clean manual sync engine: separated `executeFullShopSync` from `performInitialShopSync`; manual triggers generate exactly ONE `MANUAL` `SyncRun` with zero nested `INITIAL` runs.
   - Strict catalog authorization rejects out-of-catalog or cross-catalog variants (`422 INVALID_LINES`).
   - Submit-time `dataVersion` validation prevents orders on stale catalog pricing/structure (`409 CATALOG_CHANGED`).
-  - Concurrency-safe atomic quota reservation (`UPDATE ... WHERE monthlySubmissionsCount < limit`) prevents over-quota submissions.
-  - Rolling 30-day billing cycle quota reset based on `billingCycleAnchor`.
   - Privacy hygiene: removed public token and idempotency key from Shopify tags/attributes; zero buyer PII persisted.
-  - Deduplicated manual sync triggering with `409 SYNC_IN_PROGRESS`.
 - [x] **M6: Submissions History & Merchant Operations** *(Complete)*
   - Submissions list endpoint (`GET /api/admin/submissions`) with pagination and summary metrics.
   - Direct deep links to native Shopify Admin Draft Orders.

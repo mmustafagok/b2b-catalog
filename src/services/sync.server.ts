@@ -590,11 +590,20 @@ export async function reconcileSourcedCollectionsForShop(
   }
 }
 
+export interface SyncStats {
+  collectionsSynced: number;
+  productsSynced: number;
+  variantsSynced: number;
+}
+
 /**
- * Performs a complete initial product and collection sync from Shopify Admin GraphQL.
- * Fully paginates collections, products, and variants.
+ * Reusable full-store sync engine. Performs data fetching and snapshot updates only.
+ * Does not create or manage SyncRun records.
  */
-export async function performInitialShopSync(shopId: string, customClient?: ShopifyAdminClient) {
+export async function executeFullShopSync(
+  shopId: string,
+  customClient?: ShopifyAdminClient
+): Promise<SyncStats> {
   const currentShop = await prisma.shop.findUnique({
     where: { id: shopId },
   });
@@ -603,6 +612,200 @@ export async function performInitialShopSync(shopId: string, customClient?: Shop
   }
 
   const client = customClient || createShopifyClient(currentShop);
+
+  // 1. Fetch shop currency
+  const shopQuery = `
+    query {
+      shop {
+        currencyCode
+      }
+    }
+  `;
+  const shopData = await client.request<{ shop: { currencyCode: string } }>(shopQuery);
+  if (shopData.shop?.currencyCode) {
+    await prisma.shop.update({
+      where: { id: shopId },
+      data: { currency: shopData.shop.currencyCode },
+    });
+  }
+
+  // 2. Fetch collections with complete product pagination
+  const collectionsQuery = `
+    query getCollections($cursor: String) {
+      collections(first: 50, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            title
+            handle
+            updatedAt
+            products(first: 100) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              edges {
+                node {
+                  id
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  let collCursor: string | null = null;
+  let hasNextColl = true;
+  let collectionsSynced = 0;
+
+  while (hasNextColl) {
+    const collRes: any = await client.request(collectionsQuery, { cursor: collCursor });
+    const edges = collRes.collections?.edges || [];
+
+    for (const edge of edges) {
+      const node = edge.node;
+      const initialEdges = node.products?.edges || [];
+      const initialPageInfo = node.products?.pageInfo;
+
+      // Fully paginate product memberships for this collection
+      const productIds = await fetchAllCollectionProductIds(
+        client,
+        node.id,
+        initialEdges,
+        initialPageInfo
+      );
+
+      await syncCollectionSnapshot(shopId, {
+        id: node.id,
+        title: node.title,
+        handle: node.handle,
+        updated_at: node.updatedAt,
+        productIds,
+      });
+      collectionsSynced++;
+    }
+
+    hasNextColl = collRes.collections?.pageInfo?.hasNextPage || false;
+    collCursor = collRes.collections?.pageInfo?.endCursor || null;
+  }
+
+  // 3. Fetch products with complete variant pagination
+  const productsQuery = `
+    query getProducts($cursor: String) {
+      products(first: 50, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            title
+            vendor
+            handle
+            status
+            updatedAt
+            images(first: 1) {
+              edges {
+                node {
+                  url
+                }
+              }
+            }
+            options {
+              name
+              position
+            }
+            variants(first: 50) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  barcode
+                  price
+                  availableForSale
+                  inventoryQuantity
+                  selectedOptions {
+                    name
+                    value
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  let prodCursor: string | null = null;
+  let hasNextProd = true;
+  let productsSynced = 0;
+  let variantsSynced = 0;
+
+  while (hasNextProd) {
+    const prodRes: any = await client.request(productsQuery, { cursor: prodCursor });
+    const edges = prodRes.products?.edges || [];
+
+    for (const edge of edges) {
+      const node = edge.node;
+      const imageUrl = node.images?.edges?.[0]?.node?.url || null;
+      const initialVariantEdges = node.variants?.edges || [];
+      const initialVariantPageInfo = node.variants?.pageInfo;
+
+      // Fully paginate all variants for this product
+      const allVariants = await fetchAllProductVariants(
+        client,
+        node.id,
+        initialVariantEdges,
+        initialVariantPageInfo
+      );
+
+      await syncProductSnapshot(shopId, {
+        id: node.id,
+        title: node.title,
+        vendor: node.vendor,
+        handle: node.handle,
+        status: node.status,
+        image: imageUrl ? { src: imageUrl } : null,
+        options: node.options,
+        variants: allVariants,
+        updated_at: node.updatedAt,
+      });
+
+      productsSynced++;
+      variantsSynced += allVariants.length;
+    }
+
+    hasNextProd = prodRes.products?.pageInfo?.hasNextPage || false;
+    prodCursor = prodRes.products?.pageInfo?.endCursor || null;
+  }
+
+  return { collectionsSynced, productsSynced, variantsSynced };
+}
+
+/**
+ * Performs a complete initial product and collection sync from Shopify Admin GraphQL.
+ * Creates an INITIAL SyncRun and sets initialSyncAt on completion.
+ */
+export async function performInitialShopSync(shopId: string, customClient?: ShopifyAdminClient): Promise<SyncStats> {
+  const currentShop = await prisma.shop.findUnique({
+    where: { id: shopId },
+  });
+  if (!currentShop || currentShop.uninstalledAt !== null) {
+    return { collectionsSynced: 0, productsSynced: 0, variantsSynced: 0 };
+  }
 
   let syncRun;
   try {
@@ -619,203 +822,33 @@ export async function performInitialShopSync(shopId: string, customClient?: Shop
   }
 
   try {
-    // 1. Fetch shop currency
-    const shopQuery = `
-      query {
-        shop {
-          currencyCode
-        }
+    const stats = await executeFullShopSync(shopId, customClient);
+
+    try {
+      const runExists = await prisma.syncRun.findUnique({ where: { id: syncRun.id } });
+      if (runExists) {
+        await prisma.$transaction([
+          prisma.syncRun.update({
+            where: { id: syncRun.id },
+            data: {
+              status: 'COMPLETED',
+              finishedAt: new Date(),
+              statsJson: JSON.stringify(stats),
+            },
+          }),
+          prisma.shop.update({
+            where: { id: shopId },
+            data: {
+              initialSyncAt: new Date(),
+            },
+          }),
+        ]);
       }
-    `;
-    const shopData = await client.request<{ shop: { currencyCode: string } }>(shopQuery);
-    if (shopData.shop?.currencyCode) {
-      await prisma.shop.update({
-        where: { id: shopId },
-        data: { currency: shopData.shop.currencyCode },
-      });
+    } catch {
+      // Record may have been deleted by cascade on shop deletion
     }
 
-    // 2. Fetch collections with complete product pagination
-    const collectionsQuery = `
-      query getCollections($cursor: String) {
-        collections(first: 50, after: $cursor) {
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-          edges {
-            node {
-              id
-              title
-              handle
-              updatedAt
-              products(first: 100) {
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-                edges {
-                  node {
-                    id
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    let collCursor: string | null = null;
-    let hasNextColl = true;
-    let collectionsSynced = 0;
-
-    while (hasNextColl) {
-      const collRes: any = await client.request(collectionsQuery, { cursor: collCursor });
-      const edges = collRes.collections?.edges || [];
-
-      for (const edge of edges) {
-        const node = edge.node;
-        const initialEdges = node.products?.edges || [];
-        const initialPageInfo = node.products?.pageInfo;
-
-        // Fully paginate product memberships for this collection
-        const productIds = await fetchAllCollectionProductIds(
-          client,
-          node.id,
-          initialEdges,
-          initialPageInfo
-        );
-
-        await syncCollectionSnapshot(shopId, {
-          id: node.id,
-          title: node.title,
-          handle: node.handle,
-          updated_at: node.updatedAt,
-          productIds,
-        });
-        collectionsSynced++;
-      }
-
-      hasNextColl = collRes.collections?.pageInfo?.hasNextPage || false;
-      collCursor = collRes.collections?.pageInfo?.endCursor || null;
-    }
-
-    // 3. Fetch products with complete variant pagination
-    const productsQuery = `
-      query getProducts($cursor: String) {
-        products(first: 50, after: $cursor) {
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-          edges {
-            node {
-              id
-              title
-              vendor
-              handle
-              status
-              updatedAt
-              images(first: 1) {
-                edges {
-                  node {
-                    url
-                  }
-                }
-              }
-              options {
-                name
-                position
-              }
-              variants(first: 50) {
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-                edges {
-                  node {
-                    id
-                    title
-                    sku
-                    barcode
-                    price
-                    availableForSale
-                    inventoryQuantity
-                    selectedOptions {
-                      name
-                      value
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    let prodCursor: string | null = null;
-    let hasNextProd = true;
-    let productsSynced = 0;
-    let variantsSynced = 0;
-
-    while (hasNextProd) {
-      const prodRes: any = await client.request(productsQuery, { cursor: prodCursor });
-      const edges = prodRes.products?.edges || [];
-
-      for (const edge of edges) {
-        const node = edge.node;
-        const imageUrl = node.images?.edges?.[0]?.node?.url || null;
-        const initialVariantEdges = node.variants?.edges || [];
-        const initialVariantPageInfo = node.variants?.pageInfo;
-
-        // Fully paginate all variants for this product
-        const allVariants = await fetchAllProductVariants(
-          client,
-          node.id,
-          initialVariantEdges,
-          initialVariantPageInfo
-        );
-
-        await syncProductSnapshot(shopId, {
-          id: node.id,
-          title: node.title,
-          vendor: node.vendor,
-          handle: node.handle,
-          status: node.status,
-          image: imageUrl ? { src: imageUrl } : null,
-          options: node.options,
-          variants: allVariants,
-          updated_at: node.updatedAt,
-        });
-
-        productsSynced++;
-        variantsSynced += allVariants.length;
-      }
-
-      hasNextProd = prodRes.products?.pageInfo?.hasNextPage || false;
-      prodCursor = prodRes.products?.pageInfo?.endCursor || null;
-    }
-
-    await prisma.$transaction([
-      prisma.syncRun.update({
-        where: { id: syncRun.id },
-        data: {
-          status: 'COMPLETED',
-          finishedAt: new Date(),
-          statsJson: JSON.stringify({ collectionsSynced, productsSynced, variantsSynced }),
-        },
-      }),
-      prisma.shop.update({
-        where: { id: shopId },
-        data: {
-          initialSyncAt: new Date(),
-        },
-      }),
-    ]);
-
-    return { collectionsSynced, productsSynced, variantsSynced };
+    return stats;
   } catch (err: any) {
     try {
       const existingRun = await prisma.syncRun.findUnique({ where: { id: syncRun.id } });
@@ -941,8 +974,12 @@ export class SyncInProgressError extends Error {
 /**
  * Concurrency-protected manual sync launcher.
  * Rejects overlapping clicks if a sync run is currently IN_PROGRESS (within 15 minute lock window).
+ * Executes executeFullShopSync directly, creating exactly ONE SyncRun of type MANUAL.
  */
-export async function triggerManualShopSync(shopId: string): Promise<{ syncRunId: string }> {
+export async function triggerManualShopSync(
+  shopId: string,
+  customClient?: ShopifyAdminClient
+): Promise<{ syncRunId: string; promise: Promise<SyncStats> }> {
   const activeSync = await prisma.syncRun.findFirst({
     where: {
       shopId,
@@ -970,31 +1007,47 @@ export async function triggerManualShopSync(shopId: string): Promise<{ syncRunId
     },
   });
 
-  // Run in background without blocking response
-  (async () => {
+  // Execute full sync directly under the single MANUAL SyncRun
+  const syncPromise = (async () => {
     try {
-      const stats = await performInitialShopSync(shopId);
-      await prisma.syncRun.update({
-        where: { id: syncRun.id },
-        data: {
-          status: 'COMPLETED',
-          finishedAt: new Date(),
-          statsJson: JSON.stringify(stats),
-        },
-      });
+      const stats = await executeFullShopSync(shopId, customClient);
+      try {
+        const runExists = await prisma.syncRun.findUnique({ where: { id: syncRun.id } });
+        if (runExists) {
+          await prisma.syncRun.update({
+            where: { id: syncRun.id },
+            data: {
+              status: 'COMPLETED',
+              finishedAt: new Date(),
+              statsJson: JSON.stringify(stats),
+            },
+          });
+        }
+      } catch {
+        // Record may have been deleted by cascade or test cleanup
+      }
+      return stats;
     } catch (err: any) {
-      await prisma.syncRun.update({
-        where: { id: syncRun.id },
-        data: {
-          status: 'FAILED',
-          finishedAt: new Date(),
-          statsJson: JSON.stringify({ error: err.message }),
-        },
-      });
+      try {
+        const runExists = await prisma.syncRun.findUnique({ where: { id: syncRun.id } });
+        if (runExists) {
+          await prisma.syncRun.update({
+            where: { id: syncRun.id },
+            data: {
+              status: 'FAILED',
+              finishedAt: new Date(),
+              statsJson: JSON.stringify({ error: err.message }),
+            },
+          });
+        }
+      } catch {
+        // Record may have been deleted by cascade or test cleanup
+      }
+      return null;
     }
-  })().catch(() => {});
+  })();
 
-  return { syncRunId: syncRun.id };
+  return { syncRunId: syncRun.id, promise: syncPromise as Promise<SyncStats> };
 }
 
 /**

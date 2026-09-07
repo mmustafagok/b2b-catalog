@@ -9,7 +9,7 @@ import {
 } from './shop.server.js';
 import { resolveCatalogAllowedProductGids } from './sync.server.js';
 import { hashIdempotencyKey } from './auth.server.js';
-import { ShopifyAdminClient } from './shopify-client.server.js';
+import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server.js';
 
 export class OrderSubmissionError extends Error {
   constructor(
@@ -172,7 +172,17 @@ export async function submitBuyerOrder(
     } else if (submission.status === 'REQUIRES_RECONCILIATION') {
       needsReconciliation = true;
     } else if (submission.status === 'FAILED') {
-      // Prior attempt failed before side effects; re-open attempt
+      // Prior attempt failed before side effects and released its slot.
+      // Must reconcile billing cycle and atomically reserve a new quota slot before transitioning back to CREATING.
+      const quota = await checkShopQuota(catalog.shopId);
+      const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, quota.limits.monthlySubmissionsLimit);
+      if (!slotReserved) {
+        throw new OrderSubmissionError(
+          'Merchant order submission limit reached for their current plan. Please contact the merchant.',
+          403,
+          'QUOTA_EXCEEDED'
+        );
+      }
       submission = await prisma.orderSubmission.update({
         where: { id: submission.id },
         data: {
@@ -462,13 +472,34 @@ export async function submitBuyerOrder(
   try {
     draftRes = await client.request(draftOrderMutation, { input: draftOrderInput });
   } catch (mutationErr: any) {
-    await releaseSubmissionQuotaSlot(catalog.shopId);
+    // Conclusive rejection: GraphQL userErrors returned by Shopify
+    if (mutationErr instanceof ShopifyGraphQLError && mutationErr.userErrors && mutationErr.userErrors.length > 0) {
+      await releaseSubmissionQuotaSlot(catalog.shopId);
+      await prisma.orderSubmission.update({
+        where: { id: submission.id },
+        data: { status: 'FAILED', lastError: 'Shopify rejected draft order creation' },
+      });
+      throw new OrderSubmissionError(
+        'Shopify Draft Order creation was rejected. Please review order items.',
+        422,
+        'VALIDATION_FAILED'
+      );
+    }
+
+    // Ambiguous failure: transport failure, timeout, ECONNRESET, HTTP 5xx, or socket disconnect.
+    // The request may have reached Shopify and created the draft order before the connection was lost.
+    // DO NOT release quota.
+    // Mark submission as REQUIRES_RECONCILIATION and preserve correlationRef for subsequent tag-based reconciliation.
     await prisma.orderSubmission.update({
       where: { id: submission.id },
-      data: { status: 'FAILED', lastError: 'Draft order creation connection failure' },
+      data: {
+        status: 'REQUIRES_RECONCILIATION',
+        correlationRef: correlationTag,
+        lastError: 'Ambiguous transport failure during draft order creation',
+      },
     });
     throw new OrderSubmissionError(
-      'Unable to create draft order on Shopify at this time. Please try again.',
+      'Draft order creation encountered a network error or timeout. Please retry to confirm order status.',
       502,
       'SHOPIFY_API_ERROR'
     );
@@ -489,10 +520,14 @@ export async function submitBuyerOrder(
 
   const createdDraft = draftRes.draftOrderCreate?.draftOrder;
   if (!createdDraft || !createdDraft.id) {
-    await releaseSubmissionQuotaSlot(catalog.shopId);
+    // Ambiguous response: response was received without userErrors but missing draftOrder id
     await prisma.orderSubmission.update({
       where: { id: submission.id },
-      data: { status: 'FAILED', lastError: 'Shopify returned invalid response' },
+      data: {
+        status: 'REQUIRES_RECONCILIATION',
+        correlationRef: correlationTag,
+        lastError: 'Shopify returned ambiguous response without draft order id',
+      },
     });
     throw new OrderSubmissionError('Shopify Draft Order creation returned an invalid response', 502, 'SHOPIFY_API_ERROR');
   }

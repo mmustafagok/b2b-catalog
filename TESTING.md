@@ -35,7 +35,7 @@ npm run typecheck
 
 ---
 
-## 3. Test Suites & Coverage Summary (65 Tests)
+## 3. Test Suites & Coverage Summary (101 Tests across 8 Suites)
 
 ### 3.1 Milestone 1 & 4.5 Auth: Shop Lifecycle, Auth, Encryption & Token Rotation (`tests/m1_lifecycle_and_auth.test.ts` — 26 Tests)
 - **Lifecycle & Plans:**
@@ -140,11 +140,22 @@ npm run typecheck
 - Filter submissions by `catalogId`.
 - Comprehensive sync health summary (`GET /api/admin/sync/health`).
 
-### 3.8 Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees (`tests/m5_5_order_boundary_hardening.test.ts` — 11 Tests)
+### 3.8 Milestone 5.5 & 5.6: Order Boundary Hardening, Concurrency Guarantees & Failure Classification (`tests/m5_5_order_boundary_hardening.test.ts` — 16 Tests)
 - **Concurrency & Idempotency State Machine:**
   - Two concurrent same-key submissions (`Promise.all`) execute exactly one Shopify mutation; second receives in-progress/existing result.
   - Shopify mutation succeeds + DB update throws -> retry reconciles via correlation tag (`cf-sub:<id>`) with zero duplicate Draft Orders.
   - Different idempotency keys intentionally create separate Draft Orders.
+- **Ambiguous Failure Classification & Reconciliation (M5.6):**
+  - E2E submit flow: timeout / network failure right after draftOrderCreate side effect sets local state to `REQUIRES_RECONCILIATION`.
+  - Reserved quota slot is preserved (not prematurely released on ambiguous transport failure).
+  - Subsequent retry searches by `tag:cf-sub:<id>`, recovers original Draft Order, marks submission `COMPLETED`, and maintains draftOrderCreate call count at exactly 1.
+- **FAILED Retry Quota Lifecycle (M5.6):**
+  - Conclusive rejection (GraphQL `userErrors`) releases reserved quota and marks `FAILED`.
+  - Same-key retry of a `FAILED` submission atomically re-reserves a quota slot before transitioning back to `CREATING`.
+  - If store quota reaches limit between attempts, retry is rejected with `403 QUOTA_EXCEEDED` without calling Shopify.
+- **Billing Cycle Rollover Compare-And-Set (CAS) (M5.6):**
+  - Multiple concurrent reservation requests across expired 30-day boundary execute atomic CAS rollover.
+  - Exactly one cycle reset occurs; subsequent concurrent reservations increment active counter accurately without race loss.
 - **Catalog Authorization:**
   - Same-shop but out-of-catalog variant rejected with `HTTP 422 INVALID_LINES` before calling Shopify.
   - Mixed valid/invalid cart rejected entirely without partial draft orders.
@@ -156,7 +167,9 @@ npm run typecheck
   - 30-day billing period rollover automatically resets usage and advances anchor.
   - 49/50 quota with two concurrent distinct submissions (`Promise.all`) -> exactly one succeeds, one receives `403 QUOTA_EXCEEDED`.
   - Failed-before-side-effect attempt releases reserved quota slot.
-- **Manual Sync Deduplication:**
+- **Manual Sync Single-Run Architecture (M5.6):**
+  - Manual sync trigger creates exactly ONE `SyncRun` of type `MANUAL`.
+  - Zero nested `INITIAL` runs created; `initialSyncAt` timestamp remains untouched by manual sync.
   - Overlapping click while sync is `IN_PROGRESS` returns `HTTP 409 SYNC_IN_PROGRESS`.
 - **Privacy & Metadata:**
   - Draft Order custom attributes strictly exclude `CatalogFlow Public Token` and raw idempotency key.

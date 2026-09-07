@@ -682,4 +682,365 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
     expect(dbString).not.toContain('privacy@advocates.org');
     expect(dbString).not.toContain('Handle with care');
   });
+
+  // ==========================================
+  // 7. M5.6 CORRECTNESS & REGRESSION TESTS
+  // ==========================================
+
+  it('e2e submit flow: timeout after draftOrderCreate side effect sets REQUIRES_RECONCILIATION, keeps quota, and retry reconciles exactly once', async () => {
+    // Initial usage 48 / 50
+    await prisma.shop.update({
+      where: { id: shop.id },
+      data: { monthlySubmissionsCount: 48 },
+    });
+
+    let draftOrderCreatedInShopify: any = null;
+    let createDraftOrderCalls = 0;
+    let reconcileSearchCalls = 0;
+
+    clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string, vars?: any) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/2001',
+              title: 'Oak / 60-inch',
+              price: '300.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/1001', title: 'Authorized Desk', status: 'ACTIVE' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        createDraftOrderCalls++;
+        // Simulate side effect in Shopify: draft order is created with correlation tag from vars
+        const tags = vars?.input?.tags || [];
+        const correlationTag = tags.find((t: string) => t.startsWith('cf-sub:'));
+        draftOrderCreatedInShopify = {
+          id: 'gid://shopify/DraftOrder/timeout-888',
+          name: '#D-TIMEOUT',
+          totalPrice: '270.00',
+          currencyCode: 'USD',
+          tags,
+          correlationTag,
+        };
+        // Transport failure / timeout happens right after Shopify creates the record
+        throw new Error('ETIMEDOUT: Connection timed out while awaiting Shopify response');
+      }
+      if (query.includes('findDraftOrderByTag')) {
+        reconcileSearchCalls++;
+        const searchTag = vars?.query?.replace(/^tag:/, '');
+        if (draftOrderCreatedInShopify && draftOrderCreatedInShopify.correlationTag === searchTag) {
+          return {
+            draftOrders: {
+              edges: [{ node: draftOrderCreatedInShopify }],
+            },
+          };
+        }
+        return { draftOrders: { edges: [] } };
+      }
+      return {};
+    });
+
+    const key = 'timeout-regression-key-1';
+    const payload = {
+      dataVersion: catalogA.dataVersion,
+      buyer: { businessName: 'Timeout Buyer', email: 'timeout@buyer.com' },
+      lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+    };
+
+    // Attempt 1: Should fail with 502 SHOPIFY_API_ERROR due to timeout
+    const res1 = await request(app)
+      .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+      .set('Idempotency-Key', key)
+      .send(payload);
+
+    expect(res1.status).toBe(502);
+    expect(res1.body.code).toBe('SHOPIFY_API_ERROR');
+    expect(createDraftOrderCalls).toBe(1);
+
+    // State inspection: OrderSubmission must be in REQUIRES_RECONCILIATION
+    const keyHash = (await import('../src/services/auth.server.js')).hashIdempotencyKey(catalogA.id, key);
+    const subAttempt1 = await prisma.orderSubmission.findUnique({
+      where: {
+        catalogId_idempotencyKeyHash: {
+          catalogId: catalogA.id,
+          idempotencyKeyHash: keyHash,
+        },
+      },
+    });
+    expect(subAttempt1?.status).toBe('REQUIRES_RECONCILIATION');
+    expect(subAttempt1?.correlationRef).toBe(draftOrderCreatedInShopify.correlationTag);
+
+    // Quota remains reserved: count must still be 49 (not released!)
+    const shopAfterAttempt1 = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(shopAfterAttempt1?.monthlySubmissionsCount).toBe(49);
+
+    // Attempt 2 (Retry with same idempotency key):
+    const res2 = await request(app)
+      .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+      .set('Idempotency-Key', key)
+      .send(payload);
+
+    expect(res2.status).toBe(201);
+    expect(res2.body.draftOrderId).toBe('gid://shopify/DraftOrder/timeout-888');
+    expect(res2.body.draftOrderName).toBe('#D-TIMEOUT');
+    expect(res2.body.isDuplicate).toBe(true);
+
+    // createDraftOrder call count MUST remain exactly 1!
+    expect(createDraftOrderCalls).toBe(1);
+    expect(reconcileSearchCalls).toBe(1);
+
+    // Final DB state: COMPLETED
+    const subAttempt2 = await prisma.orderSubmission.findUnique({
+      where: {
+        catalogId_idempotencyKeyHash: {
+          catalogId: catalogA.id,
+          idempotencyKeyHash: keyHash,
+        },
+      },
+    });
+    expect(subAttempt2?.status).toBe('COMPLETED');
+    expect(subAttempt2?.draftOrderId).toBe('gid://shopify/DraftOrder/timeout-888');
+
+    // Final quota remains 49 (exactly 1 slot consumed)
+    const finalShop = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(finalShop?.monthlySubmissionsCount).toBe(49);
+  });
+
+  it('FAILED retry lifecycle A: 49/50 -> reserves 50 -> conclusive Shopify rejection releases to 49 -> same key retry reserves 50 and completes -> final usage 50', async () => {
+    await prisma.shop.update({
+      where: { id: shop.id },
+      data: { monthlySubmissionsCount: 49 },
+    });
+
+    let attemptCount = 0;
+    clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/2001',
+              title: 'Oak / 60-inch',
+              price: '300.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/1001', title: 'Authorized Desk', status: 'ACTIVE' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        attemptCount++;
+        if (attemptCount === 1) {
+          // Conclusive rejection
+          return {
+            draftOrderCreate: {
+              draftOrder: null,
+              userErrors: [{ field: ['lineItems'], message: 'Inventory unavailable for variant' }],
+            },
+          };
+        }
+        // Attempt 2 succeeds
+        return {
+          draftOrderCreate: {
+            draftOrder: {
+              id: 'gid://shopify/DraftOrder/retry-success-1',
+              name: '#D-RETRY',
+              totalPrice: '270.00',
+              currencyCode: 'USD',
+            },
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const key = 'failed-retry-quota-key-A';
+    const payload = {
+      dataVersion: catalogA.dataVersion,
+      buyer: { businessName: 'Retry Buyer A', email: 'retryA@test.com' },
+      lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+    };
+
+    // Attempt 1: Conclusive rejection -> status 422
+    const res1 = await request(app)
+      .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+      .set('Idempotency-Key', key)
+      .send(payload);
+
+    expect(res1.status).toBe(422);
+
+    // Slot was released -> usage returned to 49
+    let shopRecord = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(shopRecord?.monthlySubmissionsCount).toBe(49);
+
+    // Attempt 2: Retry with SAME key
+    const res2 = await request(app)
+      .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+      .set('Idempotency-Key', key)
+      .send(payload);
+
+    expect(res2.status).toBe(201);
+    expect(res2.body.draftOrderId).toBe('gid://shopify/DraftOrder/retry-success-1');
+
+    // Final usage = 50!
+    shopRecord = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(shopRecord?.monthlySubmissionsCount).toBe(50);
+  });
+
+  it('FAILED retry lifecycle B: usage becomes 50 due to another order -> same FAILED key retries -> cannot reserve -> 403 QUOTA_EXCEEDED -> no Shopify mutation', async () => {
+    await prisma.shop.update({
+      where: { id: shop.id },
+      data: { monthlySubmissionsCount: 49 },
+    });
+
+    let draftCreateCalled = false;
+    clientRequestSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/2001',
+              title: 'Oak / 60-inch',
+              price: '300.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/1001', title: 'Authorized Desk', status: 'ACTIVE' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        draftCreateCalled = true;
+        // First attempt fails conclusively
+        return {
+          draftOrderCreate: {
+            draftOrder: null,
+            userErrors: [{ field: ['lineItems'], message: 'Initial error' }],
+          },
+        };
+      }
+      return {};
+    });
+
+    const key = 'failed-retry-quota-key-B';
+    const payload = {
+      dataVersion: catalogA.dataVersion,
+      buyer: { businessName: 'Retry Buyer B', email: 'retryB@test.com' },
+      lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+    };
+
+    // Attempt 1 fails conclusively -> slot released -> usage is 49
+    const res1 = await request(app)
+      .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+      .set('Idempotency-Key', key)
+      .send(payload);
+
+    expect(res1.status).toBe(422);
+
+    // Another successful order occupies the last slot -> usage becomes 50
+    await prisma.shop.update({
+      where: { id: shop.id },
+      data: { monthlySubmissionsCount: 50 },
+    });
+
+    // Reset spy flag to observe retry
+    draftCreateCalled = false;
+
+    // Attempt 2: Same FAILED key retries
+    const res2 = await request(app)
+      .post(`/api/public/catalog/${catalogA.publicToken}/submit`)
+      .set('Idempotency-Key', key)
+      .send(payload);
+
+    expect(res2.status).toBe(403);
+    expect(res2.body.code).toBe('QUOTA_EXCEEDED');
+
+    // Shopify mutation MUST NOT be called!
+    expect(draftCreateCalled).toBe(false);
+
+    // Usage remains 50
+    const shopRecord = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(shopRecord?.monthlySubmissionsCount).toBe(50);
+  });
+
+  it('billing cycle rollover CAS: multiple concurrent reservations on expired boundary -> exactly one reset and accurate final count', async () => {
+    // Set shop billingCycleAnchor to 35 days ago (expired) and monthlySubmissionsCount to 50 (at limit)
+    const thirtyFiveDaysAgo = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
+    await prisma.shop.update({
+      where: { id: shop.id },
+      data: {
+        billingCycleAnchor: thirtyFiveDaysAgo,
+        monthlySubmissionsCount: 50,
+      },
+    });
+
+    const { reserveSubmissionQuotaSlot } = await import('../src/services/shop.server.js');
+
+    // Run 5 concurrent reservation attempts simultaneously
+    const results = await Promise.all([
+      reserveSubmissionQuotaSlot(shop.id, 50),
+      reserveSubmissionQuotaSlot(shop.id, 50),
+      reserveSubmissionQuotaSlot(shop.id, 50),
+      reserveSubmissionQuotaSlot(shop.id, 50),
+      reserveSubmissionQuotaSlot(shop.id, 50),
+    ]);
+
+    // All 5 should have succeeded because cycle was rolled over to 0, then 5 slots were reserved
+    expect(results).toEqual([true, true, true, true, true]);
+
+    // Final count must be exactly 5
+    const updatedShop = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(updatedShop?.monthlySubmissionsCount).toBe(5);
+    expect(updatedShop?.billingCycleAnchor.getTime()).toBeGreaterThan(thirtyFiveDaysAgo.getTime());
+  });
+
+  it('manual sync trigger produces exactly one SyncRun of type MANUAL, zero nested INITIAL runs, and leaves initialSyncAt intact', async () => {
+    const { triggerManualShopSync } = await import('../src/services/sync.server.js');
+
+    // Mock client for sync
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes('shop { currencyCode }')) {
+          return { shop: { currencyCode: 'USD' } };
+        }
+        if (query.includes('getCollections')) {
+          return { collections: { edges: [], pageInfo: { hasNextPage: false } } };
+        }
+        if (query.includes('getProducts')) {
+          return { products: { edges: [], pageInfo: { hasNextPage: false } } };
+        }
+        return {};
+      }),
+    } as any;
+
+    const initialShop = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(initialShop?.initialSyncAt).toBeNull();
+
+    // Trigger manual sync
+    const { syncRunId, promise } = await triggerManualShopSync(shop.id, mockClient);
+    expect(syncRunId).toBeDefined();
+
+    // Wait for the sync to complete
+    await promise;
+
+    // Check all SyncRuns in DB for this shop
+    const allRuns = await prisma.syncRun.findMany({ where: { shopId: shop.id } });
+    expect(allRuns).toHaveLength(1);
+    expect(allRuns[0].id).toBe(syncRunId);
+    expect(allRuns[0].type).toBe('MANUAL');
+    expect(allRuns[0].status).toBe('COMPLETED');
+
+    // Zero nested INITIAL runs exist
+    const initialRuns = allRuns.filter((r) => r.type === 'INITIAL');
+    expect(initialRuns).toHaveLength(0);
+
+    // initialSyncAt must remain null (not altered by manual sync)
+    const updatedShop = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(updatedShop?.initialSyncAt).toBeNull();
+  });
 });

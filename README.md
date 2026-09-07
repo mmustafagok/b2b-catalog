@@ -30,7 +30,7 @@ CatalogFlow follows the official Shopify Embedded App architecture with a dual-s
 - **Shopify Integration:** GraphQL Admin API `2026-07`
 - **Frontend:** React, Vite, Shopify Polaris
 - **Security:** AES-256-GCM authenticated encryption at rest for access tokens, HMAC SHA-256 webhook validation, JWT claim verification (aud, iss, dest, exp).
-- **Test Suite:** Vitest (96 automated unit, integration, and security test cases across 8 test suites)
+- **Test Suite:** Vitest (101 automated unit, integration, and security test cases across 8 test suites)
 
 ---
 
@@ -133,31 +133,33 @@ npm run prisma:migrate
 - `customers/redact`: Acknowledged (No customer PII stored in application database).
 - `shop/redact`: Completely erases all retained shop data upon merchant app deletion.
 
-### 4.6 Production Draft Order Pipeline & Order Boundary Hardening (M5 / M5.5)
+### 4.6 Production Draft Order Pipeline & Order Boundary Hardening (M5 / M5.5 / M5.6)
 - **Order Idempotency State Machine (`OrderSubmission`):**
   - States: `CREATING` $\rightarrow$ `COMPLETED` | `FAILED` | `REQUIRES_RECONCILIATION`.
-  - To eliminate race conditions where two concurrent requests create multiple Shopify Draft Orders before DB insertion, the row is pre-reserved in PostgreSQL with `status: 'CREATING'` and a unique `idempotencyKeyHash`. Concurrent attempts encounter `409 CONCURRENT_PROCESSING`.
+  - Pre-Shopify database reservation prevents race conditions; concurrent attempts encounter `409 CONCURRENT_PROCESSING`.
   - Completed submissions return `200 OK` with existing submission data and `idempotentReplay: true`.
-- **Shopify Reconciliation via Deterministic Correlation Reference:**
-  - Every order attaches a deterministic, non-PII correlation identifier: `cf-sub:<submissionId>` (e.g. `cf-sub:cly...`) to Draft Order tags and `_cf_submission_ref` custom attribute.
-  - If Shopify Draft Order creation succeeds or is ambiguous due to a database/network crash, the submission enters `REQUIRES_RECONCILIATION`.
-  - On retry, the engine queries Shopify Admin GraphQL (`draftOrders(first: 1, query: "tag:cf-sub:<submissionId>")`) to safely recover the created Draft Order without executing a second mutation.
+- **Mutation Failure Classification & Reconciliation:**
+  - **Conclusive Shopify Rejection (GraphQL `userErrors`):** Marks submission `FAILED`, atomically releases reserved quota, and allows safe retry.
+  - **Ambiguous Transport Failure (Timeout, ECONNRESET, HTTP 5xx):** Marks submission `REQUIRES_RECONCILIATION`, keeps quota reserved, preserves `correlationRef`, and requires tag-based reconciliation on retry before any new mutation.
+  - Every order attaches a deterministic, non-PII correlation identifier: `cf-sub:<submissionId>` to Draft Order tags and `_cf_submission_ref` custom attribute.
+  - On retry of an ambiguous attempt, the engine queries Shopify Admin GraphQL (`draftOrders(first: 1, query: "tag:cf-sub:<submissionId>")`) to safely recover the created Draft Order without executing a second mutation.
+- **FAILED Retry Quota Reservation Lifecycle:**
+  - A previously `FAILED` submission released its quota slot on failure.
+  - On retry, it must reconcile the billing cycle and atomically reserve a quota slot again before transitioning back to `CREATING`.
+  - If the store has reached its limit in the interim, retry is rejected with `403 QUOTA_EXCEEDED` without calling Shopify.
+- **Compare-And-Set (CAS) Billing Cycle Rollover:**
+  - `reconcileBillingCycle` uses an atomic SQL CAS update (`WHERE "id" = $1 AND "billingCycleAnchor" <= $cutoff`) to advance the 30-day billing anchor and reset `monthlySubmissionsCount = 0`.
+  - Prevents concurrent callers from clobbering or wiping out active reservations across the cycle boundary.
 - **Strict Catalog Authorization & Variant Boundary:**
-  - Validates that every submitted line item variant GID belongs to a product actively mapped to the catalog (via product sources or collection membership snapshots).
+  - Validates that every submitted line item variant GID belongs to a product actively mapped to the catalog.
   - Out-of-catalog or cross-catalog variants are rejected with `422 INVALID_LINES`.
 - **Submit-Time `dataVersion` Stale-Data Guard:**
-  - Buyer requests include the client's observed `dataVersion`.
-  - If the merchant has modified pricing, published revisions, or updated collections (`dataVersion` mismatch), submission is rejected with `409 CATALOG_CHANGED` before touching Shopify.
-- **Rolling 30-Day Billing Cycle Quota Lifecycle:**
-  - `reconcileBillingCycle` automatically checks if `now >= billingCycleAnchor + 30 days` and rolls the anchor forward while resetting `monthlySubmissionsCount = 0`.
-- **Concurrency-Safe Atomic Quota Hard Cap:**
-  - `reserveSubmissionQuotaSlot` executes an atomic conditional SQL update (`UPDATE "Shop" SET "monthlySubmissionsCount" = "monthlySubmissionsCount" + 1 WHERE id = $1 AND "monthlySubmissionsCount" < $limit`).
-  - Concurrent requests near the limit (e.g. 49/50 on Free Tier) cannot race to exceed the cap. On downstream failure, `releaseSubmissionQuotaSlot` atomically rolls back the increment.
+  - If the merchant has modified pricing or collections (`dataVersion` mismatch), submission is rejected with `409 CATALOG_CHANGED` before touching Shopify.
+- **Clean Single-Run Manual Sync:**
+  - `triggerManualShopSync` invokes `executeFullShopSync` directly under a single `MANUAL` `SyncRun`.
+  - Zero nested `INITIAL` runs are created, and `initialSyncAt` is preserved for true install lifecycles. Overlapping sync requests return `409 SYNC_IN_PROGRESS`.
 - **Privacy & Metadata Hygiene:**
-  - Public tokens and raw idempotency keys are strictly excluded from Draft Order tags and custom attributes.
-  - Only clean identifiers (`CatalogFlow Order`, `cf-sub:<submissionId>`, `_cf_submission_ref`, `PO Number`) are sent to Shopify. Zero raw buyer PII is retained in the database.
-- **Manual Sync Deduplication:**
-  - `POST /api/admin/sync/trigger` validates in-progress runs; concurrent or overlapping sync requests return `409 SYNC_IN_PROGRESS`.
+  - Public tokens and raw idempotency keys are strictly excluded from Draft Order tags and custom attributes. Zero raw buyer PII is retained in the database.
 
 ### 4.7 Merchant Operations & Submissions History (M6)
 - **Embedded Submissions Table:** Lists all buyer order submissions with timestamp, catalog title, line count, item count, formatted subtotal currency, and status.

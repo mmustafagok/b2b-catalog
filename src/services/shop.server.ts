@@ -110,32 +110,41 @@ export async function getDecryptedAccessToken(shopId: string): Promise<string | 
 export const BILLING_CYCLE_MS = 30 * 24 * 60 * 60 * 1000; // 30-day standard billing period
 
 /**
- * Deterministically rolls over the 30-day billing cycle and resets monthlySubmissionsCount to 0
- * when the current timestamp exceeds the active anchor.
+ * Concurrency-safe atomic billing cycle rollover using Compare-And-Set (CAS).
+ * Only ONE caller may perform the rollover for a given expired anchor.
+ * Concurrent callers will see 0 rows updated by CAS and re-read the fresh state.
  */
 export async function reconcileBillingCycle<T extends {
   id: string;
   billingCycleAnchor: Date;
   monthlySubmissionsCount: number;
-}>(shop: T): Promise<T> {
+}>(shopOrId: T | string): Promise<any> {
+  const shopId = typeof shopOrId === 'string' ? shopOrId : shopOrId.id;
+  const initialShop = typeof shopOrId === 'string' ? await getActiveShopById(shopId) : shopOrId;
+  if (!initialShop) return null;
+
   const now = Date.now();
-  const anchorTime = shop.billingCycleAnchor.getTime();
+  const anchorTime = initialShop.billingCycleAnchor.getTime();
 
   if (now - anchorTime >= BILLING_CYCLE_MS) {
     const elapsedCycles = Math.floor((now - anchorTime) / BILLING_CYCLE_MS);
     const newAnchor = new Date(anchorTime + elapsedCycles * BILLING_CYCLE_MS);
+    const cutoff = new Date(now - BILLING_CYCLE_MS);
 
-    const updated = await prisma.shop.update({
-      where: { id: shop.id },
-      data: {
-        billingCycleAnchor: newAnchor,
-        monthlySubmissionsCount: 0,
-      },
-    });
-    return updated as unknown as T;
+    // Atomic CAS: Only update if the billingCycleAnchor is still expired (<= cutoff)
+    await prisma.$executeRaw`
+      UPDATE "Shop"
+      SET "billingCycleAnchor" = ${newAnchor},
+          "monthlySubmissionsCount" = 0,
+          "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${shopId} AND "billingCycleAnchor" <= ${cutoff}
+    `;
+
+    // Re-fetch the fresh shop record from PostgreSQL
+    return getActiveShopById(shopId);
   }
 
-  return shop;
+  return initialShop;
 }
 
 export async function checkShopQuota(shopId: string) {
@@ -144,8 +153,11 @@ export async function checkShopQuota(shopId: string) {
     throw new Error('Shop not found or inactive');
   }
 
-  // Reconcile billing cycle rollover before evaluating usage
+  // Reconcile billing cycle rollover with CAS before evaluating usage
   shop = await reconcileBillingCycle(shop);
+  if (!shop) {
+    throw new Error('Shop not found or inactive');
+  }
 
   const planTier = (shop.plan as PlanTier) || PlanTier.STARTER;
   const limits = PLAN_LIMITS[planTier] || PLAN_LIMITS[PlanTier.STARTER];
@@ -177,13 +189,12 @@ export async function checkShopQuota(shopId: string) {
 
 /**
  * Concurrency-safe atomic quota slot reservation before external Shopify mutation.
+ * Uses atomic CAS rollover first, then conditional reservation against active period.
  * Returns true if a slot was reserved, false if hard cap has been reached.
  */
 export async function reserveSubmissionQuotaSlot(shopId: string, limit: number): Promise<boolean> {
-  const shop = await getActiveShopById(shopId);
-  if (!shop) return false;
-
-  await reconcileBillingCycle(shop);
+  // Reconcile billing cycle atomically with CAS
+  await reconcileBillingCycle(shopId);
 
   const rowsUpdated = await prisma.$executeRaw`
     UPDATE "Shop"
