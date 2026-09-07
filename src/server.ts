@@ -85,6 +85,18 @@ export const app = express();
 // without blindly trusting unverified client-forged proxy chains.
 app.set('trust proxy', 1);
 
+// Embedded Shopify Admin iframe headers (allow frame embedding in Shopify Admin)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const shopParam = req.query.shop as string;
+  const frameAncestors = shopParam && isValidShopifyDomain(shopParam)
+    ? `frame-ancestors https://${shopParam} https://admin.shopify.com https://*.myshopify.com https://*.spin.dev 'self';`
+    : "frame-ancestors https://*.myshopify.com https://admin.shopify.com https://*.spin.dev 'self';";
+
+  res.setHeader('Content-Security-Policy', frameAncestors);
+  res.removeHeader('X-Frame-Options');
+  next();
+});
+
 // Public CORS only for public buyer endpoints, restricted for admin
 app.use('/api/public', cors());
 
@@ -1123,13 +1135,16 @@ app.get('/support', (_req: Request, res: Response) => {
 
 // ==========================================
 // ==========================================
+// ==========================================
 // STATIC & DEV FRONTEND SERVING
 // ==========================================
 
 const clientDist = path.resolve(process.cwd(), 'dist/client');
 
+// Use index: false so express.static only serves static assets (/assets/*)
+// and NEVER intercepts GET / or /app with raw index.html
 if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+  app.use(express.static(clientDist, { index: false }));
 }
 
 // Vite dev server middleware for live TSX compilation and HMR in dev mode
@@ -1149,6 +1164,10 @@ if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
         let template = fs.readFileSync(templatePath, 'utf-8');
         const apiKey = process.env.SHOPIFY_API_KEY || process.env.VITE_SHOPIFY_API_KEY || '';
         template = template.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
+        template = template.replace(
+          /<meta\s+name="shopify-api-key"\s+content="[^"]*"\s*\/?>/gi,
+          `<meta name="shopify-api-key" content="${apiKey}" />`
+        );
         const html = await vite.transformIndexHtml(url, template);
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         return res.status(200).send(html);
@@ -1171,7 +1190,7 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
 
   const htmlPath = path.join(clientDist, 'index.html');
   if (fs.existsSync(htmlPath)) {
-    res.sendFile(htmlPath);
+    sendRenderedIndexHtml(res, htmlPath);
   } else {
     const rootHtml = path.resolve(process.cwd(), 'index.html');
     if (fs.existsSync(rootHtml)) {
@@ -1205,7 +1224,16 @@ function sendRenderedIndexHtml(res: Response, filePath: string) {
   try {
     let html = fs.readFileSync(filePath, 'utf-8');
     const apiKey = process.env.SHOPIFY_API_KEY || process.env.VITE_SHOPIFY_API_KEY || '';
+    
+    // Replace %VITE_SHOPIFY_API_KEY% placeholder
     html = html.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
+
+    // Replace meta tag content attribute to guarantee client ID injection
+    html = html.replace(
+      /<meta\s+name="shopify-api-key"\s+content="[^"]*"\s*\/?>/gi,
+      `<meta name="shopify-api-key" content="${apiKey}" />`
+    );
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(html);
   } catch (err) {
