@@ -1122,13 +1122,44 @@ app.get('/support', (_req: Request, res: Response) => {
 });
 
 // ==========================================
-// STATIC FRONTEND SERVING
+// ==========================================
+// STATIC & DEV FRONTEND SERVING
 // ==========================================
 
 const clientDist = path.resolve(process.cwd(), 'dist/client');
 
 if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
+}
+
+// Vite dev server middleware for live TSX compilation and HMR in dev mode
+if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
+  try {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'custom',
+    });
+    app.use(vite.middlewares);
+
+    app.get(['/', '/app', '/app/*'], async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const url = req.originalUrl;
+        const templatePath = path.resolve(process.cwd(), 'index.html');
+        let template = fs.readFileSync(templatePath, 'utf-8');
+        const apiKey = process.env.SHOPIFY_API_KEY || process.env.VITE_SHOPIFY_API_KEY || '';
+        template = template.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
+        const html = await vite.transformIndexHtml(url, template);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.status(200).send(html);
+      } catch (e) {
+        vite.ssrFixStacktrace(e as Error);
+        next(e);
+      }
+    });
+  } catch (err) {
+    console.warn('Vite dev middleware initialization skipped:', err);
+  }
 }
 
 // Serve Buyer portal SPA for /c/:publicToken
@@ -1142,23 +1173,30 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
   if (fs.existsSync(htmlPath)) {
     res.sendFile(htmlPath);
   } else {
-    res.status(200).send(`
-      <!DOCTYPE html>
-      <html lang="en">
-        <head>
-          <meta charset="UTF-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-          <title>B2B Wholesale Catalog</title>
-          <link rel="preconnect" href="https://fonts.googleapis.com">
-          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-        </head>
-        <body>
-          <div id="root"></div>
-          <script type="module" src="/src/client/main.tsx"></script>
-        </body>
-      </html>
-    `);
+    const rootHtml = path.resolve(process.cwd(), 'index.html');
+    if (fs.existsSync(rootHtml)) {
+      sendRenderedIndexHtml(res, rootHtml);
+    } else {
+      res.status(200).send(`
+        <!DOCTYPE html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <meta name="shopify-api-key" content="${process.env.SHOPIFY_API_KEY || ''}" />
+            <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+            <title>CatalogFlow: B2B Order Catalog</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+          </head>
+          <body>
+            <div id="root"></div>
+            <script type="module" src="/src/client/main.tsx"></script>
+          </body>
+        </html>
+      `);
+    }
   }
 });
 
@@ -1175,7 +1213,7 @@ function sendRenderedIndexHtml(res: Response, filePath: string) {
   }
 }
 
-// Serve Embedded Merchant Admin SPA for root / and /app
+// Serve Embedded Merchant Admin SPA for root / and /app (production / static fallback)
 app.get(['/', '/app', '/app/*'], (_req: Request, res: Response) => {
   const htmlPath = path.join(clientDist, 'index.html');
   if (fs.existsSync(htmlPath)) {
