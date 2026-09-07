@@ -1,0 +1,36 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "catalogflow-b2b-portal"
+name = "CatalogFlow: B2B Order Catalog"
+handle = "catalogflow-b2b-portal"
+application_url = "https://your-app-url.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+dev_store_url = ""
+
+[access_scopes]
+scopes = "read_products,read_inventory,write_draft_orders,read_draft_orders"
+
+[auth]
+redirect_urls = [
+  "https://your-app-url.com/auth/callback",
+  "https://your-app-url.com/auth/shopify/callback"
+]
+
+[webhooks]
+api_version = "2026-07"
+
+[[webhooks.subscriptions]]
+topics = [ "products/create", "products/update", "products/delete" ]
+uri = "/api/webhooks/products"
+
+[[webhooks.subscriptions]]
+topics = [ "app/uninstalled" ]
+uri = "/api/webhooks/app/uninstalled"
+
+[privacy_compliance]
+customer_data_request_url = "https://your-app-url.com/api/webhooks/compliance/customers-data-request"
+customer_deletion_url = "https://your-app-url.com/api/webhooks/compliance/customers-redact"
+shop_deletion_url = "https://your-app-url.com/api/webhooks/compliance/shop-redact"

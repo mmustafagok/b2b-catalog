@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Shop {
+  id                      String            @id @default(uuid())
+  shopDomain              String            @unique
+  accessToken             String
+  plan                    String            @default("STARTER") // STARTER, GROWTH, SCALE
+  billingCycleAnchor      DateTime          @default(now())
+  monthlySubmissionsCount Int               @default(0)
+  installedAt             DateTime          @default(now())
+  uninstalledAt           DateTime?
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+
+  catalogs                Catalog[]
+  submissions             OrderSubmission[]
+  productSnapshots        ProductSnapshot[]
+  variantSnapshots        VariantSnapshot[]
+  syncRuns                SyncRun[]
+
+  @@index([shopDomain])
+  @@index([uninstalledAt])
+}
+
+model Catalog {
+  id              String                @id @default(uuid())
+  shopId          String
+  name            String
+  publicToken     String                @unique
+  status          String                @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
+  priceMode       String                @default("SHOPIFY_PRICE") // SHOPIFY_PRICE, PERCENT_DISCOUNT
+  discountPercent Float?                @default(0)
+  logoUrl         String?
+  accentColor     String?               @default("#108043")
+  showSku         Boolean               @default(true)
+  showInventory   Boolean               @default(false)
+  dataVersion     Int                   @default(1)
+  publishedAt     DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  shop            Shop                  @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sources         CatalogSource[]
+  submissions     OrderSubmission[]
+  itemOverrides   CatalogItemOverride[]
+
+  @@index([shopId])
+  @@index([publicToken])
+  @@index([status])
+}
+
+model CatalogSource {
+  id          String   @id @default(uuid())
+  catalogId   String
+  type        String   // COLLECTION, PRODUCT
+  shopifyGid  String   // e.g. gid://shopify/Collection/123 or gid://shopify/Product/456
+  createdAt   DateTime @default(now())
+
+  catalog     Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([shopifyGid])
+}
+
+model CatalogItemOverride {
+  id               String   @id @default(uuid())
+  catalogId        String
+  shopifyProductId String
+  enabled          Boolean  @default(true)
+  position         Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  catalog          Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([shopifyProductId])
+}
+
+model ProductSnapshot {
+  id               String            @id @default(uuid())
+  shopId           String
+  shopifyProductId String
+  title            String
+  vendor           String?
+  handle           String
+  imageUrl         String?
+  status           String            @default("ACTIVE") // ACTIVE, DRAFT, ARCHIVED
+  sourceUpdatedAt  DateTime?
+  syncedAt         DateTime          @default(now())
+
+  shop             Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variants         VariantSnapshot[]
+
+  @@unique([shopId, shopifyProductId])
+  @@index([shopId])
+  @@index([shopifyProductId])
+}
+
+model VariantSnapshot {
+  id                  String           @id @default(uuid())
+  shopId              String
+  shopifyVariantId    String
+  shopifyProductId    String
+  title               String
+  sku                 String?
+  barcode             String?
+  shopifyPrice        Float
+  inventoryQuantity   Int              @default(0)
+  availableForSale    Boolean          @default(true)
+  selectedOptionsJson String           @default("[]")
+  imageUrl            String?
+  sourceUpdatedAt     DateTime?
+  syncedAt            DateTime         @default(now())
+
+  shop                Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  product             ProductSnapshot  @relation(fields: [shopId, shopifyProductId], references: [shopId, shopifyProductId], onDelete: Cascade)
+
+  @@unique([shopId, shopifyVariantId])
+  @@index([shopId])
+  @@index([shopifyVariantId])
+  @@index([shopifyProductId])
+  @@index([sku])
+}
+
+model OrderSubmission {
+  id                 String   @id @default(uuid())
+  shopId             String
+  catalogId          String
+  draftOrderId       String   // Shopify GID gid://shopify/DraftOrder/123
+  draftOrderName     String?  // e.g. #D1001
+  idempotencyKeyHash String   // SHA-256 hash
+  itemCount          Int
+  lineCount          Int
+  subtotalAmount     Float
+  currency           String   @default("USD")
+  createdAt          DateTime @default(now())
+
+  shop               Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  catalog            Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@unique([catalogId, idempotencyKeyHash])
+  @@index([shopId])
+  @@index([catalogId])
+  @@index([draftOrderId])
+}
+
+model SyncRun {
+  id          String    @id @default(uuid())
+  shopId      String
+  type        String    // INITIAL, MANUAL, WEBHOOK
+  status      String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED, FAILED
+  statsJson   String?
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+}
+
+model WebhookReceipt {
+  id          String   @id @default(uuid())
+  webhookId   String   @unique
+  topic       String
+  shopDomain  String
+  processedAt DateTime @default(now())
+
+  @@index([webhookId])
+}
