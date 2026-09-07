@@ -13,6 +13,7 @@ import {
 import { resolveCatalogAllowedProductGids } from './sync.server.js';
 import { hashIdempotencyKey } from './auth.server.js';
 import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server.js';
+import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 
 export class OrderSubmissionError extends Error {
   constructor(
@@ -284,6 +285,19 @@ export async function submitBuyerOrder(
           },
         });
 
+        // Record idempotent North Star event on reconciliation recovery
+        await recordAnalyticsEvent(
+          catalog.shopId,
+          ANALYTICS_EVENTS.DRAFT_ORDER_CREATED,
+          catalog.id,
+          {
+            submissionId: updated.id,
+            subtotal: Number(updated.subtotalAmount),
+            currency: updated.currency,
+          },
+          `draft_order_created:${updated.id}`
+        );
+
         return {
           success: true,
           submissionId: updated.id,
@@ -501,6 +515,18 @@ export async function submitBuyerOrder(
     }
   `;
 
+  await recordAnalyticsEvent(
+    catalog.shopId,
+    ANALYTICS_EVENTS.ORDER_SUBMITTED,
+    catalog.id,
+    {
+      submissionId: submission.id,
+      itemCount: totalItems,
+      lineCount: validated.lines.length,
+    },
+    `order_submitted:${submission.id}`
+  );
+
   let draftRes: any;
   try {
     draftRes = await client.request(draftOrderMutation, { input: draftOrderInput });
@@ -602,6 +628,20 @@ export async function submitBuyerOrder(
     throw postMutationDbErr;
   }
 
+  await recordAnalyticsEvent(
+    catalog.shopId,
+    ANALYTICS_EVENTS.DRAFT_ORDER_CREATED,
+    catalog.id,
+    {
+      submissionId: submission.id,
+      draftOrderId: createdDraft.id,
+      subtotal: subtotalNumber,
+      itemCount: totalItems,
+      currency,
+    },
+    `draft_order_created:${submission.id}`
+  );
+
   return {
     success: true,
     submissionId: submission.id,
@@ -615,7 +655,7 @@ export async function submitBuyerOrder(
 
 /**
  * Retrieves paginated submissions for the merchant admin operations view.
- * Scoped strictly to the authenticated shop and completed submissions.
+ * Scoped strictly to the authenticated shop.
  */
 export async function getSubmissionsByShop(
   shopId: string,
@@ -623,15 +663,22 @@ export async function getSubmissionsByShop(
     page?: number;
     pageSize?: number;
     catalogId?: string;
+    status?: string;
   }
 ) {
   const page = Math.max(1, options?.page || 1);
   const pageSize = Math.min(100, Math.max(1, options?.pageSize || 20));
   const skip = (page - 1) * pageSize;
 
+  const statusFilter = options?.status && options.status !== 'ALL'
+    ? options.status
+    : options?.status === 'ALL'
+      ? undefined
+      : 'COMPLETED';
+
   const whereClause: Prisma.OrderSubmissionWhereInput = {
     shopId,
-    status: 'COMPLETED',
+    ...(statusFilter ? { status: statusFilter } : {}),
     ...(options?.catalogId ? { catalogId: options.catalogId } : {}),
   };
 
@@ -672,6 +719,8 @@ export async function getSubmissionsByShop(
       catalogId: sub.catalogId,
       catalogName: sub.catalog.name,
       catalogPublicToken: sub.catalog.publicToken,
+      status: sub.status,
+      lastError: sub.lastError,
       draftOrderId: sub.draftOrderId || '',
       draftOrderName: sub.draftOrderName,
       draftOrderUrl,

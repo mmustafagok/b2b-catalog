@@ -8,6 +8,7 @@ import {
   PlanTier,
 } from '../types/index.js';
 import { generateOpaqueToken } from './auth.server.js';
+import { resolveCatalogAllowedProductGids } from './sync.server.js';
 import { z } from 'zod';
 
 export type CreateCatalogInput = z.input<typeof CreateCatalogInputSchema>;
@@ -145,6 +146,26 @@ export async function publishCatalog(shopId: string, catalogId: string) {
     );
   }
 
+  // Check plan variant quota limits across all active products in this catalog
+  const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
+  const variantCount = allowedProductGids.size > 0
+    ? await prisma.variantSnapshot.count({
+        where: {
+          shopId,
+          shopifyProductId: { in: Array.from(allowedProductGids) },
+          product: { status: 'ACTIVE' },
+        },
+      })
+    : 0;
+
+  if (variantCount > planLimits.maxVariants) {
+    throw new CatalogError(
+      `Plan variant quota reached: This catalog has ${variantCount} variants, but your ${planLimits.name} plan limit is ${planLimits.maxVariants} variants. Please upgrade to publish this catalog.`,
+      403,
+      'QUOTA_EXCEEDED'
+    );
+  }
+
   return prisma.catalog.update({
     where: { id: catalogId },
     data: {
@@ -208,7 +229,7 @@ export async function deleteCatalog(shopId: string, catalogId: string) {
 }
 
 export async function getCatalogsByShop(shopId: string) {
-  return prisma.catalog.findMany({
+  const catalogs = await prisma.catalog.findMany({
     where: { shopId },
     include: {
       sources: true,
@@ -220,6 +241,28 @@ export async function getCatalogsByShop(shopId: string) {
     },
     orderBy: { createdAt: 'desc' },
   });
+
+  return Promise.all(
+    catalogs.map(async (cat) => {
+      const allowedGids = await resolveCatalogAllowedProductGids(shopId, cat.sources);
+      const productCount = allowedGids.size;
+      const variantCount = productCount > 0
+        ? await prisma.variantSnapshot.count({
+            where: {
+              shopId,
+              shopifyProductId: { in: Array.from(allowedGids) },
+              product: { status: 'ACTIVE' },
+            },
+          })
+        : 0;
+
+      return {
+        ...cat,
+        productCount,
+        variantCount,
+      };
+    })
+  );
 }
 
 export async function getCatalogById(shopId: string, catalogId: string) {
@@ -239,7 +282,23 @@ export async function getCatalogById(shopId: string, catalogId: string) {
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
   }
 
-  return catalog;
+  const allowedGids = await resolveCatalogAllowedProductGids(shopId, catalog.sources);
+  const productCount = allowedGids.size;
+  const variantCount = productCount > 0
+    ? await prisma.variantSnapshot.count({
+        where: {
+          shopId,
+          shopifyProductId: { in: Array.from(allowedGids) },
+          product: { status: 'ACTIVE' },
+        },
+      })
+    : 0;
+
+  return {
+    ...catalog,
+    productCount,
+    variantCount,
+  };
 }
 
 export async function getPublishedCatalogByToken(publicToken: string) {

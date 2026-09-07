@@ -31,6 +31,7 @@ model Shop {
   variantSnapshots        VariantSnapshot[]
   collections             CollectionSnapshot[]
   syncRuns                SyncRun[]
+  analyticsEvents         AnalyticsEvent[]
 
   @@index([shopDomain])
   @@index([uninstalledAt])
@@ -57,6 +58,7 @@ model Catalog {
   sources         CatalogSource[]
   submissions     OrderSubmission[]
   itemOverrides   CatalogItemOverride[]
+  analyticsEvents AnalyticsEvent[]
 
   @@index([shopId])
   @@index([publicToken])
@@ -224,4 +226,22 @@ model WebhookReceipt {
 
   @@index([webhookId])
   @@index([status])
+}
+
+model AnalyticsEvent {
+  id           String    @id @default(uuid())
+  shopId       String
+  catalogId    String?
+  eventName    String    // catalog_viewed, order_summary_started, order_submitted, draft_order_created_from_buyer_submission
+  eventKey     String?   @unique // Optional deterministic deduplication key (e.g. eventName + ':' + submissionId)
+  metadataJson String?
+  createdAt    DateTime  @default(now())
+
+  shop         Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  catalog      Catalog?  @relation(fields: [catalogId], references: [id], onDelete: SetNull)
+
+  @@index([shopId])
+  @@index([catalogId])
+  @@index([eventName])
+  @@index([createdAt])
 }

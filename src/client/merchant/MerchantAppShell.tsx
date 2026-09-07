@@ -28,6 +28,57 @@ interface QuotaInfo {
   };
 }
 
+interface PlanFeatureDetails {
+  id: string;
+  name: string;
+  price: number;
+  interval: string;
+  maxLiveCatalogs: number;
+  maxVariants: number;
+  monthlySubmissionsLimit: number;
+  features: string[];
+}
+
+interface BillingData {
+  currentPlan: string;
+  planDetails: PlanFeatureDetails;
+  limits: {
+    name: string;
+    price: number;
+    maxLiveCatalogs: number;
+    maxVariants: number;
+    monthlySubmissionsLimit: number;
+  };
+  usage: {
+    liveCatalogsCount: number;
+    monthlySubmissionsCount: number;
+    maxVariantsInPublishedCatalogs: number;
+    billingCycleAnchor: string;
+    nextBillingCycleAt: string;
+  };
+  allowed: {
+    canPublishCatalog: boolean;
+    canAcceptSubmission: boolean;
+  };
+  availablePlans: PlanFeatureDetails[];
+}
+
+interface AnalyticsData {
+  periodDays: number;
+  counts: {
+    catalogViews: number;
+    orderSummariesStarted: number;
+    ordersSubmitted: number;
+    draftOrdersCreated: number;
+  };
+  conversionRates: {
+    viewToSummaryPct: number;
+    summaryToSubmitPct: number;
+    submitToDraftPct: number;
+    overallConversionPct: number;
+  };
+}
+
 interface CatalogSummary {
   id: string;
   name: string;
@@ -40,6 +91,8 @@ interface CatalogSummary {
   showInventory: boolean;
   createdAt: string;
   updatedAt: string;
+  productCount?: number;
+  variantCount?: number;
   sources: Array<{ type: 'COLLECTION' | 'PRODUCT'; shopifyGid: string }>;
 }
 
@@ -48,6 +101,8 @@ interface OrderSubmissionItem {
   catalogId: string;
   catalogName: string;
   catalogPublicToken: string;
+  status?: string;
+  lastError?: string | null;
   draftOrderId: string;
   draftOrderName: string | null;
   draftOrderUrl: string;
@@ -89,7 +144,7 @@ interface SyncHealthData {
   };
 }
 
-type TabType = 'overview' | 'catalogs' | 'submissions' | 'sync';
+type TabType = 'overview' | 'catalogs' | 'submissions' | 'sync' | 'billing';
 
 export const MerchantAppShell: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
@@ -97,13 +152,17 @@ export const MerchantAppShell: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [shop, setShop] = useState<ShopInfo | null>(null);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
+  const [billing, setBilling] = useState<BillingData | null>(null);
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [catalogs, setCatalogs] = useState<CatalogSummary[]>([]);
   const [submissions, setSubmissions] = useState<OrderSubmissionItem[]>([]);
   const [submissionsTotal, setSubmissionsTotal] = useState<number>(0);
   const [submissionsPage, setSubmissionsPage] = useState<number>(1);
+  const [submissionStatusFilter, setSubmissionStatusFilter] = useState<string>('ALL');
   const [syncHealth, setSyncHealth] = useState<SyncHealthData | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<boolean>(false);
+  const [switchingPlan, setSwitchingPlan] = useState<boolean>(false);
 
   // New catalog modal state
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -147,10 +206,21 @@ export const MerchantAppShell: React.FC = () => {
       const bootstrapData = await bootstrapRes.json();
       setShop(bootstrapData.shop);
 
-      // Quota
-      const quotaRes = await fetch('/api/admin/quota', { headers });
+      // Quota & Billing
+      const [quotaRes, billingRes, analyticsRes] = await Promise.all([
+        fetch('/api/admin/quota', { headers }),
+        fetch('/api/admin/billing', { headers }),
+        fetch('/api/admin/analytics', { headers }),
+      ]);
+
       if (quotaRes.ok) {
         setQuota(await quotaRes.json());
+      }
+      if (billingRes.ok) {
+        setBilling(await billingRes.json());
+      }
+      if (analyticsRes.ok) {
+        setAnalytics(await analyticsRes.json());
       }
 
       // Catalogs
@@ -161,7 +231,8 @@ export const MerchantAppShell: React.FC = () => {
       }
 
       // Submissions
-      const subRes = await fetch(`/api/admin/submissions?page=${submissionsPage}&pageSize=10`, { headers });
+      const statusParam = submissionStatusFilter ? `&status=${submissionStatusFilter}` : '';
+      const subRes = await fetch(`/api/admin/submissions?page=${submissionsPage}&pageSize=10${statusParam}`, { headers });
       if (subRes.ok) {
         const subData = await subRes.json();
         setSubmissions(subData.submissions || []);
@@ -178,7 +249,7 @@ export const MerchantAppShell: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [getAuthHeaders, submissionsPage]);
+  }, [getAuthHeaders, submissionsPage, submissionStatusFilter]);
 
   useEffect(() => {
     loadData();
@@ -226,6 +297,28 @@ export const MerchantAppShell: React.FC = () => {
     }
   };
 
+  const handlePlanChange = async (targetPlan: string) => {
+    setSwitchingPlan(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch('/api/admin/billing/change-plan', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ plan: targetPlan }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to update plan');
+      }
+      showToast(`Plan successfully updated to ${targetPlan}!`);
+      loadData();
+    } catch (err: any) {
+      showToast(`Billing error: ${err.message}`);
+    } finally {
+      setSwitchingPlan(false);
+    }
+  };
+
   const handleCreateCatalog = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCatalogName.trim()) return;
@@ -254,14 +347,13 @@ export const MerchantAppShell: React.FC = () => {
       });
 
       if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || 'Failed to create catalog');
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to create catalog');
       }
 
-      showToast('Wholesale catalog created successfully!');
+      showToast('Catalog created in Draft status!');
       setShowCreateModal(false);
       setNewCatalogName('');
-      setNewSourceGid('');
       loadData();
     } catch (err: any) {
       showToast(`Error: ${err.message}`);
@@ -272,22 +364,24 @@ export const MerchantAppShell: React.FC = () => {
 
   return (
     <div className="cf-merchant-container">
-      {/* Toast Notification */}
+      {/* Notifications Toast */}
       {toastMessage && <div className="cf-toast">{toastMessage}</div>}
 
+      {/* Header Bar */}
       <header className="cf-merchant-header">
         <div className="cf-merchant-brand">
-          <div className="cf-logo-icon">CF</div>
+          <div className="cf-logo-icon">B2B</div>
           <div>
             <h1 className="cf-merchant-title">CatalogFlow</h1>
-            <p className="cf-merchant-subtitle">B2B Catalog & Buyer Wholesale Portal</p>
+            <p className="cf-merchant-subtitle">Wholesale Buyer Ordering & Draft Orders</p>
           </div>
         </div>
+
         <div className="cf-header-actions">
           {shop && (
             <div className="cf-store-tag">
-              <span className="cf-status-dot"></span>
-              {shop.shopDomain}
+              <span>🏬</span>
+              <span>{shop.shopDomain}</span>
             </div>
           )}
           <button
@@ -295,7 +389,6 @@ export const MerchantAppShell: React.FC = () => {
             className="cf-btn cf-btn-secondary"
             onClick={handleManualSync}
             disabled={syncing}
-            id="cf-sync-header-btn"
           >
             {syncing ? 'Syncing...' : '🔄 Sync Shopify Data'}
           </button>
@@ -327,6 +420,12 @@ export const MerchantAppShell: React.FC = () => {
           onClick={() => setActiveTab('sync')}
         >
           ⚡ Sync Health
+        </button>
+        <button
+          className={`cf-tab ${activeTab === 'billing' ? 'active' : ''}`}
+          onClick={() => setActiveTab('billing')}
+        >
+          💳 Billing & Quotas
         </button>
       </nav>
 
@@ -394,6 +493,45 @@ export const MerchantAppShell: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Product Analytics & Funnel (M8) */}
+                {analytics && (
+                  <div className="cf-card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
+                    <div className="cf-section-header" style={{ marginBottom: '0.75rem' }}>
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Commercial Funnel & Product Analytics</h3>
+                        <p className="cf-section-desc">Real-time buyer engagement and Draft Order conversion rate (Last 30 Days)</p>
+                      </div>
+                      <span className="cf-badge cf-badge-info">North Star: Draft Orders Created</span>
+                    </div>
+
+                    <div className="cf-funnel-grid">
+                      <div className="cf-funnel-card">
+                        <div className="cf-funnel-step">Step 1 • Traffic</div>
+                        <div className="cf-funnel-value">{analytics.counts.catalogViews}</div>
+                        <div className="cf-funnel-pct">Catalog Views</div>
+                      </div>
+
+                      <div className="cf-funnel-card">
+                        <div className="cf-funnel-step">Step 2 • Engagement</div>
+                        <div className="cf-funnel-value">{analytics.counts.orderSummariesStarted}</div>
+                        <div className="cf-funnel-pct">{analytics.conversionRates.viewToSummaryPct}% of Views</div>
+                      </div>
+
+                      <div className="cf-funnel-card">
+                        <div className="cf-funnel-step">Step 3 • Orders</div>
+                        <div className="cf-funnel-value">{analytics.counts.ordersSubmitted}</div>
+                        <div className="cf-funnel-pct">{analytics.conversionRates.summaryToSubmitPct}% of Carts</div>
+                      </div>
+
+                      <div className="cf-funnel-card highlight">
+                        <div className="cf-funnel-step">Step 4 • North Star</div>
+                        <div className="cf-funnel-value">{analytics.counts.draftOrdersCreated}</div>
+                        <div className="cf-funnel-pct">🎯 {analytics.conversionRates.overallConversionPct}% Overall Conv.</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Quota Progress Bar */}
                 {quota && (
                   <div className="cf-card cf-quota-card">
@@ -404,7 +542,13 @@ export const MerchantAppShell: React.FC = () => {
                           {quota.usage.monthlySubmissionsCount} of {quota.limits.monthlySubmissionsLimit} draft orders used this billing cycle
                         </p>
                       </div>
-                      <span className="cf-badge cf-badge-info">{quota.planTier} Plan</span>
+                      <button
+                        type="button"
+                        className="cf-btn cf-btn-sm cf-btn-secondary"
+                        onClick={() => setActiveTab('billing')}
+                      >
+                        Manage Plan & Quotas →
+                      </button>
                     </div>
                     <div className="cf-progress-bar-bg">
                       <div
@@ -438,7 +582,15 @@ export const MerchantAppShell: React.FC = () => {
 
                   {submissions.length === 0 ? (
                     <div className="cf-empty-state">
-                      <p>No buyer submissions recorded yet. Share a catalog link to begin receiving wholesale orders!</p>
+                      <p>Test the buyer experience yourself — your first submission will appear as a Draft Order.</p>
+                      {catalogs.length > 0 && catalogs[0].status === 'PUBLISHED' && (
+                        <button
+                          className="cf-btn cf-btn-secondary"
+                          onClick={() => handleCopyLink(catalogs[0].publicToken)}
+                        >
+                          📋 Copy Live Catalog Link
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="cf-table-container">
@@ -449,6 +601,7 @@ export const MerchantAppShell: React.FC = () => {
                             <th>Catalog</th>
                             <th>Items</th>
                             <th>Total</th>
+                            <th>Status</th>
                             <th>Date</th>
                             <th>Action</th>
                           </tr>
@@ -462,6 +615,21 @@ export const MerchantAppShell: React.FC = () => {
                               <td>{sub.catalogName}</td>
                               <td>{sub.itemCount} items ({sub.lineCount} lines)</td>
                               <td>{sub.formattedSubtotal}</td>
+                              <td>
+                                <span
+                                  className={`cf-badge ${
+                                    sub.status === 'COMPLETED'
+                                      ? 'cf-badge-completed'
+                                      : sub.status === 'FAILED'
+                                      ? 'cf-badge-failed'
+                                      : sub.status === 'REQUIRES_RECONCILIATION'
+                                      ? 'cf-badge-reconciliation'
+                                      : 'cf-badge-creating'
+                                  }`}
+                                >
+                                  {sub.status || 'COMPLETED'}
+                                </span>
+                              </td>
                               <td>{new Date(sub.createdAt).toLocaleDateString()}</td>
                               <td>
                                 {sub.draftOrderUrl ? (
@@ -506,7 +674,7 @@ export const MerchantAppShell: React.FC = () => {
 
                 {catalogs.length === 0 ? (
                   <div className="cf-empty-state">
-                    <p>No wholesale catalogs created yet.</p>
+                    <p>Create your first wholesale catalog in under 10 minutes.</p>
                     <button
                       className="cf-btn cf-btn-primary"
                       onClick={() => setShowCreateModal(true)}
@@ -521,8 +689,9 @@ export const MerchantAppShell: React.FC = () => {
                         <tr>
                           <th>Name</th>
                           <th>Status</th>
+                          <th>Inventory Scope</th>
                           <th>Pricing Rule</th>
-                          <th>Public Buyer Link</th>
+                          <th>Buyer Link</th>
                           <th>Actions</th>
                         </tr>
                       </thead>
@@ -542,21 +711,37 @@ export const MerchantAppShell: React.FC = () => {
                               </span>
                             </td>
                             <td>
+                              <span style={{ fontSize: '0.86rem' }}>
+                                {cat.variantCount ?? 0} variants ({cat.productCount ?? 0} products)
+                              </span>
+                            </td>
+                            <td>
                               {cat.priceMode === 'PERCENT_DISCOUNT'
                                 ? `${cat.discountPercent}% Wholesale Discount`
                                 : 'Shopify Retail Price'}
                             </td>
                             <td>
                               {cat.status === 'PUBLISHED' ? (
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-secondary"
-                                  onClick={() => handleCopyLink(cat.publicToken)}
-                                  title="Copy buyer link"
-                                >
-                                  📋 Copy Link
-                                </button>
+                                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                                  <button
+                                    className="cf-btn cf-btn-sm cf-btn-secondary"
+                                    onClick={() => handleCopyLink(cat.publicToken)}
+                                    title="Copy buyer link"
+                                  >
+                                    📋 Copy
+                                  </button>
+                                  <a
+                                    href={`/c/${cat.publicToken}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="cf-btn cf-btn-sm cf-btn-outline"
+                                    title="Open catalog preview"
+                                  >
+                                    Preview ↗
+                                  </a>
+                                </div>
                               ) : (
-                                <span className="cf-text-muted">Unpublished (Inactive)</span>
+                                <span className="cf-text-muted">Unpublished (Draft)</span>
                               )}
                             </td>
                             <td>
@@ -588,9 +773,28 @@ export const MerchantAppShell: React.FC = () => {
                   </div>
                 </div>
 
+                <div className="cf-filter-bar">
+                  <div className="cf-filter-group">
+                    <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Filter by Status:</label>
+                    <select
+                      className="cf-select"
+                      value={submissionStatusFilter}
+                      onChange={(e) => setSubmissionStatusFilter(e.target.value)}
+                    >
+                      <option value="ALL">All Submissions</option>
+                      <option value="COMPLETED">Completed Only</option>
+                      <option value="FAILED">Failed</option>
+                      <option value="REQUIRES_RECONCILIATION">Reconciliation Needed</option>
+                    </select>
+                  </div>
+                  <span className="cf-text-muted" style={{ fontSize: '0.84rem' }}>
+                    Showing {submissions.length} of {submissionsTotal} entries
+                  </span>
+                </div>
+
                 {submissions.length === 0 ? (
                   <div className="cf-empty-state">
-                    <p>No buyer order submissions received yet.</p>
+                    <p>Test the buyer experience yourself — your first submission will appear as a Draft Order.</p>
                   </div>
                 ) : (
                   <div className="cf-table-container">
@@ -599,10 +803,11 @@ export const MerchantAppShell: React.FC = () => {
                         <tr>
                           <th>Draft Order</th>
                           <th>Catalog</th>
-                          <th>Item / Line Count</th>
-                          <th>Subtotal</th>
-                          <th>Submitted At</th>
-                          <th>Shopify Admin</th>
+                          <th>Items</th>
+                          <th>Total</th>
+                          <th>Status</th>
+                          <th>Date</th>
+                          <th>Shopify Action</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -610,13 +815,29 @@ export const MerchantAppShell: React.FC = () => {
                           <tr key={sub.id}>
                             <td>
                               <strong>{sub.draftOrderName || 'Draft Order'}</strong>
+                              {sub.lastError && (
+                                <div style={{ fontSize: '0.75rem', color: '#c52707', marginTop: '0.2rem' }}>
+                                  {sub.lastError}
+                                </div>
+                              )}
                             </td>
                             <td>{sub.catalogName}</td>
+                            <td>{sub.itemCount} items ({sub.lineCount} lines)</td>
+                            <td>{sub.formattedSubtotal}</td>
                             <td>
-                              {sub.itemCount} units ({sub.lineCount} SKUs)
-                            </td>
-                            <td>
-                              <strong>{sub.formattedSubtotal}</strong>
+                              <span
+                                className={`cf-badge ${
+                                  sub.status === 'COMPLETED'
+                                    ? 'cf-badge-completed'
+                                    : sub.status === 'FAILED'
+                                    ? 'cf-badge-failed'
+                                    : sub.status === 'REQUIRES_RECONCILIATION'
+                                    ? 'cf-badge-reconciliation'
+                                    : 'cf-badge-creating'
+                                }`}
+                              >
+                                {sub.status || 'COMPLETED'}
+                              </span>
                             </td>
                             <td>{new Date(sub.createdAt).toLocaleString()}</td>
                             <td>
@@ -627,10 +848,10 @@ export const MerchantAppShell: React.FC = () => {
                                   rel="noopener noreferrer"
                                   className="cf-btn cf-btn-sm cf-btn-primary"
                                 >
-                                  View in Shopify ↗
+                                  Open in Shopify ↗
                                 </a>
                               ) : (
-                                <span className="cf-text-muted">N/A</span>
+                                <span className="cf-text-muted">No Shopify Link</span>
                               )}
                             </td>
                           </tr>
@@ -647,50 +868,175 @@ export const MerchantAppShell: React.FC = () => {
               <div className="cf-tab-content">
                 <div className="cf-section-header">
                   <div>
-                    <h3>Inventory & Catalog Mirror Health</h3>
+                    <h3>Shopify Catalog Sync Diagnostics</h3>
                     <p className="cf-section-desc">
-                      CatalogFlow maintains live synchronization with Shopify via webhooks and scheduled sync runs.
+                      CatalogFlow maintains real-time snapshots via webhooks and handles inventory changes automatically.
                     </p>
                   </div>
-                  <button
-                    className="cf-btn cf-btn-primary"
-                    onClick={handleManualSync}
-                    disabled={syncing}
-                  >
-                    {syncing ? 'Syncing...' : '🔄 Run Full Reconcile Now'}
-                  </button>
                 </div>
 
-                <div className="cf-summary-grid">
-                  <div className="cf-summary-box">
-                    <span className="cf-summary-label">Sync Health</span>
-                    <span className="cf-summary-value">
-                      {syncHealth?.sync.status === 'COMPLETED' ? '🟢 Healthy' : '🟡 In Progress'}
-                    </span>
-                    <span className="cf-summary-hint">
-                      Last synchronized: {syncHealth?.sync.lastSyncAt ? new Date(syncHealth.sync.lastSyncAt).toLocaleString() : 'Pending'}
-                    </span>
-                  </div>
+                <div className="cf-card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
+                  <div className="cf-summary-grid">
+                    <div className="cf-summary-box">
+                      <span className="cf-summary-label">Sync Status</span>
+                      <span className="cf-summary-value">
+                        {syncHealth?.sync.status === 'IN_PROGRESS' ? '⏳ Syncing' : '✅ Active & Synced'}
+                      </span>
+                      <span className="cf-summary-hint">
+                        Last sync: {syncHealth?.sync.lastSyncAt ? new Date(syncHealth.sync.lastSyncAt).toLocaleString() : 'Just now'}
+                      </span>
+                    </div>
 
-                  <div className="cf-summary-box">
-                    <span className="cf-summary-label">Products Mirrored</span>
-                    <span className="cf-summary-value">{syncHealth?.inventory.productsCount || 0}</span>
-                    <span className="cf-summary-hint">
-                      Variants: {syncHealth?.inventory.variantsCount || 0}
+                    <div className="cf-summary-box">
+                      <span className="cf-summary-label">Mirrored Products</span>
+                      <span className="cf-summary-value">{syncHealth?.inventory.productsCount || 0}</span>
+                      <span className="cf-summary-hint">
+                        {syncHealth?.inventory.variantsCount || 0} total active variants
+                      </span>
+                    </div>
+
+                    <div className="cf-summary-box">
+                      <span className="cf-summary-label">Initial Bootstrap</span>
+                      <span className="cf-summary-value">
+                        {syncHealth?.shop.initialSyncAt ? 'Completed' : 'Pending'}
+                      </span>
+                      <span className="cf-summary-hint">
+                        {syncHealth?.shop.initialSyncAt ? new Date(syncHealth.shop.initialSyncAt).toLocaleDateString() : 'Running'}
+                      </span>
+                    </div>
+
+                    <div className="cf-summary-box">
+                      <span className="cf-summary-label">Collections Mapped</span>
+                      <span className="cf-summary-value">{syncHealth?.inventory.collectionsCount || 0}</span>
+                      <span className="cf-summary-hint">Available for catalog rules</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* BILLING & PLANS TAB (M8) */}
+            {activeTab === 'billing' && (
+              <div className="cf-tab-content">
+                <div className="cf-section-header">
+                  <div>
+                    <h3>Billing, Plans & Quota Limits</h3>
+                    <p className="cf-section-desc">
+                      Predictable wholesale pricing with hard caps and zero surprise overages.
+                    </p>
+                  </div>
+                  {billing && (
+                    <span className="cf-badge cf-badge-info" style={{ fontSize: '0.9rem', padding: '0.4rem 0.8rem' }}>
+                      Current Plan: {billing.currentPlan}
                     </span>
-                  </div>
+                  )}
+                </div>
 
-                  <div className="cf-summary-box">
-                    <span className="cf-summary-label">Collections Mirrored</span>
-                    <span className="cf-summary-value">{syncHealth?.inventory.collectionsCount || 0}</span>
-                    <span className="cf-summary-hint">Active collections in store</span>
-                  </div>
+                {billing && (
+                  <div className="cf-card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
+                    <h4 style={{ margin: '0 0 1rem', fontSize: '1.1rem' }}>Active Billing Cycle & Quota Utilization</h4>
+                    
+                    <div className="cf-summary-grid" style={{ marginBottom: '1.5rem' }}>
+                      <div className="cf-summary-box">
+                        <span className="cf-summary-label">Live Catalogs</span>
+                        <span className="cf-summary-value">
+                          {billing.usage.liveCatalogsCount} / {billing.limits.maxLiveCatalogs}
+                        </span>
+                        <span className="cf-summary-hint">
+                          {billing.allowed.canPublishCatalog ? 'Quota Available' : 'Limit Reached'}
+                        </span>
+                      </div>
 
-                  <div className="cf-summary-box">
-                    <span className="cf-summary-label">Security & Architecture</span>
-                    <span className="cf-summary-value">Zero Raw PII</span>
-                    <span className="cf-summary-hint">Live GraphQL Draft Order pipeline</span>
+                      <div className="cf-summary-box">
+                        <span className="cf-summary-label">Max Variants / Catalog</span>
+                        <span className="cf-summary-value">
+                          {billing.usage.maxVariantsInPublishedCatalogs} / {billing.limits.maxVariants}
+                        </span>
+                        <span className="cf-summary-hint">Checked upon catalog publish</span>
+                      </div>
+
+                      <div className="cf-summary-box">
+                        <span className="cf-summary-label">Monthly Orders</span>
+                        <span className="cf-summary-value">
+                          {billing.usage.monthlySubmissionsCount} / {billing.limits.monthlySubmissionsLimit}
+                        </span>
+                        <span className="cf-summary-hint">
+                          Next Reset: {new Date(billing.usage.nextBillingCycleAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="cf-quota-header" style={{ marginBottom: '0.4rem' }}>
+                      <span>Draft Order Quota Usage</span>
+                      <span>
+                        {Math.round((billing.usage.monthlySubmissionsCount / billing.limits.monthlySubmissionsLimit) * 100)}%
+                      </span>
+                    </div>
+                    <div className="cf-progress-bar-bg">
+                      <div
+                        className={`cf-progress-bar-fill ${
+                          (billing.usage.monthlySubmissionsCount / billing.limits.monthlySubmissionsLimit) >= 0.9
+                            ? 'danger'
+                            : ''
+                        }`}
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (billing.usage.monthlySubmissionsCount / billing.limits.monthlySubmissionsLimit) * 100
+                          )}%`,
+                        }}
+                      />
+                    </div>
                   </div>
+                )}
+
+                {/* Plan Comparison Grid */}
+                <h4 style={{ margin: '1.5rem 0 0.5rem', fontSize: '1.15rem' }}>Available Subscription Plans</h4>
+                <p className="cf-section-desc">Switch plan tiers instantly with automated quota adjustment.</p>
+
+                <div className="cf-plans-grid">
+                  {billing?.availablePlans.map((plan) => {
+                    const isCurrent = billing.currentPlan === plan.id;
+                    return (
+                      <div
+                        key={plan.id}
+                        className={`cf-plan-card ${isCurrent ? 'current' : ''}`}
+                      >
+                        <div className="cf-plan-header">
+                          <div className="cf-plan-title">
+                            <h4>{plan.name}</h4>
+                            {isCurrent && <span className="cf-badge cf-badge-success">Active Plan</span>}
+                          </div>
+                          <div className="cf-plan-price">
+                            ${plan.price} <span>/ month</span>
+                          </div>
+                        </div>
+
+                        <ul className="cf-plan-features">
+                          {plan.features.map((feat, idx) => (
+                            <li key={idx}>{feat}</li>
+                          ))}
+                        </ul>
+
+                        <div className="cf-plan-action">
+                          {isCurrent ? (
+                            <button className="cf-btn cf-btn-secondary" style={{ width: '100%' }} disabled>
+                              Current Subscription
+                            </button>
+                          ) : (
+                            <button
+                              className="cf-btn cf-btn-primary"
+                              style={{ width: '100%' }}
+                              onClick={() => handlePlanChange(plan.id)}
+                              disabled={switchingPlan}
+                            >
+                              {switchingPlan ? 'Updating...' : `Switch to ${plan.name}`}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -698,9 +1044,9 @@ export const MerchantAppShell: React.FC = () => {
         )}
       </main>
 
-      {/* Create Catalog Modal */}
+      {/* New Catalog Modal */}
       {showCreateModal && (
-        <div className="cf-modal-overlay">
+        <div className="cf-modal-backdrop">
           <div className="cf-modal">
             <div className="cf-modal-header">
               <h3>Create Wholesale Catalog</h3>
@@ -715,11 +1061,11 @@ export const MerchantAppShell: React.FC = () => {
             <form onSubmit={handleCreateCatalog}>
               <div className="cf-modal-body">
                 <div className="cf-form-group">
-                  <label>Catalog Name *</label>
+                  <label>Catalog Name</label>
                   <input
                     type="text"
                     required
-                    placeholder="e.g. VIP Wholesale 2026"
+                    placeholder="e.g. Summer 2026 Wholesale"
                     value={newCatalogName}
                     onChange={(e) => setNewCatalogName(e.target.value)}
                     className="cf-input"
@@ -727,14 +1073,14 @@ export const MerchantAppShell: React.FC = () => {
                 </div>
 
                 <div className="cf-form-group">
-                  <label>Pricing Rule</label>
+                  <label>Pricing Mode</label>
                   <select
                     value={newPriceMode}
                     onChange={(e: any) => setNewPriceMode(e.target.value)}
                     className="cf-select"
                   >
                     <option value="SHOPIFY_PRICE">Shopify Retail Price (No discount)</option>
-                    <option value="PERCENT_DISCOUNT">Percentage Wholesale Discount</option>
+                    <option value="PERCENT_DISCOUNT">Catalog-Wide % Wholesale Discount</option>
                   </select>
                 </div>
 
@@ -743,7 +1089,7 @@ export const MerchantAppShell: React.FC = () => {
                     <label>Discount Percentage (%)</label>
                     <input
                       type="number"
-                      min="1"
+                      min="0"
                       max="90"
                       value={newDiscount}
                       onChange={(e) => setNewDiscount(Number(e.target.value))}

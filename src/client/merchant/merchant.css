@@ -569,3 +569,173 @@ body {
   font-size: 0.8rem;
   color: var(--cf-text-muted);
 }
+
+/* Funnel & Analytics */
+.cf-funnel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.cf-funnel-card {
+  background: #fbfbfd;
+  border: 1px solid var(--cf-border);
+  border-radius: 10px;
+  padding: 1.2rem;
+  text-align: center;
+  position: relative;
+}
+
+.cf-funnel-card.highlight {
+  border-color: #008060;
+  background: #f0fdf4;
+}
+
+.cf-funnel-step {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--cf-text-muted);
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+}
+
+.cf-funnel-value {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--cf-text-main);
+  margin-bottom: 0.25rem;
+}
+
+.cf-funnel-pct {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #008060;
+}
+
+/* Plan Cards */
+.cf-plans-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.cf-plan-card {
+  background: #ffffff;
+  border: 2px solid var(--cf-border);
+  border-radius: 14px;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: all 0.2s ease;
+}
+
+.cf-plan-card:hover {
+  border-color: #b4dfd4;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+}
+
+.cf-plan-card.current {
+  border-color: #008060;
+  box-shadow: 0 4px 14px rgba(0, 128, 96, 0.15);
+  background: #fafdfc;
+}
+
+.cf-plan-header {
+  margin-bottom: 1.25rem;
+}
+
+.cf-plan-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.cf-plan-title h4 {
+  margin: 0;
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.cf-plan-price {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--cf-text-main);
+}
+
+.cf-plan-price span {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--cf-text-muted);
+}
+
+.cf-plan-features {
+  list-style: none;
+  padding: 0;
+  margin: 1.25rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.cf-plan-features li {
+  font-size: 0.86rem;
+  color: var(--cf-text-main);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cf-plan-features li::before {
+  content: "✓";
+  color: #008060;
+  font-weight: 700;
+}
+
+.cf-plan-action {
+  margin-top: 1.5rem;
+}
+
+/* Status Badges */
+.cf-badge-completed {
+  background: #e3f1df;
+  color: #006e52;
+  border: 1px solid #c2e5bc;
+}
+
+.cf-badge-failed {
+  background: #fde8e4;
+  color: #c52707;
+  border: 1px solid #f9c6be;
+}
+
+.cf-badge-reconciliation {
+  background: #fcf1cd;
+  color: #8c6b00;
+  border: 1px solid #f6e29b;
+}
+
+.cf-badge-creating {
+  background: #e2f1fd;
+  color: #086bb5;
+  border: 1px solid #c1e2fc;
+}
+
+/* Submissions Filter */
+.cf-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.cf-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+

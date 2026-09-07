@@ -1083,6 +1083,7 @@ export async function getPublicCatalogPayload(publicToken: string) {
         discountPercent: catalog.discountPercent ? parseFloat(catalog.discountPercent.toFixed(2)) : 0,
       },
       shop: {
+        id: catalog.shopId,
         shopDomain: catalog.shop.shopDomain,
         currency: catalog.shop.currency || 'USD',
       },
@@ -1163,6 +1164,7 @@ export async function getPublicCatalogPayload(publicToken: string) {
       discountPercent: catalog.discountPercent ? parseFloat(catalog.discountPercent.toFixed(2)) : 0,
     },
     shop: {
+      id: catalog.shopId,
       shopDomain: catalog.shop.shopDomain,
       currency,
     },

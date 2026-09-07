@@ -32,8 +32,19 @@ import {
   deleteCatalog,
   getCatalogsByShop,
   getCatalogById,
+  getPublishedCatalogByToken,
   CatalogError,
 } from './services/catalog.server.js';
+import {
+  recordAnalyticsEvent,
+  ANALYTICS_EVENTS,
+  getShopAnalyticsSummary,
+} from './services/analytics.server.js';
+import {
+  getShopBillingInfo,
+  changeShopPlan,
+  BillingError,
+} from './services/billing.server.js';
 import {
   getActiveShopByDomain,
   installOrUpdateShop,
@@ -194,9 +205,40 @@ app.get('/api/public/catalog/:publicToken', publicRateLimiter, async (req: Reque
       return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable' });
     }
 
+    // Safe non-blocking fire-and-forget analytics recording (never delays or breaks buyer load)
+    if (payload.shop && payload.shop.id) {
+      void recordAnalyticsEvent(payload.shop.id, ANALYTICS_EVENTS.CATALOG_VIEWED, payload.catalog.id);
+    }
+
     return res.status(200).json(payload);
   } catch (error: any) {
     return res.status(500).json({ error: sanitizeErrorMessage(error) });
+  }
+});
+
+// 1.5 Record Buyer Analytics Event (e.g. order summary started)
+app.post('/api/public/catalog/:publicToken/event', publicRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { publicToken } = req.params;
+    const { eventName, metadata } = req.body;
+
+    if (!isValidPublicToken(publicToken)) {
+      return res.status(400).json({ error: 'Invalid catalog token format' });
+    }
+
+    const catalog = await getPublishedCatalogByToken(publicToken);
+    if (!catalog) {
+      return res.status(404).json({ error: 'Catalog not found or unavailable' });
+    }
+
+    // Only allow buyer-safe event types
+    if (eventName === ANALYTICS_EVENTS.ORDER_SUMMARY_STARTED) {
+      await recordAnalyticsEvent(catalog.shopId, eventName, catalog.id, metadata);
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (error: any) {
+    return res.status(400).json({ error: sanitizeErrorMessage(error) });
   }
 });
 
@@ -709,15 +751,62 @@ app.post('/api/admin/bootstrap', adminAuthMiddleware, async (req: any, res: Resp
   }
 });
 
-// Submissions history (M6)
+// Submissions history (M6/M7)
 app.get('/api/admin/submissions', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
     const page = parseInt(req.query.page as string, 10) || 1;
     const pageSize = parseInt(req.query.pageSize as string, 10) || 20;
     const catalogId = req.query.catalogId ? String(req.query.catalogId) : undefined;
+    const status = req.query.status ? String(req.query.status) : undefined;
 
-    const result = await getSubmissionsByShop(req.shop.id, { page, pageSize, catalogId });
+    const result = await getSubmissionsByShop(req.shop.id, { page, pageSize, catalogId, status });
     return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Billing & Quotas (M8)
+app.get('/api/admin/billing', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const billingInfo = await getShopBillingInfo(req.shop.id);
+    return res.status(200).json(billingInfo);
+  } catch (err: any) {
+    if (err instanceof BillingError) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Change Plan Tier (M8)
+app.post('/api/admin/billing/change-plan', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const { plan } = req.body;
+    if (!plan) {
+      return res.status(400).json({ error: 'Missing required plan tier' });
+    }
+    const updatedBilling = await changeShopPlan(req.shop.id, plan);
+    return res.status(200).json(updatedBilling);
+  } catch (err: any) {
+    if (err instanceof BillingError) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Product Analytics & Funnel (M8)
+app.get('/api/admin/analytics', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    let days = parseInt(req.query.days as string, 10);
+    if (isNaN(days) || days < 1) {
+      days = 30;
+    } else if (days > 90) {
+      days = 90;
+    }
+    const analytics = await getShopAnalyticsSummary(req.shop.id, days);
+    return res.status(200).json(analytics);
   } catch (err: any) {
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }
