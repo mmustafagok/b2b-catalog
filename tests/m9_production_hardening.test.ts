@@ -253,7 +253,8 @@ describe('Milestone 9: Production Hardening, Reliability, Edge Cases, Performanc
       expect(processed).toBe(true);
 
       const failedJob = await prisma.backgroundJob.findUnique({ where: { id: job.id } });
-      expect(failedJob?.status).toBe('COMPLETED'); // Default switch completes unrecognized jobs gracefully
+      expect(failedJob?.status).toBe('FAILED');
+      expect(failedJob?.lastError).toContain('Unknown or unsupported background job type');
     });
 
     it('drops background jobs for uninstalled/inactive shops', async () => {

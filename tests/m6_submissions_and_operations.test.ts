@@ -175,6 +175,9 @@ describe('Milestone 6: Submissions History & Merchant Operations', () => {
     expect(res.body.submissions.total).toBe(2);
     expect(res.body.sync.status).toBe('COMPLETED');
     expect(res.body.sync.lastSyncStats).toEqual({ productsSynced: 45, variantsSynced: 120 });
+    expect(res.body.jobs).toBeDefined();
+    expect(res.body.jobs.pending).toBe(0);
+    expect(res.body.jobs.failed).toBe(0);
   });
 
   it('should trigger manual sync via POST /api/admin/sync/trigger', async () => {

@@ -14,6 +14,7 @@ import { resolveCatalogAllowedProductGids } from './sync.server.js';
 import { hashIdempotencyKey } from './auth.server.js';
 import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server.js';
 import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
+import { sanitizeErrorMessage } from './security.server.js';
 
 export class OrderSubmissionError extends Error {
   constructor(
@@ -755,6 +756,9 @@ export async function getSyncHealthSummary(shopId: string) {
     submissionsTotal,
     lastSyncRun,
     shop,
+    jobsPendingCount,
+    jobsFailedCount,
+    latestFailedJob,
   ] = await Promise.all([
     prisma.catalog.count({ where: { shopId } }),
     prisma.catalog.count({ where: { shopId, status: CatalogStatus.PUBLISHED } }),
@@ -775,6 +779,29 @@ export async function getSyncHealthSummary(shopId: string) {
         monthlySubmissionsCount: true,
         initialSyncAt: true,
         installedAt: true,
+      },
+    }),
+    prisma.backgroundJob.count({
+      where: {
+        shopId,
+        status: { in: ['PENDING', 'PROCESSING'] },
+      },
+    }),
+    prisma.backgroundJob.count({
+      where: {
+        shopId,
+        status: 'FAILED',
+      },
+    }),
+    prisma.backgroundJob.findFirst({
+      where: {
+        shopId,
+        status: 'FAILED',
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        updatedAt: true,
+        lastError: true,
       },
     }),
   ]);
@@ -815,6 +842,12 @@ export async function getSyncHealthSummary(shopId: string) {
       status: lastSyncRun?.status || (shop?.initialSyncAt ? 'COMPLETED' : 'PENDING'),
       lastSyncAt: lastSyncRun?.finishedAt ? lastSyncRun.finishedAt.toISOString() : (shop?.initialSyncAt ? shop.initialSyncAt.toISOString() : null),
       lastSyncStats: syncStats,
+    },
+    jobs: {
+      pending: jobsPendingCount,
+      failed: jobsFailedCount,
+      lastFailedAt: latestFailedJob?.updatedAt ? latestFailedJob.updatedAt.toISOString() : null,
+      lastError: latestFailedJob?.lastError ? sanitizeErrorMessage(latestFailedJob.lastError) : null,
     },
   };
 }

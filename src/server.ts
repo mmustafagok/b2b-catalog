@@ -80,6 +80,11 @@ validateEnvironment();
 
 export const app = express();
 
+// Safe Reverse Proxy configuration for Railway / container ingress:
+// Trust 1 upstream proxy hop so Express reads the real buyer client IP from X-Forwarded-For
+// without blindly trusting unverified client-forged proxy chains.
+app.set('trust proxy', 1);
+
 // Public CORS only for public buyer endpoints, restricted for admin
 app.use('/api/public', cors());
 
@@ -940,15 +945,28 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
   }
 });
 
+// Helper to serve index.html with resolved Shopify API Key
+function sendRenderedIndexHtml(res: Response, filePath: string) {
+  try {
+    let html = fs.readFileSync(filePath, 'utf-8');
+    const apiKey = process.env.SHOPIFY_API_KEY || process.env.VITE_SHOPIFY_API_KEY || '';
+    html = html.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(html);
+  } catch (err) {
+    return res.status(500).send('Error loading page');
+  }
+}
+
 // Serve Embedded Merchant Admin SPA for root / and /app
 app.get(['/', '/app', '/app/*'], (_req: Request, res: Response) => {
   const htmlPath = path.join(clientDist, 'index.html');
   if (fs.existsSync(htmlPath)) {
-    res.sendFile(htmlPath);
+    sendRenderedIndexHtml(res, htmlPath);
   } else {
     const rootHtml = path.resolve(process.cwd(), 'index.html');
     if (fs.existsSync(rootHtml)) {
-      res.sendFile(rootHtml);
+      sendRenderedIndexHtml(res, rootHtml);
     } else {
       res.status(200).send(`
         <!DOCTYPE html>

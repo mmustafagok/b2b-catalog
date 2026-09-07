@@ -142,6 +142,12 @@ interface SyncHealthData {
     lastSyncAt: string | null;
     lastSyncStats: any;
   };
+  jobs?: {
+    pending: number;
+    failed: number;
+    lastFailedAt: string | null;
+    lastError: string | null;
+  };
 }
 
 type TabType = 'overview' | 'catalogs' | 'submissions' | 'sync' | 'billing';
@@ -945,7 +951,48 @@ export const MerchantAppShell: React.FC = () => {
                       <span className="cf-summary-value">{syncHealth?.inventory.collectionsCount || 0}</span>
                       <span className="cf-summary-hint">Available for catalog rules</span>
                     </div>
+
+                    <div className="cf-summary-box">
+                      <span className="cf-summary-label">Background Jobs</span>
+                      <span className="cf-summary-value">
+                        {syncHealth?.jobs ? (
+                          syncHealth.jobs.failed > 0 ? (
+                            <span style={{ color: 'var(--color-danger, #dc2626)' }}>
+                              {syncHealth.jobs.failed} Failed
+                            </span>
+                          ) : (
+                            <span style={{ color: 'var(--color-success, #16a34a)' }}>
+                              ✅ All Healthy
+                            </span>
+                          )
+                        ) : (
+                          '0 Failed'
+                        )}
+                      </span>
+                      <span className="cf-summary-hint">
+                        {syncHealth?.jobs?.pending || 0} pending in worker queue
+                      </span>
+                    </div>
                   </div>
+
+                  {syncHealth?.jobs && syncHealth.jobs.failed > 0 && (
+                    <div
+                      style={{
+                        marginTop: '1.25rem',
+                        padding: '1rem',
+                        background: '#fef2f2',
+                        border: '1px solid #fecaca',
+                        borderRadius: '6px',
+                        color: '#991b1b',
+                        fontSize: '0.875rem',
+                      }}
+                    >
+                      <strong>⚠️ Background Job Warning:</strong> {syncHealth.jobs.failed} background sync job(s) failed.{' '}
+                      {syncHealth.jobs.lastError && (
+                        <span>Latest issue: <em>{syncHealth.jobs.lastError}</em></span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

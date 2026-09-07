@@ -189,8 +189,10 @@ export async function executeJob(job: BackgroundJob): Promise<void> {
       break;
     }
 
-    default:
-      console.warn(`[JobQueue] Unknown job type: ${job.type}`);
+    default: {
+      const unknownType = (job as any).type;
+      throw new Error(`Unknown or unsupported background job type: ${unknownType}`);
+    }
   }
 
   await completeJob(job.id);
