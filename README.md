@@ -161,10 +161,25 @@ npm run prisma:migrate
 - **Privacy & Metadata Hygiene:**
   - Public tokens and raw idempotency keys are strictly excluded from Draft Order tags and custom attributes. Zero raw buyer PII is retained in the database.
 
-### 4.7 Merchant Operations & Submissions History (M6)
+### 4.7 Merchant Operations & Submissions History (M6 / M7)
 - **Embedded Submissions Table:** Lists all buyer order submissions with timestamp, catalog title, line count, item count, formatted subtotal currency, and status.
+- **Submissions Status Filtering:** Filter by `ALL`, `COMPLETED`, `REQUIRES_RECONCILIATION`, and `FAILED`.
+- **Commercial Funnel Analytics:** Tracks catalog views $\rightarrow$ order summaries $\rightarrow$ orders submitted $\rightarrow$ Shopify Draft Orders created.
 - **Deep Links to Shopify Admin:** Direct deep links to native Shopify Draft Orders (`https://{shop}/admin/draft_orders/{id}`).
 - **Catalog Status Management:** Instant publish, unpublish, and archive operations with immediate `dataVersion` increments.
+
+### 4.8 Commercial Pricing, Quotas & Analytics Boundary (M8)
+- **Centralized Entitlement Boundary (`BillingProvider`):** All commercial limits resolve through a single entitlement service. In production, `Shop.plan` is an entitlement mirror/cache, not a merchant-controlled source of truth.
+- **Production Change-Plan Protection:** `POST /api/admin/billing/change-plan` returns `403 BILLING_NOT_CONFIGURED` in production. Dev/test overrides are strictly isolated (`NODE_ENV === 'test'`).
+- **Shopify App Pricing Status:** Live integration pending M10 Partner Dashboard setup (`LOCAL_MIRROR_PENDING_SHOPIFY`).
+- **Normalized Plan Tiers:**
+  - **Starter ($14.99/mo):** 1 live catalog, 500 variants / catalog, 50 orders / month, 7-day trial.
+  - **Growth ($29.99/mo):** 5 live catalogs, 5,000 variants / catalog, 250 orders / month, 7-day trial.
+  - **Scale ($49.99/mo):** 20 live catalogs, 25,000 variants / catalog, 1,000 orders / month, 7-day trial.
+  - *Hard caps only; no overage billing; no permanent free tier.*
+- **Strict Analytics Privacy:** Metadata allowlist strictly discards all PII, buyer notes, company names, and arbitrary nested JSON.
+- **Accurate & Idempotent North Star:** `draft_order_created_from_buyer_submission` is recorded exactly once across normal and reconciled orders using a deterministic `eventKey`.
+- **Non-Blocking Buyer Analytics:** Catalog view analytics are fire-and-forget, ensuring zero latency impact on buyer portal loads.
 
 ---
 

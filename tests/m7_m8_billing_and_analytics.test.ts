@@ -10,10 +10,41 @@ import {
   getShopAnalyticsSummary,
   sanitizeAnalyticsMetadata,
 } from '../src/services/analytics.server.js';
-import { getShopBillingInfo, changeShopPlan, BillingProvider, isDevPlanOverrideAllowed } from '../src/services/billing.server.js';
+import {
+  getShopBillingInfo,
+  changeShopPlan,
+  BillingProvider,
+  defaultBillingProvider,
+  getShopEntitlement,
+  PLAN_DETAILS,
+  isDevPlanOverrideAllowed,
+} from '../src/services/billing.server.js';
 import { submitBuyerOrder } from '../src/services/order.server.js';
 import { ShopifyAdminClient } from '../src/services/shopify-client.server.js';
+import crypto from 'node:crypto';
 import { CatalogSourceType, PriceMode, PlanTier, PLAN_LIMITS } from '../src/types/index.js';
+
+function createTestAppBridgeToken(shopDomain: string): string {
+  const secret = process.env.SHOPIFY_API_SECRET || 'test_secret';
+  const apiKey = process.env.SHOPIFY_API_KEY || 'test_key';
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(
+    JSON.stringify({
+      iss: `https://${shopDomain}/admin`,
+      dest: `https://${shopDomain}`,
+      aud: apiKey,
+      sub: 'test-user-1',
+      exp: now + 3600,
+      nbf: now - 10,
+      iat: now,
+      jti: 'jti-1',
+      sid: 'sid-1',
+    })
+  ).toString('base64url');
+  const signature = crypto.createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url');
+  return `${header}.${payload}.${signature}`;
+}
 
 describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Product Analytics', () => {
   let testShop: { id: string; shopDomain: string };
@@ -699,6 +730,169 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       expect(res.body.catalogs).toHaveLength(1);
       expect(res.body.catalogs[0].productCount).toBe(1);
       expect(res.body.catalogs[0].variantCount).toBe(2);
+    });
+  });
+
+  describe('Centralized Entitlement Boundary & Truthful Source (M8 Consolidation)', () => {
+    it('resolves catalog publish quota strictly through BillingProvider entitlement', async () => {
+      const getEntitlementSpy = vi.spyOn(defaultBillingProvider, 'getEntitlement');
+
+      const cat = await createCatalog(testShop.id, {
+        name: 'Entitlement Catalog',
+        priceMode: PriceMode.SHOPIFY_PRICE,
+        sources: [{ type: CatalogSourceType.COLLECTION, shopifyGid: 'gid://shopify/Collection/ent-1' }],
+      });
+
+      await publishCatalog(testShop.id, cat.id);
+
+      expect(getEntitlementSpy).toHaveBeenCalled();
+      const calledArg = getEntitlementSpy.mock.calls[0][0];
+      expect(calledArg).toMatchObject({ id: testShop.id, plan: 'STARTER' });
+
+      getEntitlementSpy.mockRestore();
+    });
+
+    it('resolves order submission quota strictly through BillingProvider entitlement', async () => {
+      const getEntitlementSpy = vi.spyOn(defaultBillingProvider, 'getEntitlement');
+
+      // Create a valid published catalog
+      const productGid = 'gid://shopify/Product/ent-prod-1';
+      const variantGid = 'gid://shopify/ProductVariant/ent-var-1';
+
+      await prisma.productSnapshot.create({
+        data: {
+          shopId: testShop.id,
+          shopifyProductId: productGid,
+          title: 'Order Item',
+          handle: 'order-item',
+          status: 'ACTIVE',
+        },
+      });
+
+      await prisma.variantSnapshot.create({
+        data: {
+          shopId: testShop.id,
+          shopifyVariantId: variantGid,
+          shopifyProductId: productGid,
+          title: 'Default',
+          shopifyPrice: 25.0,
+          inventoryQuantity: 50,
+          availableForSale: true,
+        },
+      });
+
+      const cat = await createCatalog(testShop.id, {
+        name: 'Order Quota Catalog',
+        priceMode: PriceMode.SHOPIFY_PRICE,
+        sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: productGid }],
+      });
+      const published = await publishCatalog(testShop.id, cat.id);
+
+      // Max out monthly submissions on Starter plan (limit = 50)
+      await prisma.shop.update({
+        where: { id: testShop.id },
+        data: { monthlySubmissionsCount: 50 },
+      });
+
+      getEntitlementSpy.mockClear();
+
+      // Attempt order submission with correct argument signature (publicToken, idempotencyKey, input)
+      await expect(
+        submitBuyerOrder(published.publicToken, 'idempotency-quota-entitlement-key-1', {
+          dataVersion: published.dataVersion,
+          buyer: {
+            businessName: 'Quota Buyer Inc',
+            email: 'buyer@test.com',
+          },
+          lines: [{ variantId: variantGid, quantity: 2 }],
+        })
+      ).rejects.toThrow(/Merchant order submission limit reached for their current plan/);
+
+      // Verify BillingProvider was consulted to resolve the submission limit
+      expect(getEntitlementSpy).toHaveBeenCalledWith(testShop.id);
+
+      getEntitlementSpy.mockRestore();
+    });
+
+    it('reports truthful entitlement source in production (LOCAL_MIRROR_PENDING_SHOPIFY, not SHOPIFY_APP_PRICING)', async () => {
+      const prevEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+
+      try {
+        const entitlement = await defaultBillingProvider.getEntitlement(testShop);
+        expect(entitlement.source).toBe('LOCAL_MIRROR_PENDING_SHOPIFY');
+        expect(entitlement.source).not.toBe('SHOPIFY_APP_PRICING');
+
+        const token = createTestAppBridgeToken(testShop.shopDomain);
+
+        // Verify via API endpoint with valid production JWT session token
+        const billingRes = await request(app)
+          .get('/api/admin/billing')
+          .set('Authorization', `Bearer ${token}`);
+
+        expect(billingRes.status).toBe(200);
+        expect(billingRes.body.entitlementSource).toBe('LOCAL_MIRROR_PENDING_SHOPIFY');
+        expect(billingRes.body.billingStatus).toBe('SHOPIFY_APP_PRICING_PENDING_M10');
+      } finally {
+        process.env.NODE_ENV = prevEnv;
+      }
+    });
+
+    it('reports DEV_OVERRIDE entitlement source in test environment', async () => {
+      const entitlement = await defaultBillingProvider.getEntitlement(testShop);
+      expect(entitlement.source).toBe('DEV_OVERRIDE');
+
+      const billingInfo = await getShopBillingInfo(testShop.id);
+      expect(billingInfo.entitlementSource).toBe('DEV_OVERRIDE');
+      expect(billingInfo.billingStatus).toBe('DEV_OVERRIDE');
+    });
+
+    it('guarantees Starter plan limit is consistently 500 variants across all models and boundaries', async () => {
+      expect(PLAN_LIMITS.STARTER.maxVariants).toBe(500);
+      expect(PLAN_DETAILS.STARTER.maxVariants).toBe(500);
+
+      const entitlement = await defaultBillingProvider.getEntitlement(testShop);
+      expect(entitlement.limits.maxVariants).toBe(500);
+      expect(entitlement.planDetails.maxVariants).toBe(500);
+
+      // Verify Starter plan has 1 live catalog and 50 monthly submissions
+      expect(entitlement.limits.maxLiveCatalogs).toBe(1);
+      expect(entitlement.limits.monthlySubmissionsLimit).toBe(50);
+      expect(entitlement.limits.price).toBe(14.99);
+
+      // Verify Growth has 5 live catalogs, 5,000 variants, 250 orders, $29.99
+      expect(PLAN_LIMITS.GROWTH.maxLiveCatalogs).toBe(5);
+      expect(PLAN_LIMITS.GROWTH.maxVariants).toBe(5000);
+      expect(PLAN_LIMITS.GROWTH.monthlySubmissionsLimit).toBe(250);
+      expect(PLAN_LIMITS.GROWTH.price).toBe(29.99);
+
+      // Verify Scale has 20 live catalogs, 25,000 variants, 1,000 orders, $49.99
+      expect(PLAN_LIMITS.SCALE.maxLiveCatalogs).toBe(20);
+      expect(PLAN_LIMITS.SCALE.maxVariants).toBe(25000);
+      expect(PLAN_LIMITS.SCALE.monthlySubmissionsLimit).toBe(1000);
+      expect(PLAN_LIMITS.SCALE.price).toBe(49.99);
+    });
+
+    it('blocks direct plan mutation via HTTP endpoint when in simulated production', async () => {
+      const prevEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+
+      try {
+        const token = createTestAppBridgeToken(testShop.shopDomain);
+        const res = await request(app)
+          .post('/api/admin/billing/change-plan')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ plan: 'SCALE' });
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('BILLING_NOT_CONFIGURED');
+        expect(res.body.error).toContain('Self-service plan changes are disabled');
+
+        const shop = await prisma.shop.findUnique({ where: { id: testShop.id } });
+        expect(shop?.plan).toBe('STARTER');
+      } finally {
+        process.env.NODE_ENV = prevEnv;
+      }
     });
   });
 });

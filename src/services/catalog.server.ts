@@ -4,11 +4,10 @@ import {
   UpdateCatalogInputSchema,
   CatalogStatus,
   PriceMode,
-  PLAN_LIMITS,
-  PlanTier,
 } from '../types/index.js';
 import { generateOpaqueToken } from './auth.server.js';
 import { resolveCatalogAllowedProductGids } from './sync.server.js';
+import { defaultBillingProvider } from './billing.server.js';
 import { z } from 'zod';
 
 export type CreateCatalogInput = z.input<typeof CreateCatalogInputSchema>;
@@ -128,8 +127,8 @@ export async function publishCatalog(shopId: string, catalogId: string) {
     throw new CatalogError('Cannot publish a catalog without product or collection sources', 422, 'NO_SOURCES');
   }
 
-  // Check plan quota limits
-  const planLimits = PLAN_LIMITS[shop.plan as PlanTier] || PLAN_LIMITS[PlanTier.STARTER];
+  // Resolve commercial quota limits strictly via centralized BillingProvider entitlement
+  const entitlement = await defaultBillingProvider.getEntitlement(shop);
   const activePublishedCount = await prisma.catalog.count({
     where: {
       shopId,
@@ -138,9 +137,9 @@ export async function publishCatalog(shopId: string, catalogId: string) {
     },
   });
 
-  if (activePublishedCount >= planLimits.maxLiveCatalogs) {
+  if (activePublishedCount >= entitlement.limits.maxLiveCatalogs) {
     throw new CatalogError(
-      `Plan quota reached: You can have at most ${planLimits.maxLiveCatalogs} live catalog(s) on the ${planLimits.name} plan. Please upgrade to publish more.`,
+      `Plan quota reached: You can have at most ${entitlement.limits.maxLiveCatalogs} live catalog(s) on the ${entitlement.limits.name} plan. Please upgrade to publish more.`,
       403,
       'QUOTA_EXCEEDED'
     );
@@ -158,9 +157,9 @@ export async function publishCatalog(shopId: string, catalogId: string) {
       })
     : 0;
 
-  if (variantCount > planLimits.maxVariants) {
+  if (variantCount > entitlement.limits.maxVariants) {
     throw new CatalogError(
-      `Plan variant quota reached: This catalog has ${variantCount} variants, but your ${planLimits.name} plan limit is ${planLimits.maxVariants} variants. Please upgrade to publish this catalog.`,
+      `Plan variant quota reached: This catalog has ${variantCount} variants, but your ${entitlement.limits.name} plan limit is ${entitlement.limits.maxVariants} variants. Please upgrade to publish this catalog.`,
       403,
       'QUOTA_EXCEEDED'
     );

@@ -3,13 +3,13 @@ import { Prisma } from '@prisma/client';
 import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus } from '../types/index.js';
 import { calculateDisplayPrice, toDecimal, formatMoney } from './pricing.server.js';
 import {
-  checkShopQuota,
   reserveSubmissionQuotaSlot,
   releaseSubmissionQuotaSlot,
   releaseSubmissionQuotaReservation,
   releaseSubmissionQuotaSlotDirect,
   getActiveShopById,
 } from './shop.server.js';
+import { defaultBillingProvider } from './billing.server.js';
 import { resolveCatalogAllowedProductGids } from './sync.server.js';
 import { hashIdempotencyKey } from './auth.server.js';
 import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server.js';
@@ -184,8 +184,8 @@ export async function submitBuyerOrder(
     } else if (submission.status === 'FAILED') {
       // Prior attempt failed before side effects and released its slot.
       // Must reconcile billing cycle and atomically reserve a new quota slot before transitioning back to CREATING.
-      const quota = await checkShopQuota(catalog.shopId);
-      const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, quota.limits.monthlySubmissionsLimit);
+      const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
+      const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
       if (!slotReserved) {
         throw new OrderSubmissionError(
           'Merchant order submission limit reached for their current plan. Please contact the merchant.',
@@ -206,9 +206,9 @@ export async function submitBuyerOrder(
       });
     }
   } else {
-    // 5. Concurrency-Safe Quota Slot Reservation
-    const quota = await checkShopQuota(catalog.shopId);
-    const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, quota.limits.monthlySubmissionsLimit);
+    // 5. Concurrency-Safe Quota Slot Reservation via Centralized Entitlement Boundary
+    const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
+    const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
     if (!slotReserved) {
       throw new OrderSubmissionError(
         'Merchant order submission limit reached for their current plan. Please contact the merchant.',

@@ -146,7 +146,21 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
   - Submissions list endpoint (`GET /api/admin/submissions`) with pagination and summary metrics.
   - Direct deep links to native Shopify Admin Draft Orders.
   - Merchant catalog status transitions (`ACTIVE`, `DRAFT`, `ARCHIVED`) with automatic `dataVersion` bumps.
-- [ ] **M7: App Billing, Quotas & Entitlements** *(STOPPED — Awaiting Approval)*
-- [ ] **M8: Security Review & Privacy Compliance Signoff**
-- [ ] **M9: Edge Cases, Error Boundaries & Visual Polish**
-- [ ] **M10: Comprehensive Test Suite, App Store Readiness & Launch Checklist**
+- [x] **M7: Merchant Operations & Submissions UX** *(Complete)*
+  - Submissions list endpoint (`GET /api/admin/submissions`) with pagination, summary metrics, and status filtering (`ALL`, `COMPLETED`, `REQUIRES_RECONCILIATION`, `FAILED`).
+  - Embedded merchant dashboard with Commercial Funnel card, KPI tracking, and deep links to native Shopify Admin Draft Orders.
+  - Section 16 empty states, clear operational guidance, and merchant catalog lifecycle management.
+- [x] **M8: Quotas, Billing Integration Boundary & Basic Analytics** *(Complete)*
+  - Centralized single entitlement boundary via `BillingProvider` (`getEntitlement`, `getAvailablePlans`, `getPlanSelectionDestination`).
+  - All quota enforcement (live catalogs, max variants, monthly submissions) strictly consumes verified entitlements through `BillingProvider`.
+  - Production invariant: `Shop.plan` is an entitlement mirror/cache, not a merchant-controlled source of truth.
+  - Production self-service plan changes blocked with `403 BILLING_NOT_CONFIGURED`; dev/test override strictly isolated.
+  - Shopify App Pricing live integration: **PENDING M10** (source explicitly marked `LOCAL_MIRROR_PENDING_SHOPIFY` until M10 Partner Dashboard setup).
+  - Commercial Plan Tiers: Starter ($14.99, 1 catalog, 500 variants, 50 orders/mo), Growth ($29.99, 5 catalogs, 5,000 variants, 250 orders/mo), Scale ($49.99, 20 catalogs, 25,000 variants, 1,000 orders/mo). 7-day trial in Shopify App Pricing; zero overage, no permanent free tier.
+  - Strict analytics metadata privacy allowlist (`ORDER_SUMMARY_STARTED`: `itemCount`, `lineCount`; Server order events: `submissionId`, `itemCount`, `lineCount`, `subtotal`, `currency`). All PII and unknown keys discarded.
+  - Accurate North Star event (`draft_order_created_from_buyer_submission`) recorded idempotently once across normal completion and reconciliation via deterministic `eventKey`.
+  - Non-blocking buyer catalog analytics (`void recordAnalyticsEvent(...)`) and bounded query validation (`1 <= days <= 90`).
+- [ ] **M9: Security / Reliability / Edge Cases / Performance / Visual Polish** *(NEXT MILESTONE)*
+- [ ] **M10: Shopify Integration, Real E2E, App Store Readiness & Submission**
+  - Partner Dashboard app credentials & Shopify App Pricing live setup.
+  - End-to-end production validation & Shopify App Store review pre-submission checklist.

@@ -90,32 +90,59 @@ export class BillingError extends Error {
   }
 }
 
+export type EntitlementSource = 'LOCAL_MIRROR_PENDING_SHOPIFY' | 'DEV_OVERRIDE' | 'SHOPIFY_APP_PRICING';
+
 export interface PlanEntitlement {
   planTier: PlanTier;
   limits: (typeof PLAN_LIMITS)[PlanTier];
   planDetails: PlanFeatureDetails;
-  source: 'SHOPIFY_APP_PRICING' | 'DEV_OVERRIDE';
+  source: EntitlementSource;
 }
 
 /**
  * Clean BillingProvider boundary for Shopify App Pricing integration.
  * In production, Shop.plan is an entitlement mirror/cache synchronized from
  * Shopify App Pricing active subscription status.
+ * Until Shopify App Pricing is connected in M10, production source reports
+ * 'LOCAL_MIRROR_PENDING_SHOPIFY'.
  */
 export class BillingProvider {
   /**
    * Retrieves verified active entitlement for a shop.
+   * Resolves plan limits and entitlements without callers needing to parse Shop.plan directly.
    */
-  async getEntitlement(shop: { id: string; plan: string }): Promise<PlanEntitlement> {
-    const planTier = (shop.plan as PlanTier) || PlanTier.STARTER;
-    const limits = PLAN_LIMITS[planTier] || PLAN_LIMITS[PlanTier.STARTER];
-    const planDetails = PLAN_DETAILS[planTier] || PLAN_DETAILS[PlanTier.STARTER];
+  async getEntitlement(shopOrShopId: { id?: string; plan?: string } | string): Promise<PlanEntitlement> {
+    let plan = 'STARTER';
+
+    if (typeof shopOrShopId === 'string') {
+      const shop = await prisma.shop.findUnique({
+        where: { id: shopOrShopId },
+        select: { plan: true },
+      });
+      if (shop?.plan) {
+        plan = shop.plan;
+      }
+    } else if (shopOrShopId && shopOrShopId.plan) {
+      plan = shopOrShopId.plan;
+    }
+
+    const planTier = (plan as PlanTier) in PLAN_DETAILS ? (plan as PlanTier) : PlanTier.STARTER;
+    const limits = PLAN_LIMITS[planTier];
+    const planDetails = PLAN_DETAILS[planTier];
+
+    let source: EntitlementSource;
+    if (isDevPlanOverrideAllowed()) {
+      source = 'DEV_OVERRIDE';
+    } else {
+      // In production before M10: Shop.plan is a local entitlement mirror pending real Shopify App Pricing synchronization
+      source = 'LOCAL_MIRROR_PENDING_SHOPIFY';
+    }
 
     return {
       planTier,
       limits,
       planDetails,
-      source: process.env.NODE_ENV === 'test' ? 'DEV_OVERRIDE' : 'SHOPIFY_APP_PRICING',
+      source,
     };
   }
 
@@ -142,6 +169,15 @@ export class BillingProvider {
 }
 
 export const defaultBillingProvider = new BillingProvider();
+
+/**
+ * Helper to resolve entitlement for a shop or shopId.
+ */
+export async function getShopEntitlement(
+  shopOrShopId: { id?: string; plan?: string } | string
+): Promise<PlanEntitlement> {
+  return defaultBillingProvider.getEntitlement(shopOrShopId);
+}
 
 /**
  * Checks whether local development plan override is permitted.
@@ -217,7 +253,8 @@ export async function getShopBillingInfo(shopId: string) {
       canAcceptSubmission: shop.monthlySubmissionsCount < limits.monthlySubmissionsLimit,
     },
     availablePlans: defaultBillingProvider.getAvailablePlans(),
-    billingStatus: 'SHOPIFY_APP_PRICING_PENDING_M10',
+    entitlementSource: entitlement.source,
+    billingStatus: entitlement.source === 'DEV_OVERRIDE' ? 'DEV_OVERRIDE' : 'SHOPIFY_APP_PRICING_PENDING_M10',
   };
 }
 

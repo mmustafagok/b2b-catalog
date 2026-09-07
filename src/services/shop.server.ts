@@ -1,6 +1,7 @@
 import { prisma } from '../db.js';
-import { PlanTier, PLAN_LIMITS } from '../types/index.js';
+import { PlanTier } from '../types/index.js';
 import { encryptToken, decryptToken } from './crypto.server.js';
+import { defaultBillingProvider } from './billing.server.js';
 
 export async function installOrUpdateShop(data: {
   shopDomain: string;
@@ -159,8 +160,9 @@ export async function checkShopQuota(shopId: string) {
     throw new Error('Shop not found or inactive');
   }
 
-  const planTier = (shop.plan as PlanTier) || PlanTier.STARTER;
-  const limits = PLAN_LIMITS[planTier] || PLAN_LIMITS[PlanTier.STARTER];
+  // Resolve commercial quota limits strictly via centralized BillingProvider entitlement
+  const entitlement = await defaultBillingProvider.getEntitlement(shop);
+  const limits = entitlement.limits;
 
   const liveCatalogsCount = await prisma.catalog.count({
     where: {
@@ -173,8 +175,9 @@ export async function checkShopQuota(shopId: string) {
   const canAcceptSubmission = shop.monthlySubmissionsCount < limits.monthlySubmissionsLimit;
 
   return {
-    planTier,
+    planTier: entitlement.planTier,
     limits,
+    entitlement,
     usage: {
       liveCatalogsCount,
       monthlySubmissionsCount: shop.monthlySubmissionsCount,
