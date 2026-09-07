@@ -12,6 +12,7 @@ import {
   deleteCollectionSnapshot,
   reconcileSourcedCollectionsForShop,
   performInitialShopSync,
+  ensureInitialShopSync,
 } from './services/sync.server.js';
 import { validateBuyerOrderLines } from './services/validation.server.js';
 import {
@@ -142,8 +143,8 @@ app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
       scopes: tokenResult.scope,
     });
 
-    // Trigger initial background sync asynchronously
-    performInitialShopSync(shop.id).catch((err) => {
+    // Trigger centralized initial background sync asynchronously
+    ensureInitialShopSync(shop.id).catch((err) => {
       console.error('Initial sync failed for shop:', shopDomain, sanitizeErrorMessage(err));
     });
 
@@ -510,7 +511,7 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
         refreshTokenExpiresAt: refreshExpiry,
         scopes: exchangeResult.scope,
       });
-      performInitialShopSync(shop.id).catch(() => {});
+      ensureInitialShopSync(shop.id).catch(() => {});
     } catch (err: any) {
       if (err instanceof ShopifyStaleSessionTokenError) {
         return res
@@ -620,12 +621,9 @@ app.get('/api/admin/quota', adminAuthMiddleware, async (req: any, res: Response)
 app.post('/api/admin/bootstrap', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
     const shop = req.shop;
-    const isNewOrReactivated = !shop.initialSyncAt;
-    if (isNewOrReactivated) {
-      performInitialShopSync(shop.id).catch((err) => {
-        console.error('Initial sync failed for shop during bootstrap:', shop.shopDomain, sanitizeErrorMessage(err));
-      });
-    }
+    ensureInitialShopSync(shop.id).catch((err) => {
+      console.error('Initial sync failed for shop during bootstrap:', shop.shopDomain, sanitizeErrorMessage(err));
+    });
 
     return res.status(200).json({
       success: true,

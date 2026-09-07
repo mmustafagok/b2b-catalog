@@ -220,12 +220,24 @@ export async function exchangeSessionTokenForOfflineToken(params: {
     throw new Error('Token exchange response missing access_token');
   }
 
+  const rawExpiresIn = Number(data.expires_in);
+  if (!data.expires_in || isNaN(rawExpiresIn) || rawExpiresIn <= 0) {
+    throw new Error('Token exchange response missing valid expires_in');
+  }
+
+  const rawRefreshExpiresIn = data.refresh_token_expires_in
+    ? Number(data.refresh_token_expires_in)
+    : undefined;
+  const validRefreshExpiresIn = (rawRefreshExpiresIn !== undefined && !isNaN(rawRefreshExpiresIn) && rawRefreshExpiresIn > 0)
+    ? rawRefreshExpiresIn
+    : undefined;
+
   return {
     accessToken: data.access_token,
     scope: data.scope || '',
-    expiresIn: data.expires_in ? Number(data.expires_in) : undefined,
+    expiresIn: rawExpiresIn,
     refreshToken: data.refresh_token || undefined,
-    refreshTokenExpiresIn: data.refresh_token_expires_in ? Number(data.refresh_token_expires_in) : undefined,
+    refreshTokenExpiresIn: validRefreshExpiresIn,
   };
 }
 

@@ -595,24 +595,28 @@ export async function reconcileSourcedCollectionsForShop(
  * Fully paginates collections, products, and variants.
  */
 export async function performInitialShopSync(shopId: string, customClient?: ShopifyAdminClient) {
-  const shop = await prisma.shop.findUnique({
+  const currentShop = await prisma.shop.findUnique({
     where: { id: shopId },
   });
-
-  if (!shop) {
-    throw new Error('Shop not found');
+  if (!currentShop || currentShop.uninstalledAt !== null) {
+    return { collectionsSynced: 0, productsSynced: 0, variantsSynced: 0 };
   }
 
-  const client = customClient || createShopifyClient(shop);
+  const client = customClient || createShopifyClient(currentShop);
 
-  const syncRun = await prisma.syncRun.create({
-    data: {
-      shopId,
-      type: 'INITIAL',
-      status: 'IN_PROGRESS',
-      startedAt: new Date(),
-    },
-  });
+  let syncRun;
+  try {
+    syncRun = await prisma.syncRun.create({
+      data: {
+        shopId,
+        type: 'INITIAL',
+        status: 'IN_PROGRESS',
+        startedAt: new Date(),
+      },
+    });
+  } catch {
+    return { collectionsSynced: 0, productsSynced: 0, variantsSynced: 0 };
+  }
 
   try {
     // 1. Fetch shop currency
@@ -794,14 +798,22 @@ export async function performInitialShopSync(shopId: string, customClient?: Shop
       prodCursor = prodRes.products?.pageInfo?.endCursor || null;
     }
 
-    await prisma.syncRun.update({
-      where: { id: syncRun.id },
-      data: {
-        status: 'COMPLETED',
-        finishedAt: new Date(),
-        statsJson: JSON.stringify({ collectionsSynced, productsSynced, variantsSynced }),
-      },
-    });
+    await prisma.$transaction([
+      prisma.syncRun.update({
+        where: { id: syncRun.id },
+        data: {
+          status: 'COMPLETED',
+          finishedAt: new Date(),
+          statsJson: JSON.stringify({ collectionsSynced, productsSynced, variantsSynced }),
+        },
+      }),
+      prisma.shop.update({
+        where: { id: shopId },
+        data: {
+          initialSyncAt: new Date(),
+        },
+      }),
+    ]);
 
     return { collectionsSynced, productsSynced, variantsSynced };
   } catch (err: any) {
@@ -822,6 +834,65 @@ export async function performInitialShopSync(shopId: string, customClient?: Shop
     }
     throw err;
   }
+}
+
+// In-process deduplication map for active initial sync runs per shop
+const activeInitialSyncs = new Map<string, Promise<any>>();
+
+/**
+ * Centralized lifecycle helper for initial shop sync.
+ * - if initialSyncAt exists -> do nothing
+ * - if an INITIAL SyncRun is already IN_PROGRESS -> do not start another
+ * - if previous sync FAILED -> allow retry
+ * - new shop -> run once
+ * - reinstalled shop -> reset initialSyncAt to null and run once
+ */
+export async function ensureInitialShopSync(shopId: string, customClient?: ShopifyAdminClient) {
+  const shop = await prisma.shop.findUnique({
+    where: { id: shopId },
+  });
+
+  if (!shop || shop.uninstalledAt !== null) {
+    return null;
+  }
+
+  // 1. If initialSyncAt already exists, initial sync has succeeded -> do nothing
+  if (shop.initialSyncAt) {
+    return null;
+  }
+
+  // 2. If an INITIAL SyncRun is already actively running in this process -> deduplicate
+  if (activeInitialSyncs.has(shopId)) {
+    return activeInitialSyncs.get(shopId)!;
+  }
+
+  // 3. If an INITIAL SyncRun is already IN_PROGRESS in the database -> do not start another
+  const inProgressRun = await prisma.syncRun.findFirst({
+    where: {
+      shopId,
+      type: 'INITIAL',
+      status: 'IN_PROGRESS',
+    },
+  });
+
+  if (inProgressRun) {
+    const elapsedMs = Date.now() - inProgressRun.startedAt.getTime();
+    if (elapsedMs < 15 * 60 * 1000) {
+      return null;
+    }
+  }
+
+  // 4. Run initial sync (allows retry if previous was FAILED, or fresh run if new/reinstalled)
+  const syncPromise = (async () => {
+    try {
+      return await performInitialShopSync(shopId, customClient);
+    } finally {
+      activeInitialSyncs.delete(shopId);
+    }
+  })();
+
+  activeInitialSyncs.set(shopId, syncPromise);
+  return syncPromise;
 }
 
 /**

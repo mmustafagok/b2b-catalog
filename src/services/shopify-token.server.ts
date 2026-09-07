@@ -124,14 +124,17 @@ export async function getValidOfflineAccessToken(
         throw new Error('Refresh response missing access_token');
       }
 
-      const expiresInSeconds = Number(data.expires_in) || 86400; // default 24h if missing
-      const newAccessExpiry = new Date(Date.now() + expiresInSeconds * 1000);
+      const rawExpiresIn = Number(data.expires_in);
+      if (!data.expires_in || isNaN(rawExpiresIn) || rawExpiresIn <= 0) {
+        throw new Error('Refresh response missing valid expires_in');
+      }
+      const newAccessExpiry = new Date(Date.now() + rawExpiresIn * 1000);
 
-      const refreshExpiresInSeconds = data.refresh_token_expires_in
+      const rawRefreshExpiresIn = data.refresh_token_expires_in
         ? Number(data.refresh_token_expires_in)
         : undefined;
-      const newRefreshExpiry = refreshExpiresInSeconds
-        ? new Date(Date.now() + refreshExpiresInSeconds * 1000)
+      const newRefreshExpiry = (rawRefreshExpiresIn !== undefined && !isNaN(rawRefreshExpiresIn) && rawRefreshExpiresIn > 0)
+        ? new Date(Date.now() + rawRefreshExpiresIn * 1000)
         : null;
 
       const encryptedAccessToken = encryptToken(data.access_token);

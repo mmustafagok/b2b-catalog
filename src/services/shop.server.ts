@@ -10,6 +10,7 @@ export async function installOrUpdateShop(data: {
   refreshTokenExpiresAt?: Date | null;
   scopes?: string | null;
   currency?: string;
+  initialSyncAt?: Date | null;
 }) {
   const encryptedToken = encryptToken(data.accessToken);
   const encryptedRefreshToken = data.refreshToken ? encryptToken(data.refreshToken) : null;
@@ -19,6 +20,7 @@ export async function installOrUpdateShop(data: {
   });
 
   if (existingShop) {
+    const isReinstall = existingShop.uninstalledAt !== null;
     return prisma.shop.update({
       where: { shopDomain: data.shopDomain },
       data: {
@@ -28,6 +30,7 @@ export async function installOrUpdateShop(data: {
         refreshTokenExpiresAt: data.refreshTokenExpiresAt !== undefined ? data.refreshTokenExpiresAt : existingShop.refreshTokenExpiresAt,
         scopes: data.scopes || existingShop.scopes,
         currency: data.currency || existingShop.currency,
+        initialSyncAt: isReinstall ? null : (data.initialSyncAt !== undefined ? data.initialSyncAt : existingShop.initialSyncAt),
         uninstalledAt: null, // Reactivate if uninstalled
         updatedAt: new Date(),
       },
@@ -46,6 +49,7 @@ export async function installOrUpdateShop(data: {
       plan: PlanTier.STARTER,
       billingCycleAnchor: new Date(),
       monthlySubmissionsCount: 0,
+      initialSyncAt: data.initialSyncAt || null,
       installedAt: new Date(),
       uninstalledAt: null,
     },
@@ -69,6 +73,7 @@ export async function uninstallShop(shopDomain: string) {
       accessTokenExpiresAt: null,
       refreshToken: null,
       refreshTokenExpiresAt: null,
+      initialSyncAt: null,
       updatedAt: new Date(),
     },
   });

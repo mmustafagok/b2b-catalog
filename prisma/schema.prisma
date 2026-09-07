@@ -19,6 +19,7 @@ model Shop {
   plan                    String            @default("STARTER") // STARTER, GROWTH, SCALE
   billingCycleAnchor      DateTime          @default(now())
   monthlySubmissionsCount Int               @default(0)
+  initialSyncAt           DateTime?
   installedAt             DateTime          @default(now())
   uninstalledAt           DateTime?
   createdAt               DateTime          @default(now())

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/server.js';
 import { prisma } from '../src/db.js';
-import { installOrUpdateShop, getActiveShopByDomain } from '../src/services/shop.server.js';
+import { installOrUpdateShop, getActiveShopByDomain, uninstallShop } from '../src/services/shop.server.js';
 import { createCatalog, publishCatalog } from '../src/services/catalog.server.js';
 import {
   syncProductSnapshot,
@@ -11,12 +11,16 @@ import {
   deleteCollectionSnapshot,
   getPublicCatalogPayload,
   performInitialShopSync,
+  ensureInitialShopSync,
   syncSingleCollectionFromShopify,
   reconcileSourcedCollectionsForShop,
 } from '../src/services/sync.server.js';
 import * as syncModule from '../src/services/sync.server.js';
 import { calculateDisplayPrice, formatMoney, toDecimal } from '../src/services/pricing.server.js';
 import { ShopifyAdminClient } from '../src/services/shopify-client.server.js';
+import { getValidOfflineAccessToken } from '../src/services/shopify-token.server.js';
+import { exchangeSessionTokenForOfflineToken } from '../src/services/auth.server.js';
+import { decryptToken } from '../src/services/crypto.server.js';
 import { CatalogSourceType, PriceMode } from '../src/types/index.js';
 import crypto from 'crypto';
 
@@ -262,6 +266,7 @@ describe('Milestone 4.5: Collections, Initial Sync, Hardened Webhooks & Complian
         where: { shopId: shop.id },
       });
       expect(syncRun?.status).toBe('COMPLETED');
+      expect(updatedShop?.initialSyncAt).not.toBeNull();
     });
 
     it('should mark SyncRun as FAILED if Shopify API encounters errors', async () => {
@@ -279,6 +284,260 @@ describe('Milestone 4.5: Collections, Initial Sync, Hardened Webhooks & Complian
         where: { shopId: shop.id },
       });
       expect(syncRun?.status).toBe('FAILED');
+
+      const updatedShop = await prisma.shop.findUnique({ where: { id: shop.id } });
+      expect(updatedShop?.initialSyncAt).toBeNull();
+    });
+
+    it('should populate initialSyncAt on successful sync and not set it on failure', async () => {
+      // 1. Success sets initialSyncAt
+      const successShop = await installOrUpdateShop({
+        shopDomain: 'sync-success-shop.myshopify.com',
+        accessToken: 'shpat_token_success',
+      });
+      const mockClient = {
+        request: async (query: string) => {
+          if (query.includes('currencyCode')) return { shop: { currencyCode: 'USD' } };
+          if (query.includes('getCollections')) return { collections: { pageInfo: { hasNextPage: false }, edges: [] } };
+          if (query.includes('getProducts')) return { products: { pageInfo: { hasNextPage: false }, edges: [] } };
+          return {};
+        },
+      } as unknown as ShopifyAdminClient;
+
+      await performInitialShopSync(successShop.id, mockClient);
+      const afterSuccess = await prisma.shop.findUnique({ where: { id: successShop.id } });
+      expect(afterSuccess?.initialSyncAt).toBeInstanceOf(Date);
+
+      // 2. Failure does not populate initialSyncAt
+      const failShop = await installOrUpdateShop({
+        shopDomain: 'sync-fail-shop.myshopify.com',
+        accessToken: 'shpat_token_fail',
+      });
+      const failingClient = {
+        request: async () => { throw new Error('Simulated network failure'); },
+      } as unknown as ShopifyAdminClient;
+
+      await expect(performInitialShopSync(failShop.id, failingClient)).rejects.toThrow();
+      const afterFail = await prisma.shop.findUnique({ where: { id: failShop.id } });
+      expect(afterFail?.initialSyncAt).toBeNull();
+    });
+
+    it('should run initial sync once for a new shop via ensureInitialShopSync', async () => {
+      const newShop = await installOrUpdateShop({
+        shopDomain: 'brand-new-shop.myshopify.com',
+        accessToken: 'shpat_brand_new_token',
+      });
+      expect(newShop.initialSyncAt).toBeNull();
+
+      let syncCallCount = 0;
+      const mockClient = {
+        request: async (query: string) => {
+          if (query.includes('currencyCode')) {
+            syncCallCount++;
+            return { shop: { currencyCode: 'USD' } };
+          }
+          if (query.includes('getCollections')) return { collections: { pageInfo: { hasNextPage: false }, edges: [] } };
+          if (query.includes('getProducts')) return { products: { pageInfo: { hasNextPage: false }, edges: [] } };
+          return {};
+        },
+      } as unknown as ShopifyAdminClient;
+
+      const result = await ensureInitialShopSync(newShop.id, mockClient);
+      expect(result).not.toBeNull();
+      expect(syncCallCount).toBe(1);
+
+      const updated = await prisma.shop.findUnique({ where: { id: newShop.id } });
+      expect(updated?.initialSyncAt).toBeInstanceOf(Date);
+
+      const syncRuns = await prisma.syncRun.findMany({ where: { shopId: newShop.id } });
+      expect(syncRuns).toHaveLength(1);
+      expect(syncRuns[0].status).toBe('COMPLETED');
+    });
+
+    it('should not start duplicate sync if repeated bootstrap occurs while IN_PROGRESS', async () => {
+      const shopInProgress = await installOrUpdateShop({
+        shopDomain: 'in-progress-shop.myshopify.com',
+        accessToken: 'shpat_in_progress_token',
+      });
+
+      // Insert an IN_PROGRESS run in database
+      await prisma.syncRun.create({
+        data: {
+          shopId: shopInProgress.id,
+          type: 'INITIAL',
+          status: 'IN_PROGRESS',
+          startedAt: new Date(),
+        },
+      });
+
+      let clientCalled = false;
+      const mockClient = {
+        request: async () => {
+          clientCalled = true;
+          return {};
+        },
+      } as unknown as ShopifyAdminClient;
+
+      const result = await ensureInitialShopSync(shopInProgress.id, mockClient);
+      expect(result).toBeNull();
+      expect(clientCalled).toBe(false);
+
+      // Total sync runs remain 1
+      const totalRuns = await prisma.syncRun.findMany({ where: { shopId: shopInProgress.id } });
+      expect(totalRuns).toHaveLength(1);
+    });
+
+    it('should not start a new sync for an already completed shop', async () => {
+      const completedShop = await installOrUpdateShop({
+        shopDomain: 'already-completed.myshopify.com',
+        accessToken: 'shpat_completed_token',
+        initialSyncAt: new Date(),
+      });
+
+      let clientCalled = false;
+      const mockClient = {
+        request: async () => {
+          clientCalled = true;
+          return {};
+        },
+      } as unknown as ShopifyAdminClient;
+
+      const result = await ensureInitialShopSync(completedShop.id, mockClient);
+      expect(result).toBeNull();
+      expect(clientCalled).toBe(false);
+
+      const totalRuns = await prisma.syncRun.findMany({ where: { shopId: completedShop.id } });
+      expect(totalRuns).toHaveLength(0);
+    });
+
+    it('should allow retry if previous initial sync FAILED', async () => {
+      const failedShop = await installOrUpdateShop({
+        shopDomain: 'failed-prior-shop.myshopify.com',
+        accessToken: 'shpat_failed_token',
+      });
+
+      // Create a FAILED run
+      await prisma.syncRun.create({
+        data: {
+          shopId: failedShop.id,
+          type: 'INITIAL',
+          status: 'FAILED',
+          startedAt: new Date(Date.now() - 60000),
+          finishedAt: new Date(),
+        },
+      });
+
+      const mockClient = {
+        request: async (query: string) => {
+          if (query.includes('currencyCode')) return { shop: { currencyCode: 'CAD' } };
+          if (query.includes('getCollections')) return { collections: { pageInfo: { hasNextPage: false }, edges: [] } };
+          if (query.includes('getProducts')) return { products: { pageInfo: { hasNextPage: false }, edges: [] } };
+          return {};
+        },
+      } as unknown as ShopifyAdminClient;
+
+      // Retry should be allowed and succeed
+      const result = await ensureInitialShopSync(failedShop.id, mockClient);
+      expect(result).not.toBeNull();
+
+      const runs = await prisma.syncRun.findMany({ where: { shopId: failedShop.id } });
+      expect(runs).toHaveLength(2);
+      expect(runs.some((r) => r.status === 'COMPLETED')).toBe(true);
+
+      const updated = await prisma.shop.findUnique({ where: { id: failedShop.id } });
+      expect(updated?.initialSyncAt).toBeInstanceOf(Date);
+    });
+
+    it('should reset initialSyncAt to null upon reinstall and run one fresh sync', async () => {
+      const reinstallShopDomain = 'reinstall-lifecycle-shop.myshopify.com';
+
+      // 1. Install & complete initial sync
+      const shop1 = await installOrUpdateShop({
+        shopDomain: reinstallShopDomain,
+        accessToken: 'shpat_first_install',
+        initialSyncAt: new Date(),
+      });
+      expect(shop1.initialSyncAt).not.toBeNull();
+
+      // 2. Uninstall shop
+      await uninstallShop(reinstallShopDomain);
+      let inDb = await prisma.shop.findUnique({ where: { shopDomain: reinstallShopDomain } });
+      expect(inDb?.uninstalledAt).not.toBeNull();
+      expect(inDb?.initialSyncAt).toBeNull();
+
+      // 3. Reinstall shop (reactivates shop)
+      const reinstalled = await installOrUpdateShop({
+        shopDomain: reinstallShopDomain,
+        accessToken: 'shpat_reinstalled_fresh_token',
+      });
+      expect(reinstalled.uninstalledAt).toBeNull();
+      expect(reinstalled.initialSyncAt).toBeNull(); // Must be reset to null
+
+      // 4. ensureInitialShopSync runs one fresh sync
+      const mockClient = {
+        request: async (query: string) => {
+          if (query.includes('currencyCode')) return { shop: { currencyCode: 'EUR' } };
+          if (query.includes('getCollections')) return { collections: { pageInfo: { hasNextPage: false }, edges: [] } };
+          if (query.includes('getProducts')) return { products: { pageInfo: { hasNextPage: false }, edges: [] } };
+          return {};
+        },
+      } as unknown as ShopifyAdminClient;
+
+      await ensureInitialShopSync(reinstalled.id, mockClient);
+
+      inDb = await prisma.shop.findUnique({ where: { id: reinstalled.id } });
+      expect(inDb?.initialSyncAt).toBeInstanceOf(Date);
+    });
+
+    it('should fail safely and not overwrite stored credentials if expires_in is missing or invalid', async () => {
+      const credShop = await installOrUpdateShop({
+        shopDomain: 'expiry-safety-test.myshopify.com',
+        accessToken: 'shpat_original_safe_access_token',
+        accessTokenExpiresAt: new Date(Date.now() + 60 * 1000), // near expiry
+        refreshToken: 'shprt_original_safe_refresh_token',
+      });
+
+      // 1. Missing expires_in on token refresh
+      const missingExpiresFetch: any = async () => ({
+        ok: true,
+        json: async () => ({
+          access_token: 'shpat_bad_token_no_expiry',
+          refresh_token: 'shprt_bad_refresh',
+          // expires_in omitted
+        }),
+      });
+
+      await expect(
+        getValidOfflineAccessToken(credShop.id, { fetchFn: missingExpiresFetch })
+      ).rejects.toThrow('Refresh response missing valid expires_in');
+
+      // Verify original credentials were NOT overwritten
+      let verifiedShop = await prisma.shop.findUnique({ where: { id: credShop.id } });
+      expect(decryptToken(verifiedShop!.accessToken)).toBe('shpat_original_safe_access_token');
+      expect(decryptToken(verifiedShop!.refreshToken!)).toBe('shprt_original_safe_refresh_token');
+
+      // 2. Invalid expires_in on token exchange
+      const invalidExpiresExchangeFetch: any = async () => ({
+        ok: true,
+        json: async () => ({
+          access_token: 'shpat_exchange_invalid',
+          expires_in: 'not-a-number',
+        }),
+      });
+
+      await expect(
+        exchangeSessionTokenForOfflineToken({
+          shopDomain: credShop.shopDomain,
+          sessionToken: 'mock.session.token',
+          clientId: 'test_client',
+          clientSecret: 'test_secret',
+          fetchFn: invalidExpiresExchangeFetch,
+        })
+      ).rejects.toThrow('Token exchange response missing valid expires_in');
+
+      // Verify credentials STILL intact
+      verifiedShop = await prisma.shop.findUnique({ where: { id: credShop.id } });
+      expect(decryptToken(verifiedShop!.accessToken)).toBe('shpat_original_safe_access_token');
     });
 
     it('should paginate collection products (>100 products) across multiple pages without truncating memberships', async () => {
