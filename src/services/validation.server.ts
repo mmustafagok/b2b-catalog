@@ -27,6 +27,8 @@ export interface ValidationResult {
   };
 }
 
+import { resolveCatalogAllowedProductGids } from './sync.server.js';
+
 /**
  * Validates buyer cart against current snapshot data before submission.
  */
@@ -38,7 +40,7 @@ export async function validateBuyerOrderLines(
 
   const catalog = await prisma.catalog.findUnique({
     where: { publicToken },
-    include: { shop: true },
+    include: { shop: true, sources: true },
   });
 
   if (!catalog || catalog.status !== CatalogStatus.PUBLISHED || catalog.shop.uninstalledAt !== null) {
@@ -56,6 +58,7 @@ export async function validateBuyerOrderLines(
     };
   }
 
+  const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
   const currency = catalog.shop.currency || 'USD';
   const variantGids = validated.lines.map((l) => l.variantId);
   const variantSnapshots = await prisma.variantSnapshot.findMany({
@@ -77,11 +80,11 @@ export async function validateBuyerOrderLines(
   for (const line of validated.lines) {
     const snapshot = snapshotMap.get(line.variantId);
 
-    if (!snapshot) {
+    if (!snapshot || !allowedProductGids.has(snapshot.shopifyProductId) || snapshot.product.status !== 'ACTIVE') {
       changedLines.push({
         variantId: line.variantId,
-        productTitle: 'Item',
-        variantTitle: line.variantId,
+        productTitle: snapshot?.product.title || 'Item',
+        variantTitle: snapshot?.title || line.variantId,
         reason: 'DELETED',
       });
       continue;
@@ -110,8 +113,12 @@ export async function validateBuyerOrderLines(
 
   const subtotalNumber = parseFloat(subtotalDecimal.toFixed(2));
 
-  const status: ValidationResult['status'] =
-    changedLines.length > 0 ? (catalog.dataVersion !== validated.dataVersion ? 'CHANGED' : 'INVALID') : 'VALID';
+  let status: ValidationResult['status'] = 'VALID';
+  if (catalog.dataVersion !== validated.dataVersion) {
+    status = 'CHANGED';
+  } else if (changedLines.length > 0) {
+    status = 'INVALID';
+  }
 
   return {
     status,

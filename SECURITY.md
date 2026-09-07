@@ -73,3 +73,61 @@ Embedded Admin requests require a Bearer token issued by Shopify App Bridge. The
 - **Opaque URL Tokens:** Catalogs are exposed only via 256-bit unguessable tokens generated via `crypto.randomBytes(32).toString('hex')`. Sequential or guessable identifiers are never exposed publicly.
 - **Rate Limiting:** Public catalog retrieval and pre-submit validation endpoints are rate-limited per IP using a sliding-window rate limiter.
 - **Deactivation on Uninstall:** When a merchant uninstalls the app (`app/uninstalled`), public catalog access is disabled immediately (`404 Not Found`).
+
+---
+
+## 7. Order Submission Idempotency State Machine & Ambiguous Failure Reconciliation
+
+- **Pre-Shopify Reservation:** Before dispatching an external `draftOrderCreate` mutation to Shopify, CatalogFlow atomically reserves an `OrderSubmission` record in state `CREATING` indexed uniquely by `@@unique([catalogId, idempotencyKeyHash])`.
+  - **First Request:** Atomically claims the key and transitions attempt to `CREATING`. Only the key owner may execute Shopify mutations.
+  - **Concurrent Duplicate (`CREATING` < 60s):** Returns `HTTP 409 Conflict` (`CONCURRENT_PROCESSING`) without sending another GraphQL request to Shopify.
+  - **Completed Duplicate (`COMPLETED`):** Returns the exact existing submission payload (`isDuplicate: true`) with zero external Shopify side effects.
+  - **Failed Attempt (`FAILED`):** Safe retry allowed to re-enter `CREATING`.
+- **Deterministic Correlation Tag & Shopify Reconciliation:**
+  - Every Draft Order created by CatalogFlow includes a deterministic, non-PII tag: `cf-sub:<submissionId>`.
+  - On retry after an ambiguous failure (e.g. status is `CREATING` after timeout or `REQUIRES_RECONCILIATION`):
+    - CatalogFlow queries Shopify via GraphQL Admin API (`query: tag:cf-sub:<submissionId>`).
+    - If found: Recovers existing Draft Order ID and name, transitions local submission to `COMPLETED`, and returns the order.
+    - Zero duplicate Draft Orders are created in Shopify.
+
+---
+
+## 8. Catalog Membership Authorization
+
+- **Strict Source Enforcement:** Prior to live revalidation, the server resolves the exact allowed product set for the catalog (`resolveCatalogAllowedProductGids`) from explicit product sources and active collection memberships.
+- **Out-of-Catalog Variant Rejection:** If an incoming order contains variant GIDs not belonging to the catalog's allowed active products, the entire request is rejected with `HTTP 422` (`INVALID_LINES`).
+- **Zero Cross-Catalog Discounts:** Wholesale discounts are never applied to unauthorized variants, preventing catalog bypass attacks.
+
+---
+
+## 9. dataVersion Submit-Time Boundary Enforcement
+
+- Every catalog configuration change (discounts, name, sourced collections, added/removed products) increments `dataVersion`.
+- The buyer submission payload requires `dataVersion`. If `submitted.dataVersion !== catalog.dataVersion`, the request is rejected with `HTTP 409` (`CATALOG_CHANGED`), requiring the buyer to reload and review updated pricing/catalog rules before submitting.
+
+---
+
+## 10. Concurrency-Safe Quota Slot Reservation & Billing Period Lifecycle
+
+- **30-Day Cycle Rollover:** The 30-day billing cycle anchor (`billingCycleAnchor`) is automatically evaluated before checking quota. When the 30-day period expires, `monthlySubmissionsCount` is atomically reset to 0 and the anchor is advanced.
+- **Atomic Slot Reservation:** Quota slots are reserved before external mutations using atomic conditional SQL updates:
+  ```sql
+  UPDATE "Shop"
+  SET "monthlySubmissionsCount" = "monthlySubmissionsCount" + 1
+  WHERE "id" = $shopId AND "monthlySubmissionsCount" < $limit
+  ```
+  Eliminates TOCTOU race conditions near the plan limit.
+- **Failure Reclamation:** If a submission fails before external Shopify side effects, the reserved quota slot is immediately reclaimed via atomic decrement.
+
+---
+
+## 11. Public Token & PII Isolation in Draft Order Metadata
+
+- Draft Order custom attributes include strictly operational non-PII metadata:
+  - `Business Name`
+  - `Catalog`
+  - `Catalog ID`
+  - `PO Number`
+  - `Submission Reference` (`CatalogFlow-Submission:<submissionId>`)
+- **Strict Exclusion:** The public catalog token (`publicToken`) and raw `Idempotency-Key` are strictly excluded from Shopify Draft Order metadata and tags.
+

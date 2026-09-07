@@ -171,14 +171,18 @@ model OrderSubmission {
   id                 String   @id @default(uuid())
   shopId             String
   catalogId          String
-  draftOrderId       String   // Shopify GID gid://shopify/DraftOrder/123
+  status             String   @default("CREATING") // CREATING, COMPLETED, FAILED, REQUIRES_RECONCILIATION
+  draftOrderId       String?  // Shopify GID gid://shopify/DraftOrder/123
   draftOrderName     String?  // e.g. #D1001
   idempotencyKeyHash String   // SHA-256 hash
-  itemCount          Int
-  lineCount          Int
-  subtotalAmount     Decimal  @db.Decimal(12, 2)
+  correlationRef     String?  // deterministic reference: cf-sub:<id>
+  itemCount          Int      @default(0)
+  lineCount          Int      @default(0)
+  subtotalAmount     Decimal  @default(0) @db.Decimal(12, 2)
   currency           String   @default("USD")
+  lastError          String?
   createdAt          DateTime @default(now())
+  updatedAt          DateTime @default(now()) @updatedAt
 
   shop               Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   catalog            Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
@@ -187,6 +191,7 @@ model OrderSubmission {
   @@index([shopId])
   @@index([catalogId])
   @@index([draftOrderId])
+  @@index([status])
 }
 
 model SyncRun {

@@ -61,6 +61,7 @@ describe('Milestone 6: Submissions History & Merchant Operations', () => {
         {
           shopId: shopA.id,
           catalogId: catalogA1.id,
+          status: 'COMPLETED',
           draftOrderId: 'gid://shopify/DraftOrder/10001',
           draftOrderName: '#D1001',
           idempotencyKeyHash: 'hash-a1-1',
@@ -72,6 +73,7 @@ describe('Milestone 6: Submissions History & Merchant Operations', () => {
         {
           shopId: shopA.id,
           catalogId: catalogA2.id,
+          status: 'COMPLETED',
           draftOrderId: 'gid://shopify/DraftOrder/10002',
           draftOrderName: '#D1002',
           idempotencyKeyHash: 'hash-a2-1',
@@ -88,6 +90,7 @@ describe('Milestone 6: Submissions History & Merchant Operations', () => {
       data: {
         shopId: shopB.id,
         catalogId: catalogB.id,
+        status: 'COMPLETED',
         draftOrderId: 'gid://shopify/DraftOrder/20001',
         draftOrderName: '#D2001',
         idempotencyKeyHash: 'hash-b-1',

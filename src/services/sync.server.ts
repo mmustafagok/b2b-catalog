@@ -896,7 +896,109 @@ export async function ensureInitialShopSync(shopId: string, customClient?: Shopi
 }
 
 /**
- * Generates the public catalog payload for buyer ordering with EXACT collection resolution.
+ * Resolves the deterministic set of allowed product GIDs for a catalog based on its sources.
+ */
+export async function resolveCatalogAllowedProductGids(
+  shopId: string,
+  sources: Array<{ type: CatalogSourceType | string; shopifyGid: string }>
+): Promise<Set<string>> {
+  const allowedProductGids = new Set<string>();
+
+  for (const source of sources) {
+    if (source.type === CatalogSourceType.PRODUCT) {
+      allowedProductGids.add(source.shopifyGid);
+    } else if (source.type === CatalogSourceType.COLLECTION) {
+      const coll = await prisma.collectionSnapshot.findFirst({
+        where: {
+          shopId,
+          shopifyCollectionId: source.shopifyGid,
+        },
+        include: {
+          productMemberships: true,
+        },
+      });
+
+      if (coll) {
+        for (const membership of coll.productMemberships) {
+          allowedProductGids.add(membership.shopifyProductId);
+        }
+      }
+    }
+  }
+
+  return allowedProductGids;
+}
+
+export class SyncInProgressError extends Error {
+  public statusCode: number = 409;
+  public code: string = 'SYNC_IN_PROGRESS';
+  constructor(message: string = 'A catalog sync is currently in progress for this store') {
+    super(message);
+    this.name = 'SyncInProgressError';
+  }
+}
+
+/**
+ * Concurrency-protected manual sync launcher.
+ * Rejects overlapping clicks if a sync run is currently IN_PROGRESS (within 15 minute lock window).
+ */
+export async function triggerManualShopSync(shopId: string): Promise<{ syncRunId: string }> {
+  const activeSync = await prisma.syncRun.findFirst({
+    where: {
+      shopId,
+      status: 'IN_PROGRESS',
+    },
+  });
+
+  if (activeSync) {
+    const elapsedMs = Date.now() - activeSync.startedAt.getTime();
+    if (elapsedMs < 15 * 60 * 1000) {
+      throw new SyncInProgressError('A catalog sync is currently in progress for this store');
+    }
+    await prisma.syncRun.update({
+      where: { id: activeSync.id },
+      data: { status: 'FAILED', finishedAt: new Date() },
+    });
+  }
+
+  const syncRun = await prisma.syncRun.create({
+    data: {
+      shopId,
+      type: 'MANUAL',
+      status: 'IN_PROGRESS',
+      startedAt: new Date(),
+    },
+  });
+
+  // Run in background without blocking response
+  (async () => {
+    try {
+      const stats = await performInitialShopSync(shopId);
+      await prisma.syncRun.update({
+        where: { id: syncRun.id },
+        data: {
+          status: 'COMPLETED',
+          finishedAt: new Date(),
+          statsJson: JSON.stringify(stats),
+        },
+      });
+    } catch (err: any) {
+      await prisma.syncRun.update({
+        where: { id: syncRun.id },
+        data: {
+          status: 'FAILED',
+          finishedAt: new Date(),
+          statsJson: JSON.stringify({ error: err.message }),
+        },
+      });
+    }
+  })().catch(() => {});
+
+  return { syncRunId: syncRun.id };
+}
+
+/**
+ * Ingests a public catalog snapshot and transforms into buyer DTO.
  */
 export async function getPublicCatalogPayload(publicToken: string) {
   const catalog = await prisma.catalog.findUnique({
@@ -912,30 +1014,7 @@ export async function getPublicCatalogPayload(publicToken: string) {
   }
 
   // Exact source resolution: Collect all product GIDs from explicit products and collections
-  const allowedProductGids = new Set<string>();
-
-  for (const source of catalog.sources) {
-    if (source.type === CatalogSourceType.PRODUCT) {
-      allowedProductGids.add(source.shopifyGid);
-    } else if (source.type === CatalogSourceType.COLLECTION) {
-      // Find collection snapshot for this shop
-      const coll = await prisma.collectionSnapshot.findFirst({
-        where: {
-          shopId: catalog.shopId,
-          shopifyCollectionId: source.shopifyGid,
-        },
-        include: {
-          productMemberships: true,
-        },
-      });
-
-      if (coll) {
-        for (const membership of coll.productMemberships) {
-          allowedProductGids.add(membership.shopifyProductId);
-        }
-      }
-    }
-  }
+  const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
 
   // If no products match the sources, return empty products list
   if (allowedProductGids.size === 0) {

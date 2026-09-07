@@ -30,7 +30,7 @@ CatalogFlow follows the official Shopify Embedded App architecture with a dual-s
 - **Shopify Integration:** GraphQL Admin API `2026-07`
 - **Frontend:** React, Vite, Shopify Polaris
 - **Security:** AES-256-GCM authenticated encryption at rest for access tokens, HMAC SHA-256 webhook validation, JWT claim verification (aud, iss, dest, exp).
-- **Test Suite:** Vitest (65 automated unit, integration, and security test cases)
+- **Test Suite:** Vitest (96 automated unit, integration, and security test cases across 8 test suites)
 
 ---
 
@@ -132,6 +132,37 @@ npm run prisma:migrate
 - `customers/data_request`: Acknowledged (CatalogFlow retains zero customer PII).
 - `customers/redact`: Acknowledged (No customer PII stored in application database).
 - `shop/redact`: Completely erases all retained shop data upon merchant app deletion.
+
+### 4.6 Production Draft Order Pipeline & Order Boundary Hardening (M5 / M5.5)
+- **Order Idempotency State Machine (`OrderSubmission`):**
+  - States: `CREATING` $\rightarrow$ `COMPLETED` | `FAILED` | `REQUIRES_RECONCILIATION`.
+  - To eliminate race conditions where two concurrent requests create multiple Shopify Draft Orders before DB insertion, the row is pre-reserved in PostgreSQL with `status: 'CREATING'` and a unique `idempotencyKeyHash`. Concurrent attempts encounter `409 CONCURRENT_PROCESSING`.
+  - Completed submissions return `200 OK` with existing submission data and `idempotentReplay: true`.
+- **Shopify Reconciliation via Deterministic Correlation Reference:**
+  - Every order attaches a deterministic, non-PII correlation identifier: `cf-sub:<submissionId>` (e.g. `cf-sub:cly...`) to Draft Order tags and `_cf_submission_ref` custom attribute.
+  - If Shopify Draft Order creation succeeds or is ambiguous due to a database/network crash, the submission enters `REQUIRES_RECONCILIATION`.
+  - On retry, the engine queries Shopify Admin GraphQL (`draftOrders(first: 1, query: "tag:cf-sub:<submissionId>")`) to safely recover the created Draft Order without executing a second mutation.
+- **Strict Catalog Authorization & Variant Boundary:**
+  - Validates that every submitted line item variant GID belongs to a product actively mapped to the catalog (via product sources or collection membership snapshots).
+  - Out-of-catalog or cross-catalog variants are rejected with `422 INVALID_LINES`.
+- **Submit-Time `dataVersion` Stale-Data Guard:**
+  - Buyer requests include the client's observed `dataVersion`.
+  - If the merchant has modified pricing, published revisions, or updated collections (`dataVersion` mismatch), submission is rejected with `409 CATALOG_CHANGED` before touching Shopify.
+- **Rolling 30-Day Billing Cycle Quota Lifecycle:**
+  - `reconcileBillingCycle` automatically checks if `now >= billingCycleAnchor + 30 days` and rolls the anchor forward while resetting `monthlySubmissionsCount = 0`.
+- **Concurrency-Safe Atomic Quota Hard Cap:**
+  - `reserveSubmissionQuotaSlot` executes an atomic conditional SQL update (`UPDATE "Shop" SET "monthlySubmissionsCount" = "monthlySubmissionsCount" + 1 WHERE id = $1 AND "monthlySubmissionsCount" < $limit`).
+  - Concurrent requests near the limit (e.g. 49/50 on Free Tier) cannot race to exceed the cap. On downstream failure, `releaseSubmissionQuotaSlot` atomically rolls back the increment.
+- **Privacy & Metadata Hygiene:**
+  - Public tokens and raw idempotency keys are strictly excluded from Draft Order tags and custom attributes.
+  - Only clean identifiers (`CatalogFlow Order`, `cf-sub:<submissionId>`, `_cf_submission_ref`, `PO Number`) are sent to Shopify. Zero raw buyer PII is retained in the database.
+- **Manual Sync Deduplication:**
+  - `POST /api/admin/sync/trigger` validates in-progress runs; concurrent or overlapping sync requests return `409 SYNC_IN_PROGRESS`.
+
+### 4.7 Merchant Operations & Submissions History (M6)
+- **Embedded Submissions Table:** Lists all buyer order submissions with timestamp, catalog title, line count, item count, formatted subtotal currency, and status.
+- **Deep Links to Shopify Admin:** Direct deep links to native Shopify Draft Orders (`https://{shop}/admin/draft_orders/{id}`).
+- **Catalog Status Management:** Instant publish, unpublish, and archive operations with immediate `dataVersion` increments.
 
 ---
 

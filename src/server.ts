@@ -13,6 +13,8 @@ import {
   reconcileSourcedCollectionsForShop,
   performInitialShopSync,
   ensureInitialShopSync,
+  triggerManualShopSync,
+  SyncInProgressError,
 } from './services/sync.server.js';
 import { validateBuyerOrderLines } from './services/validation.server.js';
 import {
@@ -241,11 +243,15 @@ app.post('/api/public/catalog/:publicToken/submit', submitRateLimiter, async (re
 
     if (error instanceof OrderSubmissionError) {
       switch (error.code) {
+        case 'CONCURRENT_PROCESSING':
+          return res.status(409).json({ error: error.message, code: error.code });
         case 'CATALOG_NOT_FOUND':
         case 'CATALOG_NOT_PUBLISHED':
           return res.status(404).json({ error: error.message, code: error.code });
         case 'QUOTA_EXCEEDED':
           return res.status(403).json({ error: error.message, code: error.code });
+        case 'INVALID_LINES':
+          return res.status(422).json({ error: error.message, code: error.code, details: error.details });
         case 'EMPTY_ORDER':
         case 'INVALID_INPUT':
         case 'VALIDATION_FAILED':
@@ -726,15 +732,15 @@ app.get('/api/admin/sync/health', adminAuthMiddleware, async (req: any, res: Res
   }
 });
 
-// Manual Sync Trigger (M6)
+// Manual Sync Trigger (M6 / M5.5 Deduplicated)
 app.post('/api/admin/sync/trigger', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
-    performInitialShopSync(req.shop.id).catch((err) => {
-      console.error('Manual sync failed for shop:', req.shop.shopDomain, sanitizeErrorMessage(err));
-    });
-
-    return res.status(200).json({ success: true, message: 'Sync initiated' });
+    const result = await triggerManualShopSync(req.shop.id);
+    return res.status(200).json({ success: true, message: 'Sync initiated', syncRunId: result.syncRunId });
   } catch (err: any) {
+    if (err instanceof SyncInProgressError) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }
 });

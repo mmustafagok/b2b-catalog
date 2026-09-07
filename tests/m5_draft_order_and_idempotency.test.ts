@@ -70,7 +70,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
       ],
     });
 
-    await publishCatalog(shop.id, publishedCatalog.id);
+    publishedCatalog = await publishCatalog(shop.id, publishedCatalog.id);
   });
 
   afterEach(() => {
@@ -81,7 +81,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
 
   it('should reject requests missing the Idempotency-Key header with 400 Bad Request', async () => {
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Acme Corp',
         email: 'buyer@acme.com',
@@ -143,7 +143,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Acme Workspace LLC',
         email: 'procurement@acmeworkspace.com',
@@ -184,10 +184,13 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
       expect.arrayContaining([
         { name: 'Business Name', value: 'Acme Workspace LLC' },
         { name: 'Catalog', value: 'Wholesale Desks 2026' },
-        { name: 'CatalogFlow Public Token', value: publishedCatalog.publicToken },
+        { name: 'Catalog ID', value: publishedCatalog.id },
+        { name: 'Submission Reference', value: expect.stringContaining('CatalogFlow-Submission:') },
         { name: 'PO Number', value: 'PO-2026-001' },
       ])
     );
+    const attrNames = capturedDraftOrderInput.customAttributes.map((a: any) => a.name);
+    expect(attrNames).not.toContain('CatalogFlow Public Token');
 
     // Verify atomic persistence in DB
     const submissionInDb = await prisma.orderSubmission.findFirst({
@@ -245,7 +248,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Beta Design Studio',
         email: 'orders@betastudio.com',
@@ -308,7 +311,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Delta Systems',
         email: 'purchasing@deltasystems.com',
@@ -358,7 +361,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Delta Systems',
         email: 'purchasing@deltasystems.com',
@@ -392,7 +395,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Delta Systems',
         email: 'purchasing@deltasystems.com',
@@ -423,7 +426,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: 'Over Quota Inc',
         email: 'buyer@overquota.com',
@@ -485,7 +488,7 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     const buyerName = 'Confidential Buyer Organization';
 
     const payload = {
-      dataVersion: 1,
+      dataVersion: publishedCatalog.dataVersion,
       buyer: {
         businessName: buyerName,
         email: buyerEmail,

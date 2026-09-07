@@ -122,3 +122,42 @@ npm run typecheck
   - `customers/redact` returns 200 acknowledgment.
   - `shop/redact` erases shop and cascades deletion of retained data.
 - **Currency & Money:** Formatting across non-USD currencies (EUR, GBP, CAD) and decimal precision.
+
+### 3.6 Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Idempotency (`tests/m5_draft_order_and_idempotency.test.ts` — 8 Tests)
+- Mandatory `Idempotency-Key` header enforcement (missing or whitespace returns 400).
+- Live variant revalidation (`getVariantsByIds`) before mutation.
+- Stale price detection returning `HTTP 409 Conflict` (`CATALOG_CHANGED`).
+- Out-of-stock and deleted item detection returning `HTTP 409 Conflict`.
+- Percentage discount calculation and line item discount formatting.
+- Draft Order creation via `draftOrderCreate` mutation with business notes and PO number.
+- Basic idempotency duplicate returns existing submission without second Shopify call.
+- Zero raw buyer PII stored in local database model.
+
+### 3.7 Milestone 6: Submissions History & Merchant Operations (`tests/m6_submissions_and_operations.test.ts` — 5 Tests)
+- Paginated submissions retrieval (`GET /api/admin/submissions`) scoped to authenticated shop.
+- Shopify Admin Draft Order deep link generation (`https://${shopDomain}/admin/draft_orders/${numericId}`).
+- Strict multi-tenant isolation: Shop B cannot view Shop A submissions.
+- Filter submissions by `catalogId`.
+- Comprehensive sync health summary (`GET /api/admin/sync/health`).
+
+### 3.8 Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees (`tests/m5_5_order_boundary_hardening.test.ts` — 11 Tests)
+- **Concurrency & Idempotency State Machine:**
+  - Two concurrent same-key submissions (`Promise.all`) execute exactly one Shopify mutation; second receives in-progress/existing result.
+  - Shopify mutation succeeds + DB update throws -> retry reconciles via correlation tag (`cf-sub:<id>`) with zero duplicate Draft Orders.
+  - Different idempotency keys intentionally create separate Draft Orders.
+- **Catalog Authorization:**
+  - Same-shop but out-of-catalog variant rejected with `HTTP 422 INVALID_LINES` before calling Shopify.
+  - Mixed valid/invalid cart rejected entirely without partial draft orders.
+  - Wholesale discount never applied to unauthorized lines.
+- **Catalog Version (`dataVersion`):**
+  - Stale `dataVersion` returns `HTTP 409 CATALOG_CHANGED` before calling Shopify.
+  - Current `dataVersion` succeeds.
+- **Quota Lifecycle & Concurrency Hard Cap:**
+  - 30-day billing period rollover automatically resets usage and advances anchor.
+  - 49/50 quota with two concurrent distinct submissions (`Promise.all`) -> exactly one succeeds, one receives `403 QUOTA_EXCEEDED`.
+  - Failed-before-side-effect attempt releases reserved quota slot.
+- **Manual Sync Deduplication:**
+  - Overlapping click while sync is `IN_PROGRESS` returns `HTTP 409 SYNC_IN_PROGRESS`.
+- **Privacy & Metadata:**
+  - Draft Order custom attributes strictly exclude `CatalogFlow Public Token` and raw idempotency key.
+  - Local database stores no raw buyer email or notes.

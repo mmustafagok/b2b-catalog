@@ -107,11 +107,45 @@ export async function getDecryptedAccessToken(shopId: string): Promise<string | 
   return decryptToken(shop.accessToken);
 }
 
+export const BILLING_CYCLE_MS = 30 * 24 * 60 * 60 * 1000; // 30-day standard billing period
+
+/**
+ * Deterministically rolls over the 30-day billing cycle and resets monthlySubmissionsCount to 0
+ * when the current timestamp exceeds the active anchor.
+ */
+export async function reconcileBillingCycle<T extends {
+  id: string;
+  billingCycleAnchor: Date;
+  monthlySubmissionsCount: number;
+}>(shop: T): Promise<T> {
+  const now = Date.now();
+  const anchorTime = shop.billingCycleAnchor.getTime();
+
+  if (now - anchorTime >= BILLING_CYCLE_MS) {
+    const elapsedCycles = Math.floor((now - anchorTime) / BILLING_CYCLE_MS);
+    const newAnchor = new Date(anchorTime + elapsedCycles * BILLING_CYCLE_MS);
+
+    const updated = await prisma.shop.update({
+      where: { id: shop.id },
+      data: {
+        billingCycleAnchor: newAnchor,
+        monthlySubmissionsCount: 0,
+      },
+    });
+    return updated as unknown as T;
+  }
+
+  return shop;
+}
+
 export async function checkShopQuota(shopId: string) {
-  const shop = await getActiveShopById(shopId);
+  let shop = await getActiveShopById(shopId);
   if (!shop) {
     throw new Error('Shop not found or inactive');
   }
+
+  // Reconcile billing cycle rollover before evaluating usage
+  shop = await reconcileBillingCycle(shop);
 
   const planTier = (shop.plan as PlanTier) || PlanTier.STARTER;
   const limits = PLAN_LIMITS[planTier] || PLAN_LIMITS[PlanTier.STARTER];
@@ -132,12 +166,43 @@ export async function checkShopQuota(shopId: string) {
     usage: {
       liveCatalogsCount,
       monthlySubmissionsCount: shop.monthlySubmissionsCount,
+      billingCycleAnchor: shop.billingCycleAnchor,
     },
     allowed: {
       canPublishCatalog,
       canAcceptSubmission,
     },
   };
+}
+
+/**
+ * Concurrency-safe atomic quota slot reservation before external Shopify mutation.
+ * Returns true if a slot was reserved, false if hard cap has been reached.
+ */
+export async function reserveSubmissionQuotaSlot(shopId: string, limit: number): Promise<boolean> {
+  const shop = await getActiveShopById(shopId);
+  if (!shop) return false;
+
+  await reconcileBillingCycle(shop);
+
+  const rowsUpdated = await prisma.$executeRaw`
+    UPDATE "Shop"
+    SET "monthlySubmissionsCount" = "monthlySubmissionsCount" + 1
+    WHERE "id" = ${shopId} AND "monthlySubmissionsCount" < ${limit}
+  `;
+
+  return rowsUpdated > 0;
+}
+
+/**
+ * Releases a reserved quota slot if order creation fails before external Shopify side effects.
+ */
+export async function releaseSubmissionQuotaSlot(shopId: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE "Shop"
+    SET "monthlySubmissionsCount" = GREATEST(0, "monthlySubmissionsCount" - 1)
+    WHERE "id" = ${shopId}
+  `;
 }
 
 export async function incrementSubmissionCount(shopId: string) {
