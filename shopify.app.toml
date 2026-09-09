@@ -1,6 +1,6 @@
 client_id = "6c4ea87dbc56b998f87864fd64fa8a07"
 name = "CatalogFlow: B2B Order Catalog"
-application_url = "https://b2b-catalog.hostless.app/"
+application_url = "https://b2b-catalog.hostless.app"
 embedded = true
 
 [webhooks]
@@ -39,6 +39,9 @@ use_legacy_install_flow = false
 redirect_urls = []
 
 [build]
+# This is the dev config. automatically_update_urls_on_dev = true is safe here
+# because this file does NOT have include_config_on_deploy = true,
+# so `shopify app dev` will not push tunnel URLs to production config.
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
+include_config_on_deploy = false
 dev_store_url = "catalogflow-test-store.myshopify.com"

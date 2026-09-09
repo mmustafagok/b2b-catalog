@@ -14,6 +14,8 @@
     "worker": "tsx src/worker.ts",
     "worker:prod": "npm run migrate:prod && node dist/worker.js",
     "migrate:prod": "node scripts/migrate-production.mjs",
+    "validate:shopify:prod": "node scripts/validate-shopify-production-config.mjs",
+    "shopify:deploy:prod": "npm run validate:shopify:prod && shopify app deploy --config shopify.app.catalogflow-b2b-order-catalog.toml",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
