@@ -26,7 +26,15 @@ export function validateEnvironment(): ValidatedEnvironment {
   const missingProdVars: string[] = [];
 
   // 1. In all environments, DATABASE_URL must exist and start with postgresql:// or postgres://
-  const cleanDbUrl = databaseUrl.trim().replace(/^["']|["']$/g, '').trim();
+  let cleanDbUrl = databaseUrl.trim().replace(/^["']|["']$/g, '').trim();
+  if (cleanDbUrl.startsWith('//')) {
+    cleanDbUrl = 'postgresql:' + cleanDbUrl;
+    process.env.DATABASE_URL = cleanDbUrl;
+  } else if (!cleanDbUrl.startsWith('postgresql://') && !cleanDbUrl.startsWith('postgres://') && cleanDbUrl.includes('@')) {
+    cleanDbUrl = 'postgresql://' + cleanDbUrl;
+    process.env.DATABASE_URL = cleanDbUrl;
+  }
+
   if (!cleanDbUrl) {
     missingProdVars.push('DATABASE_URL');
   } else if (!cleanDbUrl.startsWith('postgresql://') && !cleanDbUrl.startsWith('postgres://')) {
