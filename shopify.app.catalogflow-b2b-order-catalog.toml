@@ -39,9 +39,5 @@ use_legacy_install_flow = false
 redirect_urls = []
 
 [build]
-# automatically_update_urls_on_dev = false prevents `shopify app dev` from
-# overwriting application_url and redirect_urls with a temporary tunnel URL.
-# Use shopify.app.toml (with automatically_update_urls_on_dev = true) for local dev.
 automatically_update_urls_on_dev = false
-include_config_on_deploy = true
 dev_store_url = "catalogflow-test-store.myshopify.com"
