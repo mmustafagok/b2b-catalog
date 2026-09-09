@@ -25,9 +25,13 @@ export function validateEnvironment(): ValidatedEnvironment {
 
   const missingProdVars: string[] = [];
 
-  // 1. In all environments, DATABASE_URL must exist
-  if (!databaseUrl) {
+  // 1. In all environments, DATABASE_URL must exist and start with postgresql:// or postgres://
+  const cleanDbUrl = databaseUrl.trim().replace(/^["']|["']$/g, '').trim();
+  if (!cleanDbUrl) {
     missingProdVars.push('DATABASE_URL');
+  } else if (!cleanDbUrl.startsWith('postgresql://') && !cleanDbUrl.startsWith('postgres://')) {
+    const safeSnippet = cleanDbUrl.slice(0, 15);
+    missingProdVars.push(`DATABASE_URL must start with "postgresql://" or "postgres://". Currently starts with: "${safeSnippet}..." (length: ${cleanDbUrl.length})`);
   }
 
   // 2. In all environments, ENCRYPTION_SECRET must be at least 32 characters
