@@ -3,11 +3,21 @@ import { PrismaClient } from '@prisma/client';
 
 export function sanitizeDatabaseUrl(url?: string): string | undefined {
   if (!url) return url;
-  let clean = url.trim().replace(/^["']|["']$/g, '').trim();
+  let clean = url.trim().replace(/[\r\n]+/g, '').trim();
+  // Strip one matching surrounding quote pair
+  if ((clean.startsWith('"') && clean.endsWith('"')) || (clean.startsWith("'") && clean.endsWith("'"))) {
+    clean = clean.slice(1, -1).trim();
+  }
+  // Repair: platform stripped 'postgresql:' leaving '//...'
   if (clean.startsWith('//')) {
     clean = 'postgresql:' + clean;
-  } else if (!clean.startsWith('postgresql://') && !clean.startsWith('postgres://') && clean.includes('@')) {
-    clean = 'postgresql://' + clean;
+  }
+  // Repair single-slash variants
+  if (clean.startsWith('postgresql:/') && !clean.startsWith('postgresql://')) {
+    clean = 'postgresql://' + clean.slice('postgresql:/'.length);
+  }
+  if (clean.startsWith('postgres:/') && !clean.startsWith('postgres://')) {
+    clean = 'postgres://' + clean.slice('postgres:/'.length);
   }
   return clean;
 }

@@ -26,12 +26,23 @@ export function validateEnvironment(): ValidatedEnvironment {
   const missingProdVars: string[] = [];
 
   // 1. In all environments, DATABASE_URL must exist and start with postgresql:// or postgres://
-  let cleanDbUrl = databaseUrl.trim().replace(/^["']|["']$/g, '').trim();
+  let cleanDbUrl = databaseUrl.trim().replace(/[\r\n]+/g, '').trim();
+  // Strip one matching surrounding quote pair
+  if ((cleanDbUrl.startsWith('"') && cleanDbUrl.endsWith('"')) || (cleanDbUrl.startsWith("'") && cleanDbUrl.endsWith("'"))) {
+    cleanDbUrl = cleanDbUrl.slice(1, -1).trim();
+  }
+  // Repair: platform stripped 'postgresql:' leaving '//'
   if (cleanDbUrl.startsWith('//')) {
     cleanDbUrl = 'postgresql:' + cleanDbUrl;
     process.env.DATABASE_URL = cleanDbUrl;
-  } else if (!cleanDbUrl.startsWith('postgresql://') && !cleanDbUrl.startsWith('postgres://') && cleanDbUrl.includes('@')) {
-    cleanDbUrl = 'postgresql://' + cleanDbUrl;
+  }
+  // Repair single-slash variants
+  if (cleanDbUrl.startsWith('postgresql:/') && !cleanDbUrl.startsWith('postgresql://')) {
+    cleanDbUrl = 'postgresql://' + cleanDbUrl.slice('postgresql:/'.length);
+    process.env.DATABASE_URL = cleanDbUrl;
+  }
+  if (cleanDbUrl.startsWith('postgres:/') && !cleanDbUrl.startsWith('postgres://')) {
+    cleanDbUrl = 'postgres://' + cleanDbUrl.slice('postgres:/'.length);
     process.env.DATABASE_URL = cleanDbUrl;
   }
 
