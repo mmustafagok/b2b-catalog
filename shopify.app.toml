@@ -1,6 +1,6 @@
 client_id = "6c4ea87dbc56b998f87864fd64fa8a07"
 name = "CatalogFlow: B2B Order Catalog"
-application_url = "https://shopify.dev/apps/default-app-home"
+application_url = "https://b2b-catalog.hostless.app/"
 embedded = true
 
 [webhooks]

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { validateEnvironment } from './services/env.server.js';
 import { claimNextJob, executeJob, failJob, recoverStaleJobs } from './services/job-queue.server.js';
 
