@@ -39,9 +39,6 @@ use_legacy_install_flow = false
 redirect_urls = []
 
 [build]
-# This is the dev config. automatically_update_urls_on_dev = true is safe here
-# because this file does NOT have include_config_on_deploy = true,
-# so `shopify app dev` will not push tunnel URLs to production config.
-automatically_update_urls_on_dev = true
-include_config_on_deploy = false
+automatically_update_urls_on_dev = false
+include_config_on_deploy = true
 dev_store_url = "catalogflow-test-store.myshopify.com"
