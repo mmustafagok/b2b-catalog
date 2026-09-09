@@ -40,5 +40,4 @@ redirect_urls = []
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 dev_store_url = "catalogflow-test-store.myshopify.com"
