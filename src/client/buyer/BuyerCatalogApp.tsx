@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { VariantMatrix, ProductItem } from './VariantMatrix.js';
 import { OrderSummaryDrawer } from './OrderSummaryDrawer.js';
+import { parseBuyerRoute } from '../routeUtils.js';
 import './buyer.css';
 
 interface CatalogHeader {
@@ -44,16 +45,13 @@ export const BuyerCatalogApp: React.FC = () => {
     subtotal: number;
   } | null>(null);
 
-  // Extract publicToken from URL path (e.g. /c/token_here)
+  // Extract publicToken from URL path using strict canonical route: /c/<64 hex token>
+  // IMPORTANT: Never fall back to query params — Shopify App Bridge passes ?id_token=
+  // which must never be treated as a catalog token.
   const publicToken = useMemo(() => {
-    const parts = window.location.pathname.split('/');
-    const cIndex = parts.indexOf('c');
-    if (cIndex !== -1 && parts[cIndex + 1]) {
-      return parts[cIndex + 1];
-    }
-    // Fallback to query param ?token=...
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('token') || '';
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+    const { token } = parseBuyerRoute(pathname);
+    return token || '';
   }, []);
 
   useEffect(() => {
