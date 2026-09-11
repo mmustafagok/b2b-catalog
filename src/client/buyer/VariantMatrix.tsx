@@ -10,6 +10,9 @@ export interface VariantItem {
   formattedPrice?: string;
   availableForSale: boolean;
   inventoryQuantity?: number;
+  effectiveAvailable?: number | null;
+  inventoryPolicy?: string;
+  inventoryTracked?: boolean;
   selectedOptions: Array<{ name: string; value: string }>;
   imageUrl: string | null;
 }
@@ -39,12 +42,13 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
   showSku,
   showInventory,
 }) => {
-  const handleInputChange = (variantId: string, val: string) => {
+  const handleInputChange = (variantId: string, val: string, maxLimit: number) => {
     const parsed = parseInt(val, 10);
     if (isNaN(parsed) || parsed < 0) {
       onQuantityChange(variantId, 0);
     } else {
-      onQuantityChange(variantId, parsed);
+      const clamped = Math.min(parsed, maxLimit);
+      onQuantityChange(variantId, clamped);
     }
   };
 
@@ -65,7 +69,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
           <tr role="row">
             <th scope="col">Variant / Options</th>
             {showSku && <th scope="col">SKU</th>}
-            {showInventory && <th scope="col">Stock</th>}
+            <th scope="col">Availability</th>
             <th scope="col">Wholesale Price</th>
             <th scope="col" style={{ width: '150px', textAlign: 'right' }}>Quantity</th>
           </tr>
@@ -74,6 +78,10 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
           {product.variants.map((variant) => {
             const currentQty = quantities[variant.shopifyVariantId] || 0;
             const hasDiscount = variant.displayPrice < variant.basePrice;
+
+            const isOutOfStock = !variant.availableForSale || variant.effectiveAvailable === 0;
+            const hasFiniteCap = variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined;
+            const maxAvailable = hasFiniteCap ? Math.max(0, variant.effectiveAvailable!) : 100000;
 
             return (
               <tr key={variant.shopifyVariantId} role="row">
@@ -85,19 +93,23 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     <span className="variant-sku">{variant.sku || '—'}</span>
                   </td>
                 )}
-                {showInventory && (
-                  <td>
-                    {variant.availableForSale ? (
-                      <span className="stock-tag in-stock">
-                        {variant.inventoryQuantity !== undefined
-                          ? `${variant.inventoryQuantity} in stock`
-                          : 'In Stock'}
-                      </span>
-                    ) : (
-                      <span className="stock-tag out-of-stock">Out of stock</span>
-                    )}
-                  </td>
-                )}
+                <td>
+                  {isOutOfStock ? (
+                    <span className="stock-tag out-of-stock" style={{ color: '#dc2626', fontWeight: 600 }}>
+                      Out of stock
+                    </span>
+                  ) : hasFiniteCap ? (
+                    <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+                      {showInventory || variant.effectiveAvailable! <= 20
+                        ? `${variant.effectiveAvailable} available`
+                        : 'In stock'}
+                    </span>
+                  ) : (
+                    <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+                      In stock
+                    </span>
+                  )}
+                </td>
                 <td>
                   <div className="price-box">
                     <span className="display-price">
@@ -114,7 +126,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                       type="button"
                       className="qty-btn"
                       aria-label={`Decrease quantity for ${variant.title}`}
-                      disabled={currentQty <= 0}
+                      disabled={isOutOfStock || currentQty <= 0}
                       onClick={() => onQuantityChange(variant.shopifyVariantId, Math.max(0, currentQty - 1))}
                     >
                       −
@@ -122,15 +134,20 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     <input
                       type="number"
                       min="0"
+                      max={hasFiniteCap ? maxAvailable : undefined}
+                      disabled={isOutOfStock}
                       aria-label={`Quantity for ${variant.title}`}
                       className="qty-input"
-                      value={currentQty === 0 ? '' : currentQty}
-                      placeholder="0"
-                      onChange={(e) => handleInputChange(variant.shopifyVariantId, e.target.value)}
+                      value={isOutOfStock ? '' : (currentQty === 0 ? '' : currentQty)}
+                      placeholder={isOutOfStock ? '0' : '0'}
+                      onChange={(e) => handleInputChange(variant.shopifyVariantId, e.target.value, maxAvailable)}
                       onKeyDown={(e) => {
+                        if (isOutOfStock) return;
                         if (e.key === 'ArrowUp') {
                           e.preventDefault();
-                          onQuantityChange(variant.shopifyVariantId, currentQty + 1);
+                          if (!hasFiniteCap || currentQty < maxAvailable) {
+                            onQuantityChange(variant.shopifyVariantId, currentQty + 1);
+                          }
                         } else if (e.key === 'ArrowDown') {
                           e.preventDefault();
                           onQuantityChange(variant.shopifyVariantId, Math.max(0, currentQty - 1));
@@ -141,7 +158,12 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                       type="button"
                       className="qty-btn"
                       aria-label={`Increase quantity for ${variant.title}`}
-                      onClick={() => onQuantityChange(variant.shopifyVariantId, currentQty + 1)}
+                      disabled={isOutOfStock || (hasFiniteCap && currentQty >= maxAvailable)}
+                      onClick={() => {
+                        if (!hasFiniteCap || currentQty < maxAvailable) {
+                          onQuantityChange(variant.shopifyVariantId, currentQty + 1);
+                        }
+                      }}
                     >
                       +
                     </button>

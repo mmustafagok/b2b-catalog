@@ -15,6 +15,8 @@ import { hashIdempotencyKey } from './auth.server.js';
 import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server.js';
 import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 import { sanitizeErrorMessage } from './security.server.js';
+import { SubmitStageTracker } from './incident.server.js';
+import crypto from 'crypto';
 
 export class OrderSubmissionError extends Error {
   constructor(
@@ -25,6 +27,26 @@ export class OrderSubmissionError extends Error {
   ) {
     super(message);
     this.name = 'OrderSubmissionError';
+  }
+}
+
+export interface InventoryChangedItem {
+  variantId: string;
+  title: string;
+  requested: number;
+  available: number;
+}
+
+export class InventoryChangedError extends Error {
+  public statusCode: number = 409;
+  public code: string = 'INVENTORY_CHANGED';
+
+  constructor(
+    message: string,
+    public details: InventoryChangedItem[] = []
+  ) {
+    super(message);
+    this.name = 'InventoryChangedError';
   }
 }
 
@@ -68,14 +90,20 @@ export async function submitBuyerOrder(
   publicToken: string,
   idempotencyKey: string,
   input: BuyerSubmitOrderInput,
-  customClient?: ShopifyAdminClient
+  customClient?: ShopifyAdminClient,
+  requestId?: string
 ): Promise<OrderSubmissionResult> {
+  const correlationId = requestId || (crypto.randomUUID ? crypto.randomUUID() : `req_${Date.now()}`);
+  const tracker = new SubmitStageTracker(correlationId);
+
   const validated = BuyerSubmitOrderSchema.parse(input);
 
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
+    tracker.transition('SUBMISSION_FAILED', 'INVALID_INPUT');
     throw new OrderSubmissionError('Idempotency-Key header is required for order submission', 400, 'INVALID_INPUT');
   }
   if (idempotencyKey.length > 128) {
+    tracker.transition('SUBMISSION_FAILED', 'INVALID_INPUT');
     throw new OrderSubmissionError('Idempotency-Key header exceeds maximum length', 400, 'INVALID_INPUT');
   }
 
@@ -89,11 +117,20 @@ export async function submitBuyerOrder(
   });
 
   if (!catalog || catalog.status !== CatalogStatus.PUBLISHED || catalog.shop.uninstalledAt !== null) {
+    tracker.transition('SUBMISSION_FAILED', 'CATALOG_NOT_FOUND');
     throw new OrderSubmissionError('Catalog not found, unpublished, or unavailable', 404, 'CATALOG_NOT_FOUND');
   }
 
+  tracker.setContext({
+    shopDomain: catalog.shop.shopDomain,
+    catalogId: catalog.id,
+    lineCount: validated.lines.length,
+  });
+  tracker.transition('CATALOG_VALIDATED');
+
   // 2. Enforce dataVersion Boundary
   if (validated.dataVersion !== catalog.dataVersion) {
+    tracker.transition('SUBMISSION_FAILED', 'CATALOG_CHANGED');
     throw new CatalogDataChangedError(
       'Catalog configuration has changed since it was loaded. Please refresh and review latest catalog details.',
       []
@@ -122,6 +159,7 @@ export async function submitBuyerOrder(
   }
 
   if (invalidVariants.length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'INVALID_LINES');
     throw new OrderSubmissionError(
       'One or more requested items are not available in this catalog.',
       422,
@@ -129,6 +167,8 @@ export async function submitBuyerOrder(
       { invalidVariants }
     );
   }
+
+  tracker.transition('CATALOG_MEMBERSHIP_VALIDATED');
 
   const client = customClient || new ShopifyAdminClient({
     shopDomain: catalog.shop.shopDomain,
@@ -237,6 +277,7 @@ export async function submitBuyerOrder(
       });
     } catch (insertErr: any) {
       await releaseSubmissionQuotaSlotDirect(catalog.shopId, activeAnchor);
+      tracker.transition('SUBMISSION_FAILED', 'CONCURRENT_PROCESSING');
       throw new OrderSubmissionError(
         'Order submission is currently being processed by another worker',
         409,
@@ -244,6 +285,8 @@ export async function submitBuyerOrder(
       );
     }
   }
+
+  tracker.transition('QUOTA_RESERVED');
 
   const correlationTag = `cf-sub:${submission.id}`;
   const correlationReference = `CatalogFlow-Submission:${submission.id}`;
@@ -333,6 +376,7 @@ export async function submitBuyerOrder(
   }
 
   // 7. Live Variant Revalidation against Shopify
+  tracker.transition('LIVE_REVALIDATION_STARTED');
   const liveVariantsQuery = `
     query getVariantsByIds($ids: [ID!]!) {
       nodes(ids: $ids) {
@@ -342,6 +386,10 @@ export async function submitBuyerOrder(
           price
           availableForSale
           inventoryQuantity
+          inventoryPolicy
+          inventoryItem {
+            tracked
+          }
           product {
             id
             title
@@ -362,6 +410,7 @@ export async function submitBuyerOrder(
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Live variant verification failed' },
     });
+    tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
     throw new OrderSubmissionError(
       'Failed to verify current product inventory with Shopify. Please try again.',
       502,
@@ -376,6 +425,7 @@ export async function submitBuyerOrder(
     }
   }
 
+  const inventoryChangedItems: InventoryChangedItem[] = [];
   const changedLines: ChangedLineItem[] = [];
   let totalItems = 0;
   let subtotalDecimal = new Prisma.Decimal('0.00');
@@ -394,15 +444,37 @@ export async function submitBuyerOrder(
       continue;
     }
 
+    const variantTitle = liveVariant.title || localSnapshot?.title || 'Variant';
+    const itemTitle = `${liveVariant.product?.title || localSnapshot?.product.title || 'Product'} / ${variantTitle}`;
+
     if (!liveVariant.availableForSale || liveVariant.product?.status !== 'ACTIVE') {
       changedLines.push({
         variantId: line.variantId,
         productTitle: liveVariant.product?.title || localSnapshot?.product.title || 'Product',
-        variantTitle: liveVariant.title,
+        variantTitle,
         reason: 'OUT_OF_STOCK',
         available: false,
       });
       continue;
+    }
+
+    // Enforce Shopify inventory availability ceiling:
+    // Only if inventory is tracked (tracked === true) and policy !== CONTINUE and inventoryQuantity is a number:
+    const isTracked = liveVariant.inventoryItem?.tracked === true;
+    const policy = (liveVariant.inventoryPolicy || 'DENY').toUpperCase();
+
+    if (isTracked && policy !== 'CONTINUE' && typeof liveVariant.inventoryQuantity === 'number') {
+      const liveQty = liveVariant.inventoryQuantity;
+      const liveAvailable = Math.max(0, liveQty);
+      if (line.quantity > liveAvailable) {
+        inventoryChangedItems.push({
+          variantId: line.variantId,
+          title: itemTitle,
+          requested: line.quantity,
+          available: liveAvailable,
+        });
+        continue;
+      }
     }
 
     const liveWholesalePrice = calculateDisplayPrice(
@@ -434,19 +506,36 @@ export async function submitBuyerOrder(
     subtotalDecimal = subtotalDecimal.plus(liveWholesalePrice.times(line.quantity));
   }
 
+  if (inventoryChangedItems.length > 0) {
+    await releaseSubmissionQuotaReservation(submission.id);
+    await prisma.orderSubmission.update({
+      where: { id: submission.id },
+      data: { status: 'FAILED', processingStartedAt: null, lastError: 'Inventory changed during submit' },
+    });
+    tracker.transition('SUBMISSION_FAILED', 'INVENTORY_CHANGED');
+    throw new InventoryChangedError(
+      'Requested quantity exceeds currently available inventory. Please review and update your order.',
+      inventoryChangedItems
+    );
+  }
+
   if (changedLines.length > 0) {
     await releaseSubmissionQuotaReservation(submission.id);
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Catalog data changed during submit' },
     });
+    tracker.transition('SUBMISSION_FAILED', 'CATALOG_CHANGED');
     throw new CatalogDataChangedError(
       'Some product prices or inventory availability changed since this catalog was loaded. Please review updated lines.',
       changedLines
     );
   }
 
+  tracker.transition('LIVE_REVALIDATION_COMPLETED');
+
   // 8. Build Shopify draftOrderCreate Mutation
+  tracker.transition('DRAFT_ORDER_CREATE_STARTED');
   const hasDiscount =
     catalog.priceMode === 'PERCENT_DISCOUNT' &&
     catalog.discountPercent !== null &&
@@ -559,6 +648,7 @@ export async function submitBuyerOrder(
         lastError: 'Ambiguous transport failure during draft order creation',
       },
     });
+    tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
     throw new OrderSubmissionError(
       'Draft order creation encountered a network error or timeout. Please retry to confirm order status.',
       502,
@@ -572,6 +662,7 @@ export async function submitBuyerOrder(
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Shopify rejected draft order creation' },
     });
+    tracker.transition('SUBMISSION_FAILED', 'VALIDATION_FAILED');
     throw new OrderSubmissionError(
       'Shopify Draft Order creation was rejected. Please review order items.',
       422,
@@ -591,8 +682,11 @@ export async function submitBuyerOrder(
         lastError: 'Shopify returned ambiguous response without draft order id',
       },
     });
+    tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
     throw new OrderSubmissionError('Shopify Draft Order creation returned an invalid response', 502, 'SHOPIFY_API_ERROR');
   }
+
+  tracker.transition('DRAFT_ORDER_CREATE_COMPLETED');
 
   const currency = catalog.shop.currency || createdDraft.currencyCode || 'USD';
   const subtotalNumber = parseFloat(subtotalDecimal.toFixed(2));
@@ -642,6 +736,8 @@ export async function submitBuyerOrder(
     },
     `draft_order_created:${submission.id}`
   );
+
+  tracker.transition('SUBMISSION_COMPLETED');
 
   return {
     success: true,

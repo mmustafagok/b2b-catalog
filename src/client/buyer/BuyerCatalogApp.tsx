@@ -173,14 +173,57 @@ export const BuyerCatalogApp: React.FC = () => {
       });
 
       if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        if (res.status === 409) {
+        const requestIdHeader = res.headers.get('X-Request-ID') || res.headers.get('x-request-id');
+        let errJson: any = null;
+        let isJson = false;
+
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          try {
+            errJson = await res.json();
+            isJson = true;
+          } catch {
+            isJson = false;
+          }
+        }
+
+        const reqId = errJson?.requestId || requestIdHeader;
+        const refSuffix = reqId ? ` (Reference: ${reqId})` : '';
+
+        if (!isJson) {
+          // Cloudflare HTML 502, origin drop, or upstream gateway timeout
           setSubmitError(
-            errJson.message ||
-              'Some product prices or stock changed since this catalog was loaded. Please review updated lines.'
+            `We could not reach the ordering service. Your order was not confirmed. Please try again shortly.${refSuffix}`
+          );
+          return;
+        }
+
+        // Structured error format: { error: { code, message, details }, requestId }
+        const errObj = typeof errJson.error === 'object' && errJson.error !== null ? errJson.error : null;
+        const errCode = errObj?.code || errJson.code;
+        const errMsg = errObj?.message || (typeof errJson.error === 'string' ? errJson.error : errJson.message);
+        const errDetails = errObj?.details || errJson.details;
+
+        if (errCode === 'INVENTORY_CHANGED' && Array.isArray(errDetails) && errDetails.length > 0) {
+          const detailStrings = errDetails.map((item: any) => {
+            if (item.available <= 0) {
+              return `${item.title}: currently out of stock`;
+            }
+            return `${item.title}: ${item.requested} requested, but only ${item.available} is currently available`;
+          });
+          setSubmitError(
+            `Inventory changed before order submission:\n• ${detailStrings.join('\n• ')}\n\nPlease review and adjust your quantities.${refSuffix}`
+          );
+        } else if (errCode === 'CATALOG_CHANGED' || res.status === 409) {
+          setSubmitError(
+            (errMsg || 'Some catalog items changed since you opened this page. Review the updated quantities and submit again.') + refSuffix
+          );
+        } else if (res.status === 502 || errCode === 'SHOPIFY_API_ERROR') {
+          setSubmitError(
+            `Shopify ordering service is temporarily unavailable. Your order was not confirmed. Please retry shortly.${refSuffix}`
           );
         } else {
-          setSubmitError(errJson.error || errJson.message || 'Submission failed. Please try again.');
+          setSubmitError((errMsg || 'Submission failed. Please try again.') + refSuffix);
         }
         return;
       }

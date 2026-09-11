@@ -25,7 +25,14 @@ import {
   reconcileSubmission,
   OrderSubmissionError,
   CatalogDataChangedError,
+  InventoryChangedError,
 } from './services/order.server.js';
+import {
+  registerProcessDiagnostics,
+  getShopRuntimeIncidents,
+  recordRuntimeIncident,
+} from './services/incident.server.js';
+import crypto from 'crypto';
 import {
   createCatalog,
   updateCatalog,
@@ -78,6 +85,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 validateEnvironment();
+registerProcessDiagnostics();
 
 export const app = express();
 
@@ -115,10 +123,15 @@ app.use(express.urlencoded({ extended: true }));
 
 // Healthcheck & Readiness Probes (M9.15)
 app.get('/health', (_req: Request, res: Response) => {
+  const uptimeSeconds = Math.floor(process.uptime());
   res.status(200).json({
+    ok: true,
     status: 'ok',
-    uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
+    uptime: uptimeSeconds,
+    uptimeSeconds,
+    pid: process.pid,
+    build: process.env.COMMIT_SHA || process.env.BUILD_ID || process.env.npm_package_version || '1.0.0',
   });
 });
 
@@ -295,60 +308,106 @@ app.post('/api/public/catalog/:publicToken/validate', publicValidateLimiter, asy
 
 // 3. Buyer Order Submission (M9.2 Tiered Rate Limiter)
 app.post('/api/public/catalog/:publicToken/submit', publicSubmitLimiter, async (req: Request, res: Response) => {
+  const requestId = (req.get('X-Request-ID') || req.get('x-request-id') || crypto.randomUUID()).trim();
+  res.setHeader('X-Request-ID', requestId);
+
   try {
     const { publicToken } = req.params;
     const idempotencyKey = (req.get('Idempotency-Key') || req.get('idempotency-key') || '').trim();
 
     if (!isValidPublicToken(publicToken)) {
-      return res.status(400).json({ error: 'Invalid catalog token format' });
+      return res.status(400).json({
+        error: 'Invalid catalog token format',
+        code: 'VALIDATION_FAILED',
+        message: 'Invalid catalog token format',
+        requestId,
+      });
     }
 
     if (!idempotencyKey) {
-      return res.status(400).json({ error: 'Missing required Idempotency-Key header' });
+      return res.status(400).json({
+        error: 'Missing required Idempotency-Key header',
+        code: 'VALIDATION_FAILED',
+        message: 'Missing required Idempotency-Key header',
+        requestId,
+      });
     }
 
-    const result = await submitBuyerOrder(publicToken, idempotencyKey, req.body);
-    return res.status(201).json(result);
+    const result = await submitBuyerOrder(publicToken, idempotencyKey, req.body, undefined, requestId);
+    return res.status(201).json({ ...result, requestId });
   } catch (error: any) {
     if (error?.name === 'ZodError' || error instanceof z.ZodError) {
       const issueMsg = error.issues?.map((i: any) => i.message).join(', ') || 'Validation error';
-      return res.status(400).json({ error: issueMsg, details: error.issues });
+      return res.status(400).json({
+        error: issueMsg,
+        code: 'VALIDATION_FAILED',
+        message: issueMsg,
+        details: error.issues,
+        requestId,
+      });
+    }
+
+    if (error instanceof InventoryChangedError) {
+      return res.status(409).json({
+        error: {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+        },
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        requestId,
+      });
     }
 
     if (error instanceof CatalogDataChangedError) {
       return res.status(409).json({
-        error: error.message,
+        error: {
+          code: error.code,
+          message: error.message,
+          details: error.changedLines,
+        },
         code: error.code,
+        message: error.message,
         changedLines: error.changedLines,
+        details: error.changedLines,
+        requestId,
       });
     }
 
     if (error instanceof OrderSubmissionError) {
-      switch (error.code) {
-        case 'CONCURRENT_PROCESSING':
-        case 'RECONCILIATION_PENDING':
-          return res.status(409).json({ error: error.message, code: error.code });
-        case 'CATALOG_NOT_FOUND':
-        case 'CATALOG_NOT_PUBLISHED':
-          return res.status(404).json({ error: error.message, code: error.code });
-        case 'QUOTA_EXCEEDED':
-          return res.status(403).json({ error: error.message, code: error.code });
-        case 'INVALID_LINES':
-          return res.status(422).json({ error: error.message, code: error.code, details: error.details });
-        case 'EMPTY_ORDER':
-        case 'INVALID_INPUT':
-        case 'VALIDATION_FAILED':
-          return res.status(422).json({ error: error.message, code: error.code, details: error.details });
-        case 'SHOP_UNAVAILABLE':
-          return res.status(503).json({ error: error.message, code: error.code });
-        case 'SHOPIFY_API_ERROR':
-          return res.status(502).json({ error: error.message, code: error.code, details: error.details });
-        default:
-          return res.status(400).json({ error: error.message, code: error.code });
-      }
+      const statusCode = error.code === 'QUOTA_EXCEEDED' ? 403 : error.statusCode || 400;
+      return res.status(statusCode).json({
+        error: {
+          code: error.code || 'VALIDATION_FAILED',
+          message: error.message,
+          details: error.details,
+        },
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        requestId,
+      });
     }
 
-    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+    void recordRuntimeIncident({
+      type: 'UNHANDLED_SUBMIT_ERROR',
+      requestId,
+      route: '/api/public/catalog/submit',
+      errorCode: 'INTERNAL_ERROR',
+      message: sanitizeErrorMessage(error),
+    });
+
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: sanitizeErrorMessage(error),
+      },
+      code: 'INTERNAL_ERROR',
+      message: sanitizeErrorMessage(error),
+      requestId,
+    });
   }
 });
 
@@ -728,7 +787,17 @@ app.get('/api/admin/products/search', adminAuthMiddleware, async (req: any, res:
               handle
               status
               featuredImage { url }
-              variants(first: 1) { edges { node { price } } }
+              variants(first: 20) {
+                edges {
+                  node {
+                    id
+                    title
+                    price
+                    inventoryQuantity
+                    availableForSale
+                  }
+                }
+              }
             }
           }
         }
@@ -736,15 +805,35 @@ app.get('/api/admin/products/search', adminAuthMiddleware, async (req: any, res:
     `;
     const safeQ = sanitizeShopifySearchQuery(q);
     const data: any = await client.request(gqlQuery, { query: safeQ ? `title:*${safeQ}*` : 'status:ACTIVE', first: limit });
-    const products = (data?.products?.edges || []).map((e: any) => ({
-      id: e.node.id,
-      title: e.node.title,
-      handle: e.node.handle,
-      status: e.node.status,
-      imageUrl: e.node.featuredImage?.url || null,
-      price: e.node.variants?.edges?.[0]?.node?.price || null,
-    }));
+    const products = (data?.products?.edges || []).map((e: any) => {
+      const variants = (e.node.variants?.edges || []).map((ve: any) => ({
+        id: ve.node.id,
+        title: ve.node.title,
+        price: ve.node.price,
+        inventoryQuantity: ve.node.inventoryQuantity ?? 0,
+        availableForSale: ve.node.availableForSale,
+      }));
+      return {
+        id: e.node.id,
+        title: e.node.title,
+        handle: e.node.handle,
+        status: e.node.status,
+        imageUrl: e.node.featuredImage?.url || null,
+        price: variants[0]?.price || null,
+        variants,
+      };
+    });
     return res.status(200).json({ products });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Admin Diagnostic Endpoint — Operational Incidents (shop-isolated, max 50)
+app.get('/api/admin/runtime-incidents', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const incidents = await getShopRuntimeIncidents(req.shop.shopDomain, 50);
+    return res.status(200).json({ incidents });
   } catch (err: any) {
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }

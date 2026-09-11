@@ -12,6 +12,12 @@ export interface ShopifyWebhookProductVariant {
   sku?: string | null;
   barcode?: string | null;
   inventory_quantity?: number;
+  inventory_policy?: string;
+  inventoryPolicy?: string;
+  inventory_tracked?: boolean;
+  inventoryTracked?: boolean;
+  inventoryItem?: { tracked?: boolean };
+  inventory_management?: string | null;
   available?: boolean;
   image_id?: number | null;
   option1?: string | null;
@@ -236,6 +242,15 @@ export async function syncProductSnapshot(shopId: string, product: ShopifyWebhoo
         if (v.option3 && product.options[2]) options.push({ name: product.options[2].name, value: v.option3 });
       }
 
+      const inventoryPolicy = (v.inventoryPolicy || v.inventory_policy || 'DENY').toUpperCase();
+      const inventoryTracked = v.inventoryTracked !== undefined
+        ? Boolean(v.inventoryTracked)
+        : v.inventory_tracked !== undefined
+        ? Boolean(v.inventory_tracked)
+        : v.inventoryItem?.tracked !== undefined
+        ? Boolean(v.inventoryItem.tracked)
+        : v.inventory_management !== null && v.inventory_management !== undefined && v.inventory_management !== '';
+
       await tx.variantSnapshot.upsert({
         where: {
           shopId_shopifyVariantId: {
@@ -249,6 +264,8 @@ export async function syncProductSnapshot(shopId: string, product: ShopifyWebhoo
           barcode: v.barcode || null,
           shopifyPrice: priceDecimal,
           inventoryQuantity: v.inventory_quantity ?? 0,
+          inventoryPolicy,
+          inventoryTracked,
           availableForSale: v.available ?? true,
           selectedOptionsJson: JSON.stringify(options),
           imageUrl: imageUrl,
@@ -264,6 +281,8 @@ export async function syncProductSnapshot(shopId: string, product: ShopifyWebhoo
           barcode: v.barcode || null,
           shopifyPrice: priceDecimal,
           inventoryQuantity: v.inventory_quantity ?? 0,
+          inventoryPolicy,
+          inventoryTracked,
           availableForSale: v.available ?? true,
           selectedOptionsJson: JSON.stringify(options),
           imageUrl: imageUrl,
@@ -452,6 +471,10 @@ export async function fetchAllProductVariants(
               price
               availableForSale
               inventoryQuantity
+              inventoryPolicy
+              inventoryItem {
+                tracked
+              }
               selectedOptions {
                 name
                 value
@@ -483,6 +506,8 @@ export async function fetchAllProductVariants(
           sku: v.sku,
           barcode: v.barcode,
           inventory_quantity: v.inventoryQuantity,
+          inventory_policy: v.inventoryPolicy,
+          inventory_tracked: v.inventoryItem?.tracked,
           available: v.availableForSale,
           selectedOptions: v.selectedOptions,
         });
@@ -737,6 +762,10 @@ export async function executeFullShopSync(
                   price
                   availableForSale
                   inventoryQuantity
+                  inventoryPolicy
+                  inventoryItem {
+                    tracked
+                  }
                   selectedOptions {
                     name
                     value
@@ -1143,6 +1172,19 @@ export async function getPublicCatalogPayload(publicToken: string) {
         const basePriceNum = parseFloat(v.shopifyPrice.toFixed(2));
         const displayPriceNum = parseFloat(displayPriceDecimal.toFixed(2));
 
+        const inventoryTracked = v.inventoryTracked;
+        const inventoryPolicy = v.inventoryPolicy || 'DENY';
+        let effectiveAvailable: number | null = null;
+        let isAvailable = v.availableForSale;
+
+        if (!inventoryTracked || inventoryPolicy === 'CONTINUE') {
+          effectiveAvailable = null;
+          isAvailable = true;
+        } else {
+          effectiveAvailable = Math.max(0, v.inventoryQuantity);
+          isAvailable = v.availableForSale && effectiveAvailable > 0;
+        }
+
         return {
           id: v.id,
           shopifyVariantId: v.shopifyVariantId,
@@ -1151,8 +1193,11 @@ export async function getPublicCatalogPayload(publicToken: string) {
           basePrice: basePriceNum,
           displayPrice: displayPriceNum,
           formattedPrice: formatMoney(displayPriceDecimal, currency),
-          availableForSale: v.availableForSale,
+          availableForSale: isAvailable,
           inventoryQuantity: catalog.showInventory ? v.inventoryQuantity : undefined,
+          effectiveAvailable,
+          inventoryPolicy,
+          inventoryTracked,
           selectedOptions,
           imageUrl: v.imageUrl || p.imageUrl,
         };

@@ -87,6 +87,27 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
       return;
     }
 
+    // Client-side availability and quantity validation
+    for (const product of products) {
+      for (const variant of product.variants) {
+        const qty = quantities[variant.shopifyVariantId] || 0;
+        if (qty > 0) {
+          if (!Number.isInteger(qty) || qty < 1) {
+            setClientError(`Invalid quantity for "${product.title} / ${variant.title}". Must be a positive integer.`);
+            return;
+          }
+          if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && qty > variant.effectiveAvailable) {
+            setClientError(`"${product.title} / ${variant.title}": ${qty} requested, but only ${variant.effectiveAvailable} is currently available.`);
+            return;
+          }
+          if (!variant.availableForSale || variant.effectiveAvailable === 0) {
+            setClientError(`"${product.title} / ${variant.title}" is currently out of stock.`);
+            return;
+          }
+        }
+      }
+    }
+
     await onSubmit({
       businessName: businessName.trim(),
       email: email.trim(),
@@ -120,83 +141,79 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
           </button>
         </div>
 
-        {/* Selected Items Review */}
-        <div className="review-lines-box">
-          {selectedLines.map((line) => (
-            <div key={line.variantId} className="review-line-item">
-              <div>
-                <strong>{line.productTitle}</strong>
-                <div style={{ color: '#64748b', fontSize: '0.75rem' }}>
-                  {line.variantTitle} × {line.qty}
+        <form onSubmit={handleSubmit} className="drawer-form">
+          <div className="review-lines-container">
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>Selected Items</h3>
+            {selectedLines.map((line) => (
+              <div key={line.variantId} className="review-line-item">
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{line.productTitle}</div>
+                  <div style={{ fontSize: '0.8125rem', color: '#64748b' }}>
+                    {line.variantTitle} × {line.qty}
+                  </div>
+                </div>
+                <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>
+                  {formatPrice(line.lineTotal, currency)}
                 </div>
               </div>
-              <div style={{ fontWeight: 600 }}>{formatPrice(line.lineTotal, currency)}</div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
 
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            padding: '0.75rem 0',
-            borderTop: '2px dashed #e2e8f0',
-            borderBottom: '2px dashed #e2e8f0',
-            marginBottom: '1.5rem',
-            fontSize: '1.125rem',
-            fontWeight: 700,
-          }}
-        >
-          <span>Estimated Subtotal:</span>
-          <span>{formatPrice(subtotal, currency)}</span>
-        </div>
+          <div className="drawer-divider" />
 
-        {/* Buyer Information Form */}
-        <form onSubmit={handleSubmit}>
+          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.75rem' }}>Buyer Details</h3>
           <div className="form-group">
-            <label className="form-label">
-              Company / Business Name <span style={{ color: '#dc2626' }}>*</span>
+            <label className="form-label" htmlFor="businessName">
+              Business / Company Name *
             </label>
             <input
+              id="businessName"
+              className="form-input"
               type="text"
               required
-              className="form-input"
-              placeholder="e.g. Acme Retailers Inc"
+              placeholder="e.g. Acme Supplies Ltd."
               value={businessName}
               onChange={(e) => setBusinessName(e.target.value)}
             />
           </div>
 
           <div className="form-group">
-            <label className="form-label">
-              Buyer Email Address <span style={{ color: '#dc2626' }}>*</span>
+            <label className="form-label" htmlFor="buyerEmail">
+              Business Email Address *
             </label>
             <input
+              id="buyerEmail"
+              className="form-input"
               type="email"
               required
-              className="form-input"
-              placeholder="buyer@acmeretail.com"
+              placeholder="buyer@example.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
 
           <div className="form-group">
-            <label className="form-label">PO Number (Optional)</label>
+            <label className="form-label" htmlFor="poNumber">
+              Purchase Order (PO) Number (Optional)
+            </label>
             <input
-              type="text"
+              id="poNumber"
               className="form-input"
-              placeholder="e.g. PO-2026-0841"
+              type="text"
+              placeholder="e.g. PO-2026-883"
               value={poNumber}
               onChange={(e) => setPoNumber(e.target.value)}
             />
           </div>
 
           <div className="form-group">
-            <label className="form-label">Order Notes / Instructions</label>
+            <label className="form-label" htmlFor="orderNotes">
+              Special Instructions / Notes (Optional)
+            </label>
             <textarea
+              id="orderNotes"
+              className="form-input"
               rows={3}
-              className="form-textarea"
               placeholder="Add shipping requirements, dock hours, or references..."
               value={note}
               onChange={(e) => setNote(e.target.value)}
@@ -212,6 +229,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                 color: '#b91c1c',
                 fontSize: '0.875rem',
                 marginBottom: '1rem',
+                whiteSpace: 'pre-line',
               }}
             >
               <div>{clientError || errorMessage}</div>
