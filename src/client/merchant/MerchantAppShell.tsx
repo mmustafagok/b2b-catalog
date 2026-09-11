@@ -420,10 +420,24 @@ export const MerchantAppShell: React.FC = () => {
           detail: c.productsCount != null ? `${c.productsCount} products` : null,
         })));
       } else {
-        setSearchResults((data.products || []).map((p: any) => ({
-          id: p.id, title: p.title, imageUrl: p.imageUrl,
-          detail: p.price ? `From $${p.price}` : null,
-        })));
+        setSearchResults((data.products || []).map((p: any) => {
+          const variants = p.variants || [];
+          let stockDetail = p.price ? `From $${p.price}` : '';
+          if (variants.length > 0) {
+            const variantSummaries = variants
+              .slice(0, 5)
+              .map((v: any) => `${v.title}: ${v.inventoryQuantity ?? 0} available`)
+              .join(', ');
+            const more = variants.length > 5 ? ` +${variants.length - 5} more` : '';
+            stockDetail = stockDetail ? `${stockDetail} • ${variantSummaries}${more}` : `${variantSummaries}${more}`;
+          }
+          return {
+            id: p.id,
+            title: p.title,
+            imageUrl: p.imageUrl,
+            detail: stockDetail || null,
+          };
+        }));
       }
     } catch (err: any) {
       setSearchError(err.message || 'Network error during search. Please try again.');

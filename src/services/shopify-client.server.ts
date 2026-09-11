@@ -22,6 +22,7 @@ export interface ShopifyClientConfig {
   shopId?: string;
   accessToken?: string; // Plaintext or encrypted envelope
   tokenProvider?: () => Promise<string>;
+  timeoutMs?: number; // Per-request network timeout in milliseconds (default: 15000)
 }
 
 export class ShopifyAdminClient {
@@ -29,6 +30,7 @@ export class ShopifyAdminClient {
   private shopId?: string;
   private plainAccessToken?: string;
   private tokenProvider?: () => Promise<string>;
+  private timeoutMs: number;
 
   constructor(config: ShopifyClientConfig) {
     if (!config.shopDomain) {
@@ -37,6 +39,7 @@ export class ShopifyAdminClient {
     this.shopDomain = config.shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
     this.shopId = config.shopId;
     this.tokenProvider = config.tokenProvider;
+    this.timeoutMs = config.timeoutMs ?? 15000;
 
     if (config.accessToken) {
       try {
@@ -74,15 +77,19 @@ export class ShopifyAdminClient {
   public async request<T = any>(
     query: string,
     variables?: Record<string, any>,
-    maxRetries: number = 3
+    maxRetries: number = 3,
+    overrideTimeoutMs?: number
   ): Promise<T> {
     const endpoint = `https://${this.shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+    const timeoutMs = overrideTimeoutMs ?? this.timeoutMs;
 
     let attempt = 0;
     let hasAttemptedTokenRefresh = false;
 
     while (attempt < maxRetries) {
       attempt++;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
         const currentToken = await this.resolveAccessToken();
@@ -94,7 +101,10 @@ export class ShopifyAdminClient {
             'X-Shopify-Access-Token': currentToken,
           },
           body: JSON.stringify({ query, variables }),
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
 
         // Handle 401 Unauthorized (Expired or Revoked Token)
         if (response.status === 401 && !hasAttemptedTokenRefresh && this.shopId) {
@@ -167,8 +177,20 @@ export class ShopifyAdminClient {
 
         return json.data as T;
       } catch (err: any) {
+        clearTimeout(timeoutId);
+
         if (err instanceof ShopifyGraphQLError || err instanceof ShopifyAuthRequiredError) {
           throw err;
+        }
+
+        const isTimeout = err?.name === 'AbortError' || controller.signal.aborted;
+        if (isTimeout) {
+          throw new ShopifyGraphQLError(
+            `Shopify Admin API network request timed out after ${timeoutMs}ms on ${this.shopDomain}`,
+            undefined,
+            undefined,
+            504
+          );
         }
 
         if (attempt >= maxRetries) {

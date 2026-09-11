@@ -1103,7 +1103,7 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
       // Must return 409 RECONCILIATION_PENDING
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('RECONCILIATION_PENDING');
-      expect(res.body.error).toContain('still confirming the previous order attempt');
+      expect(res.body.error?.message || res.body.error).toContain('still confirming the previous order attempt');
 
       // Crucial: draftOrderCreate MUST NOT have been called!
       expect(findDraftCalls).toBe(1);
