@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { authenticatedFetch } from './appBridgeAuth.js';
 import './merchant.css';
 
 interface ShopInfo {
@@ -170,6 +171,10 @@ export const MerchantAppShell: React.FC = () => {
   const [syncing, setSyncing] = useState<boolean>(false);
   const [switchingPlan, setSwitchingPlan] = useState<boolean>(false);
   const [reconcilingId, setReconcilingId] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [billingUnavailable, setBillingUnavailable] = useState<boolean>(false);
+  const [quotaError, setQuotaError] = useState<boolean>(false);
+  const [analyticsError, setAnalyticsError] = useState<boolean>(false);
 
   // ── Catalog creation wizard state ─────────────────────────────────────────
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -198,52 +203,49 @@ export const MerchantAppShell: React.FC = () => {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const getAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (typeof window !== 'undefined' && (window as any).shopify?.idToken) {
-      try {
-        const token = await (window as any).shopify.idToken();
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-      } catch {
-        // App Bridge fetch interceptor fallback
-      }
-    }
-    return headers;
-  }, []);
 
   const loadData = useCallback(async () => {
     try {
-      const headers = await getAuthHeaders();
-
-      // Bootstrap & Shop
-      const bootstrapRes = await fetch('/api/admin/bootstrap', { method: 'POST', headers });
+      // Bootstrap & Shop — critical; fail loudly if this fails
+      const bootstrapRes = await authenticatedFetch('/api/admin/bootstrap', { method: 'POST' });
       if (!bootstrapRes.ok) throw new Error('Authentication failed');
       const bootstrapData = await bootstrapRes.json();
       setShop(bootstrapData.shop);
 
-      // Quota & Billing
+      // Secondary fetches — failures are non-fatal: show degraded states per widget
       const [quotaRes, billingRes, analyticsRes] = await Promise.all([
-        fetch('/api/admin/quota', { headers }),
-        fetch('/api/admin/billing', { headers }),
-        fetch('/api/admin/analytics', { headers }),
+        authenticatedFetch('/api/admin/quota'),
+        authenticatedFetch('/api/admin/billing'),
+        authenticatedFetch('/api/admin/analytics'),
       ]);
 
       if (quotaRes.ok) {
         setQuota(await quotaRes.json());
+        setQuotaError(false);
+      } else {
+        setQuotaError(true);
       }
       if (billingRes.ok) {
-        setBilling(await billingRes.json());
+        const billingData = await billingRes.json();
+        setBilling(billingData);
+        // Detect if billing plan-switching is not yet wired in production
+        setBillingUnavailable(
+          billingData.billingStatus === 'SHOPIFY_APP_PRICING_PENDING_M10' ||
+          billingData.entitlementSource === 'LOCAL_MIRROR_PENDING_SHOPIFY'
+        );
+        setAnalyticsError(false);
+      } else {
+        setBillingUnavailable(true);
       }
       if (analyticsRes.ok) {
         setAnalytics(await analyticsRes.json());
+        setAnalyticsError(false);
+      } else {
+        setAnalyticsError(true);
       }
 
       // Catalogs
-      const catRes = await fetch('/api/admin/catalogs', { headers });
+      const catRes = await authenticatedFetch('/api/admin/catalogs');
       if (catRes.ok) {
         const catData = await catRes.json();
         setCatalogs(catData.catalogs || []);
@@ -251,7 +253,7 @@ export const MerchantAppShell: React.FC = () => {
 
       // Submissions
       const statusParam = submissionStatusFilter ? `&status=${submissionStatusFilter}` : '';
-      const subRes = await fetch(`/api/admin/submissions?page=${submissionsPage}&pageSize=10${statusParam}`, { headers });
+      const subRes = await authenticatedFetch(`/api/admin/submissions?page=${submissionsPage}&pageSize=10${statusParam}`);
       if (subRes.ok) {
         const subData = await subRes.json();
         setSubmissions(subData.submissions || []);
@@ -259,7 +261,7 @@ export const MerchantAppShell: React.FC = () => {
       }
 
       // Sync Health
-      const syncRes = await fetch('/api/admin/sync/health', { headers });
+      const syncRes = await authenticatedFetch('/api/admin/sync/health');
       if (syncRes.ok) {
         setSyncHealth(await syncRes.json());
       }
@@ -268,7 +270,7 @@ export const MerchantAppShell: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [getAuthHeaders, submissionsPage, submissionStatusFilter]);
+  }, [authenticatedFetch, submissionsPage, submissionStatusFilter]);
 
   useEffect(() => {
     loadData();
@@ -277,10 +279,8 @@ export const MerchantAppShell: React.FC = () => {
   const handlePublishToggle = async (cat: CatalogSummary) => {
     const endpoint = cat.status === 'PUBLISHED' ? 'unpublish' : 'publish';
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetch(`/api/admin/catalogs/${cat.id}/${endpoint}`, {
+      const res = await authenticatedFetch(`/api/admin/catalogs/${cat.id}/${endpoint}`, {
         method: 'POST',
-        headers,
       });
       if (!res.ok) {
         const d = await res.json();
@@ -302,27 +302,51 @@ export const MerchantAppShell: React.FC = () => {
   const handleManualSync = async () => {
     setSyncing(true);
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetch('/api/admin/sync/trigger', { method: 'POST', headers });
+      const res = await authenticatedFetch('/api/admin/sync/trigger', { method: 'POST' });
       if (!res.ok) throw new Error('Failed to start sync');
-      showToast('Catalog sync initiated in background.');
-      setTimeout(() => {
-        loadData();
-        setSyncing(false);
-      }, 2500);
+      showToast('Catalog sync initiated. Waiting for completion...');
+
+      // Poll real sync status instead of using a fake timer.
+      // Backend returns sync.status from /api/admin/sync/health.
+      const MAX_POLLS = 12; // ~12 seconds max wait
+      const POLL_INTERVAL = 1000;
+      for (let i = 0; i < MAX_POLLS; i++) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+        try {
+          const healthRes = await authenticatedFetch('/api/admin/sync/health');
+          if (healthRes.ok) {
+            const health = await healthRes.json();
+            setSyncHealth(health);
+            if (health?.sync?.status !== 'IN_PROGRESS') {
+              // Sync completed (or not running) — reload full data
+              await loadData();
+              showToast('Sync complete. Data refreshed.');
+              return;
+            }
+          }
+        } catch {
+          // ignore transient poll errors; keep polling
+        }
+      }
+      // Timed out polling — still reload data to pick up partial results
+      await loadData();
+      showToast('Sync triggered. Data may still be updating.');
     } catch (err: any) {
       showToast(`Sync trigger failed: ${err.message}`);
+    } finally {
       setSyncing(false);
     }
   };
 
   const handlePlanChange = async (targetPlan: string) => {
+    if (billingUnavailable) {
+      showToast('Plan switching is managed through Shopify App Pricing. Please use your Shopify Admin billing settings.');
+      return;
+    }
     setSwitchingPlan(true);
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetch('/api/admin/billing/change-plan', {
+      const res = await authenticatedFetch('/api/admin/billing/change-plan', {
         method: 'POST',
-        headers,
         body: JSON.stringify({ plan: targetPlan }),
       });
       if (!res.ok) {
@@ -341,10 +365,8 @@ export const MerchantAppShell: React.FC = () => {
   const handleReconcileSubmission = async (submissionId: string) => {
     setReconcilingId(submissionId);
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetch(`/api/admin/submissions/${submissionId}/reconcile`, {
+      const res = await authenticatedFetch(`/api/admin/submissions/${submissionId}/reconcile`, {
         method: 'POST',
-        headers,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -381,13 +403,16 @@ export const MerchantAppShell: React.FC = () => {
   const runSearch = useCallback(async (tab: 'COLLECTION' | 'PRODUCT', q: string) => {
     setSearchLoading(true);
     setSearchResults([]);
+    setSearchError(null);
     try {
-      const headers = await getAuthHeaders();
       const endpoint = tab === 'COLLECTION'
         ? `/api/admin/collections/search?q=${encodeURIComponent(q)}&limit=20`
         : `/api/admin/products/search?q=${encodeURIComponent(q)}&limit=20`;
-      const res = await fetch(endpoint, { headers });
-      if (!res.ok) throw new Error('Search failed');
+      const res = await authenticatedFetch(endpoint);
+      if (!res.ok) {
+        setSearchError(`Search failed (${res.status}). Please try again.`);
+        return;
+      }
       const data = await res.json();
       if (tab === 'COLLECTION') {
         setSearchResults((data.collections || []).map((c: any) => ({
@@ -400,12 +425,12 @@ export const MerchantAppShell: React.FC = () => {
           detail: p.price ? `From $${p.price}` : null,
         })));
       }
-    } catch {
-      setSearchResults([]);
+    } catch (err: any) {
+      setSearchError(err.message || 'Network error during search. Please try again.');
     } finally {
       setSearchLoading(false);
     }
-  }, [getAuthHeaders]);
+  }, [authenticatedFetch]);
 
   // Debounced search
   useEffect(() => {
@@ -429,7 +454,6 @@ export const MerchantAppShell: React.FC = () => {
     if (selectedSources.length === 0) { showToast('Select at least one product or collection'); return; }
     setCreatingCatalog(true);
     try {
-      const headers = await getAuthHeaders();
       const payload = {
         name: newCatalogName.trim(),
         priceMode: newPriceMode,
@@ -439,8 +463,9 @@ export const MerchantAppShell: React.FC = () => {
         showInventory: false,
         sources: selectedSources.map((s) => ({ type: s.type, shopifyGid: s.id })),
       };
-      const res = await fetch('/api/admin/catalogs', {
-        method: 'POST', headers, body: JSON.stringify(payload),
+      const res = await authenticatedFetch('/api/admin/catalogs', {
+        method: 'POST',
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const d = await res.json();
@@ -449,7 +474,9 @@ export const MerchantAppShell: React.FC = () => {
       const { catalog: created } = await res.json();
       // Optionally publish right away
       if (newPublish && created?.id) {
-        const pubRes = await fetch(`/api/admin/catalogs/${created.id}/publish`, { method: 'POST', headers });
+        const pubRes = await authenticatedFetch(`/api/admin/catalogs/${created.id}/publish`, {
+          method: 'POST',
+        });
         if (!pubRes.ok) {
           const pd = await pubRes.json();
           showToast(`Catalog created but could not publish: ${pd.error || 'unknown error'}`);
@@ -1151,6 +1178,23 @@ export const MerchantAppShell: React.FC = () => {
                 <p className="cf-section-desc">Switch plan tiers instantly with automated quota adjustment.</p>
 
                 <div className="cf-plans-grid">
+                  {/* Billing availability notice */}
+                  {billingUnavailable && (
+                    <div style={{
+                      gridColumn: '1 / -1',
+                      padding: '1rem 1.25rem',
+                      background: '#fef3c7',
+                      border: '1px solid #fcd34d',
+                      borderRadius: '8px',
+                      marginBottom: '1rem',
+                      fontSize: '0.9rem',
+                      color: '#92400e',
+                    }}>
+                      <strong>⚠️ Plan management is handled by Shopify App Pricing.</strong>
+                      {' '}To upgrade or change your plan, visit your Shopify Admin → Apps → CatalogFlow → Billing.
+                      Plan-switching within this panel is not yet active for this installation.
+                    </div>
+                  )}
                   {billing?.availablePlans.map((plan) => {
                     const isCurrent = billing.currentPlan === plan.id;
                     return (
@@ -1178,6 +1222,15 @@ export const MerchantAppShell: React.FC = () => {
                           {isCurrent ? (
                             <button className="cf-btn cf-btn-secondary" style={{ width: '100%' }} disabled>
                               Current Subscription
+                            </button>
+                          ) : billingUnavailable ? (
+                            <button
+                              className="cf-btn cf-btn-secondary"
+                              style={{ width: '100%' }}
+                              disabled
+                              title="Plan changes are managed through Shopify App Pricing"
+                            >
+                              Manage in Shopify Admin
                             </button>
                           ) : (
                             <button
@@ -1262,10 +1315,16 @@ export const MerchantAppShell: React.FC = () => {
                   {/* Results list */}
                   <div className="cf-resource-list">
                     {searchLoading && <div className="cf-resource-loading"><div className="cf-spinner-sm"></div> Searching…</div>}
-                    {!searchLoading && searchResults.length === 0 && searchQuery.length > 0 && (
+                    {/* Search error state — shown distinctly from empty results */}
+                  {searchError && (
+                    <div className="cf-resource-empty" style={{ color: '#c52707' }}>
+                      ⚠️ {searchError}
+                    </div>
+                  )}
+                  {!searchLoading && !searchError && searchResults.length === 0 && searchQuery.length > 0 && (
                       <div className="cf-resource-empty">No {searchTab === 'COLLECTION' ? 'collections' : 'products'} found for "{searchQuery}"</div>
                     )}
-                    {!searchLoading && searchResults.length === 0 && searchQuery.length === 0 && (
+                    {!searchLoading && !searchError && searchResults.length === 0 && searchQuery.length === 0 && (
                       <div className="cf-resource-empty">Start typing to search your Shopify {searchTab === 'COLLECTION' ? 'collections' : 'products'}.</div>
                     )}
                     {searchResults.map((item) => {

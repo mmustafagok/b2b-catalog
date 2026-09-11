@@ -2,6 +2,11 @@
  * Environment Validation Service (M9.16)
  * Fails fast at startup in production mode if required configuration or secrets are missing.
  * Tolerates development/test placeholders safely.
+ *
+ * Key invariants:
+ *  - HOST / PORT are the server bind address — NOT the public application URL.
+ *  - SHOPIFY_APP_URL is the canonical public HTTPS application URL known to Shopify.
+ *    It must NEVER be derived from HOST; they serve different purposes.
  */
 
 export interface ValidatedEnvironment {
@@ -10,8 +15,44 @@ export interface ValidatedEnvironment {
   encryptionSecret: string;
   shopifyApiKey?: string;
   shopifyApiSecret?: string;
+  /** Public application URL as known to Shopify (must be HTTPS in production). */
   shopifyAppUrl?: string;
+  /** Server bind host (e.g. '0.0.0.0'). Never used as the public app URL. */
+  serverBindHost: string;
   port: number;
+}
+
+/**
+ * Validates that SHOPIFY_APP_URL is safe for production:
+ * - Must be present
+ * - Must be HTTPS
+ * - Must not be localhost / 127.x / 0.0.0.0 / trycloudflare / shopify.dev default
+ */
+export function validateShopifyAppUrl(url: string | undefined): string | null {
+  if (!url) return 'SHOPIFY_APP_URL is missing';
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      return `SHOPIFY_APP_URL must use HTTPS (got: ${parsed.protocol})`;
+    }
+    const host = parsed.hostname.toLowerCase();
+    const unsafeHosts = [
+      'localhost', '127.0.0.1', '0.0.0.0',
+      'trycloudflare.com', 'shopify.dev',
+    ];
+    for (const bad of unsafeHosts) {
+      if (host === bad || host.endsWith(`.${bad}`)) {
+        return `SHOPIFY_APP_URL must not be a development/tunnel URL (got host: ${host})`;
+      }
+    }
+    // Shopify's own default-app-home redirect URL is not a valid production app URL
+    if (url.includes('shopify.dev/apps/default-app-home')) {
+      return 'SHOPIFY_APP_URL must not be the Shopify default-app-home redirect URL';
+    }
+    return null; // valid
+  } catch {
+    return `SHOPIFY_APP_URL is not a valid URL: ${url}`;
+  }
 }
 
 export function validateEnvironment(): ValidatedEnvironment {
@@ -20,7 +61,12 @@ export function validateEnvironment(): ValidatedEnvironment {
   const encryptionSecret = process.env.ENCRYPTION_SECRET || '';
   const shopifyApiKey = process.env.SHOPIFY_API_KEY;
   const shopifyApiSecret = process.env.SHOPIFY_API_SECRET;
-  const shopifyAppUrl = process.env.HOST || process.env.SHOPIFY_APP_URL;
+
+  // SHOPIFY_APP_URL is the canonical public application URL — independent of HOST.
+  // HOST is strictly the network bind address (e.g. 0.0.0.0, 127.0.0.1).
+  // Mixing them caused 0.0.0.0 to be treated as the app URL, breaking Shopify embeds.
+  const shopifyAppUrl = process.env.SHOPIFY_APP_URL;
+  const serverBindHost = process.env.HOST || '0.0.0.0';
   const port = parseInt(process.env.PORT || '8080', 10);
 
   const missingProdVars: string[] = [];
@@ -71,8 +117,11 @@ export function validateEnvironment(): ValidatedEnvironment {
     if (!shopifyApiSecret || shopifyApiSecret.startsWith('your_') || shopifyApiSecret === 'test_secret') {
       missingProdVars.push('SHOPIFY_API_SECRET');
     }
-    if (!shopifyAppUrl) {
-      missingProdVars.push('HOST / SHOPIFY_APP_URL');
+
+    // Validate SHOPIFY_APP_URL as the canonical public URL (NOT HOST)
+    const appUrlError = validateShopifyAppUrl(shopifyAppUrl);
+    if (appUrlError) {
+      missingProdVars.push(`SHOPIFY_APP_URL: ${appUrlError}`);
     }
 
     if (missingProdVars.length > 0) {
@@ -94,6 +143,8 @@ export function validateEnvironment(): ValidatedEnvironment {
     shopifyApiKey,
     shopifyApiSecret,
     shopifyAppUrl,
+    serverBindHost,
     port,
   };
 }
+

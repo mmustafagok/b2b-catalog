@@ -71,6 +71,7 @@ import {
   publicEventLimiter,
 } from './services/security.server.js';
 import { validateEnvironment } from './services/env.server.js';
+import { sanitizeShopifySearchQuery } from './services/shopify-search.server.js';
 import { enqueueJob, JobType } from './services/job-queue.server.js';
 import { runWorkerOnce } from './worker.js';
 import dotenv from 'dotenv';
@@ -710,6 +711,7 @@ export async function adminAuthMiddleware(req: any, res: Response, next: NextFun
 // Used by wizard Step 1 ResourceSelector — merchant-facing, no raw GID entry.
 // ==========================================
 
+
 app.get('/api/admin/products/search', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
     const q = String(req.query.q || '').trim().slice(0, 100);
@@ -732,7 +734,8 @@ app.get('/api/admin/products/search', adminAuthMiddleware, async (req: any, res:
         }
       }
     `;
-    const data: any = await client.request(gqlQuery, { query: q ? `title:*${q}*` : 'status:ACTIVE', first: limit });
+    const safeQ = sanitizeShopifySearchQuery(q);
+    const data: any = await client.request(gqlQuery, { query: safeQ ? `title:*${safeQ}*` : 'status:ACTIVE', first: limit });
     const products = (data?.products?.edges || []).map((e: any) => ({
       id: e.node.id,
       title: e.node.title,
@@ -768,7 +771,8 @@ app.get('/api/admin/collections/search', adminAuthMiddleware, async (req: any, r
         }
       }
     `;
-    const data: any = await client.request(gqlQuery, { query: q ? `title:*${q}*` : '', first: limit });
+    const safeQ = sanitizeShopifySearchQuery(q);
+    const data: any = await client.request(gqlQuery, { query: safeQ ? `title:*${safeQ}*` : '', first: limit });
     const collections = (data?.collections?.edges || []).map((e: any) => ({
       id: e.node.id,
       title: e.node.title,
