@@ -289,10 +289,31 @@ export async function submitBuyerOrder(
       };
     }
 
+    // EXTERNAL COMMIT POINT: If submission already has draftOrderId recorded, adopt it immediately!
+    if (submission.draftOrderId && isShopifyDraftOrderGid(submission.draftOrderId)) {
+      const completedSub = await prisma.orderSubmission.update({
+        where: { id: submission.id },
+        data: {
+          status: 'COMPLETED',
+          processingStartedAt: null,
+          quotaReserved: true,
+        },
+      });
+      return {
+        success: true,
+        submissionId: completedSub.id,
+        referenceNumber: completedSub.draftOrderName || `REF-${completedSub.id.substring(0, 8).toUpperCase()}`,
+        draftOrderId: completedSub.draftOrderId!,
+        draftOrderName: completedSub.draftOrderName || '',
+        subtotalAmount: Number(completedSub.subtotalAmount),
+        currency: completedSub.currency,
+        isDuplicate: true,
+      };
+    }
+
     if (submission.status === 'CREATING') {
       const leaseStartedAt = submission.processingStartedAt;
       if (!leaseStartedAt) {
-        // Missing processingStartedAt for legacy row: fail safe into reconciliation
         needsReconciliation = true;
       } else {
         const elapsedMs = Date.now() - leaseStartedAt.getTime();
@@ -304,34 +325,14 @@ export async function submitBuyerOrder(
             'CONCURRENT_PROCESSING'
           );
         }
-        // Stale attempt: ambiguous failure requiring reconciliation
         needsReconciliation = true;
       }
-    } else if (submission.status === 'REQUIRES_RECONCILIATION') {
+    } else {
+      // For REQUIRES_RECONCILIATION or FAILED:
+      // ALWAYS reconcile against Shopify first using deterministic tag!
+      // If a previous attempt succeeded in creating a Draft Order in Shopify before failing locally,
+      // reconciliation will find and adopt it, strictly preventing duplicate Draft Orders.
       needsReconciliation = true;
-    } else if (submission.status === 'FAILED') {
-      // Prior attempt failed before side effects and released its slot.
-      // Must reconcile billing cycle and atomically reserve a new quota slot before transitioning back to CREATING.
-      const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
-      const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
-      if (!slotReserved) {
-        throw new OrderSubmissionError(
-          'Merchant order submission limit reached for their current plan. Please contact the merchant.',
-          403,
-          'QUOTA_EXCEEDED'
-        );
-      }
-      const activeShop = await getActiveShopById(catalog.shopId);
-      submission = await prisma.orderSubmission.update({
-        where: { id: submission.id },
-        data: {
-          status: 'CREATING',
-          processingStartedAt: new Date(),
-          quotaCycleAnchor: activeShop?.billingCycleAnchor || new Date(),
-          quotaReserved: true,
-          lastError: null,
-        },
-      });
     }
   } else {
     // 5. Concurrency-Safe Quota Slot Reservation via Centralized Entitlement Boundary
@@ -448,18 +449,44 @@ export async function submitBuyerOrder(
         };
       }
 
-      // If edges.length === 0: Draft order not found in search yet!
-      // REQUIRES_RECONCILIATION must NEVER automatically call draftOrderCreate!
-      // Keep status REQUIRES_RECONCILIATION, keep quota slot reserved, throw RECONCILIATION_PENDING!
-      throw new OrderSubmissionError(
-        'We are still confirming the previous order attempt. Please retry shortly.',
-        409,
-        'RECONCILIATION_PENDING'
-      );
+      // If edges.length === 0: Draft order was not found in Shopify by correlation tag.
+      if (submission.status === 'FAILED') {
+        // Confirmed: Shopify does not have an existing Draft Order for this failed attempt.
+        // Re-reserve quota slot atomically and transition to CREATING to proceed.
+        const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
+        const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
+        if (!slotReserved) {
+          throw new OrderSubmissionError(
+            'Merchant order submission limit reached for their current plan. Please contact the merchant.',
+            403,
+            'QUOTA_EXCEEDED'
+          );
+        }
+        const activeShop = await getActiveShopById(catalog.shopId);
+        submission = await prisma.orderSubmission.update({
+          where: { id: submission.id },
+          data: {
+            status: 'CREATING',
+            processingStartedAt: new Date(),
+            quotaCycleAnchor: activeShop?.billingCycleAnchor || new Date(),
+            quotaReserved: true,
+            lastError: null,
+          },
+        });
+      } else {
+        // REQUIRES_RECONCILIATION or CREATING must NEVER automatically call draftOrderCreate!
+        // Keep status REQUIRES_RECONCILIATION, keep quota slot reserved, throw RECONCILIATION_PENDING!
+        throw new OrderSubmissionError(
+          'We are still confirming the previous order attempt. Please retry shortly.',
+          409,
+          'RECONCILIATION_PENDING'
+        );
+      }
     } catch (reconcileSearchErr: any) {
       if (reconcileSearchErr instanceof OrderSubmissionError) {
         throw reconcileSearchErr;
       }
+      console.error('[ReconcileSearchErr]', reconcileSearchErr);
       // If query fails, keep attempt in REQUIRES_RECONCILIATION and fail closed
       throw new OrderSubmissionError(
         'Unable to verify prior submission state with Shopify. Please retry in a moment.',
@@ -857,16 +884,19 @@ export async function submitBuyerOrder(
   const createdDraft = payload?.draftOrder;
   const rawDraftId = createdDraft?.id;
   const isDraftIdValid = isShopifyDraftOrderGid(rawDraftId);
+  const resultTopLevelKeys = draftRes && typeof draftRes === 'object' ? Object.keys(draftRes) : [];
 
   const structuralDiagnostics = {
     requestId: correlationId,
+    stage: 'DRAFT_ORDER_RESPONSE_RECEIVED',
     hasResult: Boolean(draftRes),
+    resultTopLevelKeys,
+    hasData: Boolean(draftRes?.data || draftRes?.draftOrderCreate),
     hasDraftOrderCreate: Boolean(payload),
     hasDraftOrder: Boolean(createdDraft),
     draftOrderIdPresent: Boolean(rawDraftId),
     draftOrderIdValid: isDraftIdValid,
     userErrorCount: userErrors.length,
-    topLevelErrorCount: 0,
   };
 
   console.info('[DraftOrder:Diagnostic]', JSON.stringify(structuralDiagnostics));
@@ -951,17 +981,27 @@ export async function submitBuyerOrder(
     );
   }
 
-  // 7. If Shopify returns: draftOrder != null, valid DraftOrder GID, userErrors = []
-  // MUST be treated as success!
+  // 7. EXTERNAL COMMIT POINT:
+  // If Shopify returns: draftOrder != null, valid DraftOrder GID, userErrors = []
+  // The Draft Order definitely exists. MUST be treated as success!
+  // From this point onward, NEVER classify any error as DRAFT_ORDER_CREATE_FAILED.
   tracker.transition('DRAFT_ORDER_CREATE_COMPLETED');
 
   const draftMoney = createdDraft.totalPriceSet?.shopMoney ?? createdDraft.subtotalPriceSet?.shopMoney;
-  const draftSubtotal = draftMoney?.amount ? new Prisma.Decimal(draftMoney.amount) : (createdDraft.totalPrice ? new Prisma.Decimal(createdDraft.totalPrice) : subtotalDecimal);
+  let draftSubtotal = subtotalDecimal;
+  try {
+    const rawAmount = draftMoney?.amount ?? createdDraft.totalPrice;
+    if (rawAmount !== undefined && rawAmount !== null && String(rawAmount).trim() !== '') {
+      draftSubtotal = new Prisma.Decimal(String(rawAmount));
+    }
+  } catch {
+    draftSubtotal = subtotalDecimal;
+  }
   const currency = catalog.shop.currency || draftMoney?.currencyCode || createdDraft.currencyCode || 'USD';
   const subtotalNumber = parseFloat(draftSubtotal.toFixed(2));
 
   // 9. Mark Submission COMPLETED
-  // If local DB fails here, mark status as REQUIRES_RECONCILIATION so retry recovers draft order without duplicate creation
+  // If local DB fails here, mark status as REQUIRES_RECONCILIATION so retry adopts draft order without duplicate creation
   try {
     await prisma.orderSubmission.update({
       where: { id: submission.id },
@@ -972,13 +1012,16 @@ export async function submitBuyerOrder(
         correlationRef: correlationTag,
         itemCount: totalItems,
         lineCount: validated.lines.length,
-        subtotalAmount: subtotalDecimal,
+        subtotalAmount: draftSubtotal,
         currency,
         processingStartedAt: null,
         quotaReserved: true,
       },
     });
   } catch (postMutationDbErr: any) {
+    // EXTERNAL COMMIT POINT GUARANTEE:
+    // Draft order exists in Shopify. We MUST NEVER classify this as DRAFT_ORDER_CREATE_FAILED.
+    // Preserve Shopify Draft Order ID and mark as REQUIRES_RECONCILIATION.
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
@@ -987,11 +1030,19 @@ export async function submitBuyerOrder(
         draftOrderName: createdDraft.name || null,
         correlationRef: correlationTag,
         processingStartedAt: null,
+        quotaReserved: true,
+        lastError: 'Local database update failed after Shopify Draft Order creation',
       },
     }).catch(() => {});
-    throw postMutationDbErr;
+
+    throw new OrderSubmissionError(
+      `Your draft order was created in Shopify with reference ${createdDraft.name || 'pending'}. Please refresh to view order status.`,
+      502,
+      'SHOPIFY_API_ERROR'
+    );
   }
 
+  // Record analytics asynchronously without risking order confirmation failure
   await recordAnalyticsEvent(
     catalog.shopId,
     ANALYTICS_EVENTS.DRAFT_ORDER_CREATED,
@@ -1004,7 +1055,9 @@ export async function submitBuyerOrder(
       currency,
     },
     `draft_order_created:${submission.id}`
-  );
+  ).catch((analyticsErr: any) => {
+    console.warn('[Analytics:DraftOrderCreated] Non-fatal error recording analytics event:', analyticsErr?.message);
+  });
 
   tracker.transition('SUBMISSION_COMPLETED');
 

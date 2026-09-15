@@ -553,4 +553,285 @@ describe('Draft Order Tag Hardening & Shopify 40-Character Limit', () => {
     expect(res.status).toBe(201);
     expect(res.body.draftOrderId).toBe('gid://shopify/DraftOrder/nested-123');
   });
+
+  // 13. External Commit Point: Shopify succeeds + valid DraftOrder ID -> success with money parsing
+  it('13. external commit point: Shopify succeeds with valid DraftOrder ID and parses money correctly', async () => {
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        return {
+          draftOrderCreate: {
+            draftOrder: {
+              id: 'gid://shopify/DraftOrder/999111',
+              name: '#D-COMMIT-POINT',
+              status: 'OPEN',
+              subtotalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+              totalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+            },
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const res = await request(app)
+      .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'commit-point-success-key')
+      .send({
+        dataVersion: publishedCatalog.dataVersion,
+        buyer: { businessName: 'Commit Point Buyer', email: 'commit@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.draftOrderId).toBe('gid://shopify/DraftOrder/999111');
+    expect(res.body.referenceNumber).toBe('#D-COMMIT-POINT');
+    expect(res.body.subtotalAmount).toBe(350);
+
+    const submission = await prisma.orderSubmission.findFirst({
+      where: { draftOrderId: 'gid://shopify/DraftOrder/999111' },
+    });
+    expect(submission?.status).toBe('COMPLETED');
+    expect(submission?.quotaReserved).toBe(true);
+  });
+
+  // 14. External Commit Point: Local DB update failure marks REQUIRES_RECONCILIATION and preserves draftOrderId
+  it('14. preserves draftOrderId and marks REQUIRES_RECONCILIATION if local DB update fails after Shopify creation', async () => {
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        return {
+          draftOrderCreate: {
+            draftOrder: {
+              id: 'gid://shopify/DraftOrder/db-fail-999',
+              name: '#D-DB-FAIL',
+              status: 'OPEN',
+              subtotalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+              totalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+            },
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const originalUpdate = (prisma.orderSubmission as any).update;
+    let failCompletedUpdate = true;
+    (prisma.orderSubmission as any).update = function (...args: any[]) {
+      if (args[0]?.data?.status === 'COMPLETED' && failCompletedUpdate) {
+        failCompletedUpdate = false;
+        return Promise.reject(new Error('Simulated transient DB failure during COMPLETED update'));
+      }
+      return originalUpdate.apply(this, args);
+    };
+
+    try {
+      const res = await request(app)
+        .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+        .set('Idempotency-Key', 'db-fail-reconcile-key')
+        .send({
+          dataVersion: publishedCatalog.dataVersion,
+          buyer: { businessName: 'DB Fail Buyer', email: 'dbfail@buyer.com' },
+          lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+        });
+
+      // 502 SHOPIFY_API_ERROR requiring retry/reconciliation rather than opaque DRAFT_ORDER_CREATE_FAILED
+      expect(res.status).toBe(502);
+      expect(res.body.code).toBe('SHOPIFY_API_ERROR');
+      expect(res.body.message).toContain('#D-DB-FAIL');
+
+      // Quota preserved, draftOrderId persisted, status REQUIRES_RECONCILIATION
+      const submission = await prisma.orderSubmission.findFirst({
+        where: { draftOrderId: 'gid://shopify/DraftOrder/db-fail-999' },
+      });
+      expect(submission?.status).toBe('REQUIRES_RECONCILIATION');
+      expect(submission?.quotaReserved).toBe(true);
+    } finally {
+      (prisma.orderSubmission as any).update = originalUpdate;
+    }
+  });
+
+  // 15. Buyer retry on failed/reconciling submission adopts existing Draft Order without duplicate creation
+  it('15. buyer retry adopts existing Shopify Draft Order and NEVER calls draftOrderCreate again', async () => {
+    let draftOrderCreateCalls = 0;
+    const existingDraft = {
+      id: 'gid://shopify/DraftOrder/existing-12345',
+      name: '#D-EXISTING-ADOPTED',
+      totalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+    };
+
+    const clientSpy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string, vars: any) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('findDraftOrderByTag')) {
+        return {
+          draftOrders: {
+            edges: [
+              {
+                node: existingDraft,
+              },
+            ],
+          },
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        draftOrderCreateCalls++;
+        return {
+          draftOrderCreate: {
+            draftOrder: {
+              id: 'gid://shopify/DraftOrder/duplicate-SHOULD-NOT-HAPPEN',
+              name: '#D-DUPLICATE',
+            },
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const idempotencyKey = 'retry-adopt-key';
+    const tag = buildDraftOrderIdempotencyTag(idempotencyKey);
+
+    // Seed a submission in FAILED or REQUIRES_RECONCILIATION state
+    const keyHash = crypto
+      .createHash('sha256')
+      .update(`${publishedCatalog.id}:${idempotencyKey}`)
+      .digest('hex');
+
+    await prisma.orderSubmission.create({
+      data: {
+        shopId: shop.id,
+        catalogId: publishedCatalog.id,
+        idempotencyKeyHash: keyHash,
+        status: 'FAILED',
+        correlationRef: tag,
+        quotaReserved: true,
+        quotaCycleAnchor: new Date(),
+        currency: 'USD',
+      },
+    });
+
+    try {
+      const res = await request(app)
+        .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+        .set('Idempotency-Key', idempotencyKey)
+        .send({
+          dataVersion: publishedCatalog.dataVersion,
+          buyer: { businessName: 'Retry Buyer', email: 'retry@buyer.com' },
+          lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+        });
+
+      if (res.status !== 201) {
+        console.error('TEST 15 FAILURE BODY:', res.status, res.body);
+      }
+
+      // Successfully adopts existing order without error
+      expect(res.status).toBe(201);
+      expect(res.body.draftOrderId).toBe('gid://shopify/DraftOrder/existing-12345');
+      expect(res.body.referenceNumber).toBe('#D-EXISTING-ADOPTED');
+      expect(res.body.isDuplicate).toBe(true);
+
+      // CRUCIAL: draftOrderCreate was NEVER called!
+      expect(draftOrderCreateCalls).toBe(0);
+
+      const submissionRecord = await prisma.orderSubmission.findFirst({
+        where: { idempotencyKeyHash: keyHash },
+      });
+      expect(submissionRecord?.status).toBe('COMPLETED');
+      expect(submissionRecord?.draftOrderId).toBe('gid://shopify/DraftOrder/existing-12345');
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
+  // 16. Top-level GraphQL errors in response alongside created draft order does NOT throw
+  it('16. adopts created Draft Order even if response includes top-level GraphQL errors/warnings', async () => {
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        // Simulates Shopify returning data with created draft order alongside top-level warnings/errors
+        return {
+          draftOrderCreate: {
+            draftOrder: {
+              id: 'gid://shopify/DraftOrder/with-warnings-777',
+              name: '#D-WARNINGS-OK',
+              status: 'OPEN',
+              subtotalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+              totalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+            },
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const res = await request(app)
+      .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'warnings-response-key')
+      .send({
+        dataVersion: publishedCatalog.dataVersion,
+        buyer: { businessName: 'Warning Buyer', email: 'warning@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.draftOrderId).toBe('gid://shopify/DraftOrder/with-warnings-777');
+    expect(res.body.referenceNumber).toBe('#D-WARNINGS-OK');
+
+    vi.restoreAllMocks();
+  });
 });

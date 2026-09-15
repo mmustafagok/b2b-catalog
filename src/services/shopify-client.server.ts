@@ -194,8 +194,19 @@ export class ShopifyAdminClient {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             continue;
           }
+
+          // If the mutation payload actually created a draftOrder with a valid ID,
+          // do NOT throw and discard the created order!
+          const createdDraft = json.data?.draftOrderCreate?.draftOrder;
+          if (createdDraft && createdDraft.id) {
+            console.warn('[ShopifyAdminClient] GraphQL response contained top-level errors/warnings but Draft Order was created:', json.errors);
+            return json.data as T;
+          }
+
           const errorMsg = json.errors.map((e: any) => e.message).join('; ');
-          throw new ShopifyGraphQLError(`Shopify GraphQL Error: ${errorMsg}`, json.errors, undefined, response.status || 400);
+          const graphErr = new ShopifyGraphQLError(`Shopify GraphQL Error: ${errorMsg}`, json.errors, undefined, response.status || 400);
+          (graphErr as any).data = json.data;
+          throw graphErr;
         }
 
         // Check for mutation userErrors if applicable
