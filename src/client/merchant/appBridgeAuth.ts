@@ -1,6 +1,19 @@
 /**
- * Client authentication helpers for embedded Shopify Admin App Bridge.
+ * Dynamically loads Shopify App Bridge CDN script for embedded merchant routes if not already loaded.
+ * Public buyer routes (/c/:token) must NOT invoke this.
  */
+export function ensureAppBridgeLoaded(): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if ((window as any).shopify) return;
+
+  const hasScript = document.querySelector('script[src*="app-bridge.js"]');
+  if (!hasScript) {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.shopify.com/shopifycloud/app-bridge.js';
+    script.async = true;
+    document.head.appendChild(script);
+  }
+}
 
 export interface AppBridgeTokenOptions {
   maxPolls?: number;

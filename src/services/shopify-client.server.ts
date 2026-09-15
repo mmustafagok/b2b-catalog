@@ -5,29 +5,67 @@ import { getValidOfflineAccessToken, ShopifyAuthRequiredError } from './shopify-
 export { ShopifyAuthRequiredError };
 export const SHOPIFY_API_VERSION = '2026-07';
 
+/**
+ * Classification of Shopify mutation result.
+ *
+ * DEFINITIVE_CLIENT_ERROR:
+ *   Shopify rejected the request before any side effects.
+ *   Examples: schema validation failure (undefined fields, wrong types),
+ *   HTTP 400/401/403/422, mutation userErrors[].
+ *   Safe to: mark FAILED, release quota, never retry draftOrderCreate.
+ *
+ * AMBIGUOUS_EXECUTION:
+ *   The request was dispatched but the outcome is uncertain.
+ *   Examples: HTTP 200 with top-level errors[] but data is null,
+ *   network timeout, socket reset after request dispatch.
+ *   Safe to: mark REQUIRES_RECONCILIATION, retain quota, query Shopify by tag.
+ *   NEVER: mark FAILED, release quota, retry draftOrderCreate blindly.
+ *
+ * CONFIRMED_SUCCESS:
+ *   Shopify returned a valid draftOrder.id and empty userErrors.
+ *   Safe to: persist and finalize.
+ */
+export type ShopifyMutationClassification =
+  | 'DEFINITIVE_CLIENT_ERROR'
+  | 'AMBIGUOUS_EXECUTION'
+  | 'CONFIRMED_SUCCESS';
+
 export class ShopifyGraphQLError extends Error {
+  /**
+   * When true, the error represents an ambiguous execution result —
+   * Shopify may have created the Draft Order before the error occurred.
+   * Callers MUST treat this as REQUIRES_RECONCILIATION, not FAILED.
+   */
+  public ambiguous: boolean;
+
   constructor(
     message: string,
     public errors?: any[],
     public userErrors?: any[],
-    public statusCode?: number
+    public statusCode?: number,
+    ambiguous: boolean = false
   ) {
     super(message);
     this.name = 'ShopifyGraphQLError';
+    this.ambiguous = ambiguous;
   }
 
   /**
-   * Returns true if Shopify definitively rejected the request due to client/validation errors
-   * (e.g. invalid query syntax, undefined fields, bad variables, userErrors, HTTP 400/401/403/422).
-   * In these cases, no Shopify draft order was created and quota should be rolled back.
+   * Returns true ONLY if Shopify definitively rejected the request due to
+   * client/validation errors that are provably pre-execution:
+   * - mutation userErrors[] (Shopify executed mutation but rejected input semantics)
+   * - HTTP 4xx client errors (400, 401, 403, 422 — schema/auth rejection before execution)
+   *
+   * Critically: Top-level GraphQL errors[] on HTTP 200 are NOT definitive.
+   * They may indicate post-execution field selection failures where the mutation
+   * already committed (e.g. unknown field in selection set after object creation).
    */
   public isDefinitiveClientError(): boolean {
     if (this.userErrors && this.userErrors.length > 0) return true;
+    // HTTP 4xx (except 429 throttle) = definitive client rejection
     if (this.statusCode && this.statusCode >= 400 && this.statusCode < 500 && this.statusCode !== 429) return true;
-    if (this.errors && this.errors.length > 0) {
-      // Top level GraphQL errors like undefinedField, variableTypeMismatch, syntax errors
-      return true;
-    }
+    // If this was marked as ambiguous, it is NOT a definitive error
+    if (this.ambiguous) return false;
     return false;
   }
 
@@ -106,6 +144,13 @@ export class ShopifyAdminClient {
   /**
    * Executes a GraphQL query or mutation against Shopify Admin API 2026-07 with throttling awareness
    * and expiring token rotation awareness.
+   *
+   * Error classification contract:
+   * - HTTP 4xx or userErrors → ShopifyGraphQLError with ambiguous=false (definitive)
+   * - HTTP 200 + top-level errors[] with no draftOrder.id → ShopifyGraphQLError with ambiguous=true
+   * - HTTP 200 + top-level errors[] WITH draftOrder.id present → return data (adopt the order)
+   * - Timeout / network abort → ShopifyGraphQLError(504) with ambiguous=true
+   * - HTTP 5xx → ShopifyGraphQLError(5xx) with ambiguous=true
    */
   public async request<T = any>(
     query: string,
@@ -174,11 +219,14 @@ export class ShopifyAdminClient {
               this.shopDomain
             );
           }
+          // HTTP 5xx = ambiguous (server-side failure after potential side effects)
+          const isServerError = response.status >= 500;
           throw new ShopifyGraphQLError(
             `Shopify Admin API returned HTTP ${response.status}: ${errorText}`,
             undefined,
             undefined,
-            response.status
+            response.status,
+            isServerError // ambiguous if server error
           );
         }
 
@@ -195,16 +243,34 @@ export class ShopifyAdminClient {
             continue;
           }
 
-          // If the mutation payload actually created a draftOrder with a valid ID,
-          // do NOT throw and discard the created order!
+          // CRITICAL: If the mutation payload actually created a draftOrder with a valid ID,
+          // do NOT throw — the order exists. Adopt it immediately.
           const createdDraft = json.data?.draftOrderCreate?.draftOrder;
           if (createdDraft && createdDraft.id) {
-            console.warn('[ShopifyAdminClient] GraphQL response contained top-level errors/warnings but Draft Order was created:', json.errors);
+            // Log warning (no buyer PII) for diagnostics — not an error
+            const sanitizedErrors = json.errors.map((e: any) => ({
+              message: e.message,
+              extensions: e.extensions ? { code: e.extensions.code } : undefined,
+            }));
+            console.warn(
+              '[ShopifyAdminClient] Top-level GraphQL errors present but draftOrder.id confirmed — adopting created order.',
+              JSON.stringify({ errorCount: json.errors.length, sanitizedErrors })
+            );
             return json.data as T;
           }
 
+          // HTTP 200 + top-level errors + no draftOrder = AMBIGUOUS execution.
+          // The mutation may have executed (created the order) before the field resolution failed.
+          // Mark as ambiguous so callers route to REQUIRES_RECONCILIATION.
           const errorMsg = json.errors.map((e: any) => e.message).join('; ');
-          const graphErr = new ShopifyGraphQLError(`Shopify GraphQL Error: ${errorMsg}`, json.errors, undefined, response.status || 400);
+          const graphErr = new ShopifyGraphQLError(
+            `Shopify GraphQL Error: ${errorMsg}`,
+            json.errors,
+            undefined,
+            response.status || 200,
+            true // ambiguous=true: do NOT classify as definitive failure
+          );
+          // Attach any partial data so callers can inspect if needed
           (graphErr as any).data = json.data;
           throw graphErr;
         }
@@ -218,7 +284,14 @@ export class ShopifyAdminClient {
               const fieldStr = Array.isArray(e.field) ? e.field.join('.') : e.field ? String(e.field) : '';
               return fieldStr ? `[${fieldStr}] ${e.message}` : e.message;
             }).join('; ');
-            throw new ShopifyGraphQLError(`Shopify UserError: ${userErrorMsg}`, undefined, mutationPayload.userErrors, 422);
+            // userErrors are DEFINITIVE: Shopify rejected the mutation semantics
+            throw new ShopifyGraphQLError(
+              `Shopify UserError: ${userErrorMsg}`,
+              undefined,
+              mutationPayload.userErrors,
+              422,
+              false // ambiguous=false: definitive rejection
+            );
           }
         }
 
@@ -232,20 +305,24 @@ export class ShopifyAdminClient {
 
         const isTimeout = err?.name === 'AbortError' || controller.signal.aborted;
         if (isTimeout) {
+          // Timeout = ambiguous: request was dispatched, may have reached Shopify
           throw new ShopifyGraphQLError(
             `Shopify Admin API network request timed out after ${timeoutMs}ms on ${this.shopDomain}`,
             undefined,
             undefined,
-            504
+            504,
+            true // ambiguous=true
           );
         }
 
         if (attempt >= maxRetries) {
+          // Network failure after max retries = ambiguous
           throw new ShopifyGraphQLError(
             `Shopify Admin GraphQL connection failed: ${err.message}`,
             undefined,
             undefined,
-            500
+            500,
+            true // ambiguous=true
           );
         }
         // Brief backoff before retry on network error
@@ -253,7 +330,7 @@ export class ShopifyAdminClient {
       }
     }
 
-    throw new ShopifyGraphQLError('Maximum retries exceeded');
+    throw new ShopifyGraphQLError('Maximum retries exceeded', undefined, undefined, 500, true);
   }
 }
 

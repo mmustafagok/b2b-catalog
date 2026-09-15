@@ -21,12 +21,23 @@ Target API Version: 2026-07
 | **M10.9** | Live Revalidation & Stale Price Shield | **PASS** | Pre-mutation checksum and snapshot revalidation catches price changes, discount updates, or deleted variants. Safely returns `409 CATALOG_CHANGED`. |
 | **M10.10** | Idempotency & Concurrency Machine | **PASS** | Two-phase state machine with DB unique constraint on `idempotencyKeyHash`. Concurrent submissions share a single Draft Order lease without duplication. |
 | **M10.11** | Quota Enforcement | **PASS** | Atomic slot reservation and cycle reconciliation. Blocked requests fail cleanly with `QUOTA_EXCEEDED` before any Shopify mutation. |
-| **M10.12** | Shopify App Pricing Setup | **PASS** | Starter ($14.99/mo, 50 orders), Growth ($29.99/mo, 250 orders), Scale ($49.99/mo, 1000 orders) with 7-day trials. Zero usage overages. |
+| **M10.12** | Shopify App Pricing Setup | **PENDING_SHOPIFY** | Plan definitions configured (Starter, Growth, Scale). Billing engine operates in `LOCAL_MIRROR_PENDING_SHOPIFY` mode pending live Shopify App Pricing contract activation pass. |
 | **M10.13** | Billing Entitlement Sync | **PASS** | `BillingProvider` acts as single authority. `Shop.plan` functions as synchronized mirror. Direct client DB plan mutations strictly blocked in production. |
 | **M10.14** | Downgrade Safety | **PASS** | Downgrading validates active catalog and variant counts against target plan limits. Does not destructively delete merchant data. |
 | **M10.15** | Commercial Funnel Analytics | **PASS** | Tracks `catalog_viewed`, `order_summary_started`, `order_submitted`, and North Star `draft_order_created`. Non-blocking DB recording. |
 | **M10.16** | Privacy & Minimal PII Retention | **PASS** | Zero buyer PII (email, notes, PO) persisted to database on successful submission. Data flows straight to Shopify Draft Order. Compliance webhooks supported. |
+| **M10.16b** | Protected Customer Data (PCD) | **PARTNER_DASHBOARD** | CatalogFlow passes buyer email to Shopify Draft Orders. As a public Shopify app, Partner Dashboard requires declaring Protected Customer Data access for customer email. Runtime safely handles ACCESS_DENIED / redacted responses without duplicate creation. |
 | **M10.17** | Uninstall / Reinstall Lifecycle | **PASS** | Uninstall deactivates shop, disables buyer links, and drops queued jobs. Reinstall reactivates shop, refreshes tokens, and reconciles state. |
-| **M10.18** | Deployment Architecture | **PASS** | Railway Web + Railway Worker daemon + PostgreSQL. Configured `app.set('trust proxy', 1)` for safe IP resolution and hashed bucket rate limiting. |
-| **M10.19** | App Store Review Self-Audit | **PASS** | Full self-audit against Shopify App Store guidelines: 0 Failures, 0 Needs Review. |
-| **M10.20** | Quality & Verification Gates | **PASS** | `npm test` 143/143 tests passing. `npm run typecheck` 0 errors. `npm run build` clean. `npx prisma validate` & migrations up to date. |
+| **M10.18** | Deployment Architecture | **PASS** | Hostless Web + Worker daemon + PostgreSQL. Configured `app.set('trust proxy', 1)` for safe IP resolution and hashed bucket rate limiting. |
+| **M10.19** | App Store Review Self-Audit | **READY_FOR_E2E** | Code complete for live testing. Scopes, webhooks, compliance routes, and UI conform to Shopify requirements. |
+| **M10.20** | Quality & Verification Gates | **PASS** | All automated tests passing. `npm run typecheck` 0 errors. `npm run build` clean. `npm run validate:shopify:prod` 15/15 PASS. |
+
+---
+
+## Protected Customer Data (PCD) Requirements
+When publishing CatalogFlow as a public Shopify App:
+1. **Partner Dashboard Configuration**: Navigate to **App setup** $\rightarrow$ **Protected customer data**.
+2. **Access Declaration**: Request access to Customer data specifically for the **Customer email** protected field, required by `draftOrderCreate` when attaching buyer contact email.
+3. **Data Protection & Privacy**: CatalogFlow implements zero-PII persistence for completed submissions (email is forwarded directly to the Shopify Draft Order payload and not stored long-term in the application database).
+4. **Runtime Resilience**: In case of `ACCESS_DENIED` or field-level redaction, CatalogFlow's GraphQL client detects the permission error definitively (or triggers safe reconciliation if ambiguous), releasing quota reservations without creating duplicate draft orders.
+

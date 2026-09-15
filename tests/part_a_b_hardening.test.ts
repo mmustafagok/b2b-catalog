@@ -329,6 +329,7 @@ describe('Part A & Part B Hardening Regression Suite', () => {
       const cat = await createCatalog(shopA.id, {
         name: 'Snowboard Catalog',
         priceMode: PriceMode.SHOPIFY_PRICE,
+        showInventory: true,
         sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid }],
       });
       const published = await publishCatalog(shopA.id, cat.id);
@@ -338,7 +339,7 @@ describe('Part A & Part B Hardening Regression Suite', () => {
 
       const variants = payload!.products[0].variants;
 
-      // 1. Tracked variant with DENY policy
+      // 1. Tracked variant with DENY policy (showInventory = true exposes effectiveAvailable)
       const v1 = variants.find((v) => v.shopifyVariantId === trackedVariant);
       expect(v1?.effectiveAvailable).toBe(18);
       expect(v1?.availableForSale).toBe(true);
@@ -356,6 +357,21 @@ describe('Part A & Part B Hardening Regression Suite', () => {
       expect(v3?.effectiveAvailable).toBeNull();
       expect(v3?.availableForSale).toBe(true);
       expect(v3?.inventoryPolicy).toBe('CONTINUE');
+
+      // 4. Privacy: When showInventory is false, effectiveAvailable and inventoryQuantity MUST be undefined
+      await prisma.catalog.update({ where: { id: published.id }, data: { status: 'DRAFT' } });
+      const hiddenCat = await createCatalog(shopA.id, {
+        name: 'Hidden Inventory Catalog',
+        priceMode: PriceMode.SHOPIFY_PRICE,
+        showInventory: false,
+        sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid }],
+      });
+      const hiddenPublished = await publishCatalog(shopA.id, hiddenCat.id);
+      const hiddenPayload = await getPublicCatalogPayload(hiddenPublished.publicToken);
+      const hiddenV1 = hiddenPayload!.products[0].variants.find((v) => v.shopifyVariantId === trackedVariant);
+      expect(hiddenV1?.effectiveAvailable).toBeUndefined();
+      expect(hiddenV1?.inventoryQuantity).toBeUndefined();
+      expect(hiddenV1?.availableForSale).toBe(true);
     });
 
     it('B5: Submit-time revalidation rejects order when requested quantity > live available inventory with HTTP 409 INVENTORY_CHANGED', async () => {

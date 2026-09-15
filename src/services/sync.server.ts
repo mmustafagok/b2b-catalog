@@ -176,8 +176,19 @@ export async function deleteCollectionSnapshot(shopId: string, rawCollectionId: 
 
 /**
  * Ingests or updates a product and its complete variant set into snapshot tables.
+ *
+ * IMPORTANT: Shopify REST webhooks cap variant payloads at 100 items.
+ * For products with >=100 variants in the webhook payload, we MUST NOT prune
+ * variants based on the possibly-truncated payload — doing so would delete
+ * valid variants for large products.
+ * Instead, we accept an optional `refetchFn` (used in production for GraphQL
+ * re-fetch) to get the authoritative variant list before any destructive reconciliation.
  */
-export async function syncProductSnapshot(shopId: string, product: ShopifyWebhookProduct) {
+export async function syncProductSnapshot(
+  shopId: string,
+  product: ShopifyWebhookProduct,
+  refetchFn?: (shopId: string, productGid: string) => Promise<ShopifyWebhookProductVariant[] | null>
+) {
   const shopifyProductId = normalizeShopifyGid('Product', product.id);
   const imageUrl = product.image?.src || (product.images && product.images[0]?.src) || null;
 
@@ -212,18 +223,42 @@ export async function syncProductSnapshot(shopId: string, product: ShopifyWebhoo
       },
     });
 
-    // Prune variants not present in the complete incoming variant list
-    const incomingVariants = product.variants || [];
+    // Determine authoritative variant list.
+    // Shopify REST webhooks cap at 100 variants. If the payload has exactly 100 variants,
+    // it may be truncated. We MUST NOT destructively prune based on a truncated list.
+    // When a refetchFn is provided and variants >= 100, use it to get the full list.
+    let incomingVariants = product.variants || [];
+    const payloadMayBeTruncated = incomingVariants.length >= 100;
+
+    if (payloadMayBeTruncated && refetchFn) {
+      try {
+        const refetched = await refetchFn(shopId, shopifyProductId);
+        if (refetched && refetched.length > 0) {
+          incomingVariants = refetched;
+        }
+        // If refetch returns null/empty, keep the webhook payload (best-effort)
+      } catch {
+        // Refetch failed — do NOT prune variants at all; skip the deleteMany below
+        // by keeping the payloadMayBeTruncated flag true and incomingVariants as-is
+      }
+    }
+
     const incomingVariantGids = incomingVariants.map((v) => normalizeShopifyGid('ProductVariant', v.id));
-    await tx.variantSnapshot.deleteMany({
-      where: {
-        shopId,
-        shopifyProductId,
-        shopifyVariantId: {
-          notIn: incomingVariantGids,
+
+    // Only prune variants if we have an authoritative (non-truncated) list.
+    // When the payload is possibly truncated and no refetch was done, skip pruning
+    // to avoid deleting valid variants from large products.
+    if (!payloadMayBeTruncated || incomingVariants.length !== (product.variants || []).length) {
+      await tx.variantSnapshot.deleteMany({
+        where: {
+          shopId,
+          shopifyProductId,
+          shopifyVariantId: {
+            notIn: incomingVariantGids,
+          },
         },
-      },
-    });
+      });
+    }
 
     // Upsert variant snapshots, strictly preserving selectedOptions
     for (const v of incomingVariants) {
@@ -614,6 +649,139 @@ export async function reconcileSourcedCollectionsForShop(
       // Non-blocking collection refresh
     }
   }
+}
+
+/**
+ * Reconciles inventory level update from webhook or worker.
+ * Queries Shopify GraphQL for authoritative variant availability and updates local snapshot transactionally.
+ */
+export async function syncInventoryLevelUpdate(
+  shopId: string,
+  payload: { inventoryItemId: string; available?: number; locationId?: string },
+  customClient?: ShopifyAdminClient
+) {
+  if (!shopId || !payload?.inventoryItemId) {
+    return null;
+  }
+
+  const shop = await prisma.shop.findUnique({
+    where: { id: shopId },
+  });
+  if (!shop || shop.uninstalledAt !== null) {
+    return null;
+  }
+
+  const client = customClient || createShopifyClient(shop);
+  const inventoryItemGid = normalizeShopifyGid('InventoryItem' as any, payload.inventoryItemId);
+
+  const query = `
+    query getInventoryItemVariants($id: ID!) {
+      inventoryItem(id: $id) {
+        id
+        tracked
+        variants(first: 10) {
+          nodes {
+            id
+            title
+            availableForSale
+            inventoryQuantity
+            inventoryPolicy
+            product {
+              id
+              status
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  let variantData: any = null;
+  let tracked: boolean | undefined = undefined;
+
+  try {
+    const res: any = await client.request(query, { id: inventoryItemGid });
+    if (res?.inventoryItem) {
+      tracked = res.inventoryItem.tracked;
+      const variantNodes = res.inventoryItem.variants?.nodes || (res.inventoryItem.variant ? [res.inventoryItem.variant] : []);
+      variantData = variantNodes[0] || null;
+    }
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    if (msg.includes('Not Found') || msg.includes('does not exist') || msg.includes('INVALID')) {
+      return null;
+    }
+    throw err;
+  }
+
+  // If Shopify returned no variant, variant was deleted or unlinked on Shopify — safe no-op
+  if (!variantData || !variantData.id) {
+    return null;
+  }
+
+  const shopifyVariantId = variantData.id;
+  const shopifyProductId = variantData.product?.id;
+  const authoritativeQty = typeof variantData.inventoryQuantity === 'number'
+    ? variantData.inventoryQuantity
+    : (typeof payload.available === 'number' ? Math.max(0, payload.available) : 0);
+  const availableForSale = typeof variantData.availableForSale === 'boolean'
+    ? variantData.availableForSale
+    : (authoritativeQty > 0);
+  const inventoryPolicy = (variantData.inventoryPolicy || 'DENY').toUpperCase();
+
+  return prisma.$transaction(async (tx) => {
+    // Check if variant exists in local snapshot for this shop (enforce strict shop isolation)
+    const existing = await tx.variantSnapshot.findUnique({
+      where: {
+        shopId_shopifyVariantId: {
+          shopId,
+          shopifyVariantId,
+        },
+      },
+    });
+
+    if (!existing) {
+      // Variant not tracked locally for this shop — safe no-op
+      return null;
+    }
+
+    const updated = await tx.variantSnapshot.update({
+      where: {
+        shopId_shopifyVariantId: {
+          shopId,
+          shopifyVariantId,
+        },
+      },
+      data: {
+        inventoryQuantity: authoritativeQty,
+        availableForSale,
+        inventoryPolicy,
+        inventoryTracked: tracked !== undefined ? Boolean(tracked) : existing.inventoryTracked,
+        sourceUpdatedAt: new Date(),
+        syncedAt: new Date(),
+      },
+    });
+
+    // Bump dataVersion for all catalogs in this shop sourcing this product
+    const targetProdGid = shopifyProductId || existing.shopifyProductId;
+    if (targetProdGid) {
+      await tx.catalog.updateMany({
+        where: {
+          shopId,
+          sources: {
+            some: {
+              shopifyGid: targetProdGid,
+            },
+          },
+        },
+        data: {
+          dataVersion: { increment: 1 },
+        },
+      });
+    }
+
+    return updated;
+  });
 }
 
 export interface SyncStats {
@@ -1195,7 +1363,7 @@ export async function getPublicCatalogPayload(publicToken: string) {
           formattedPrice: formatMoney(displayPriceDecimal, currency),
           availableForSale: isAvailable,
           inventoryQuantity: catalog.showInventory ? v.inventoryQuantity : undefined,
-          effectiveAvailable,
+          effectiveAvailable: catalog.showInventory ? effectiveAvailable : undefined,
           inventoryPolicy,
           inventoryTracked,
           selectedOptions,

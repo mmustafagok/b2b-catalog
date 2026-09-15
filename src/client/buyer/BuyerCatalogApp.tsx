@@ -1,24 +1,54 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { VariantMatrix, ProductItem } from './VariantMatrix.js';
+import { VariantMatrix } from './VariantMatrix.js';
 import { OrderSummaryDrawer } from './OrderSummaryDrawer.js';
 import { parseBuyerRoute } from '../routeUtils.js';
+import { getOrCreateBuyerIdempotencyKey, clearBuyerIdempotencyKey } from './idempotencySession.js';
 import './buyer.css';
 
-interface CatalogHeader {
+interface VariantData {
   id: string;
-  name: string;
-  logoUrl: string | null;
-  accentColor: string;
-  showSku: boolean;
-  showInventory: boolean;
-  priceMode: string;
-  discountPercent: number;
+  shopifyVariantId: string;
+  title: string;
+  sku: string | null;
+  basePrice: number;
+  displayPrice: number;
+  formattedPrice?: string;
+  availableForSale: boolean;
+  inventoryQuantity?: number;
+  inventoryPolicy?: string;
+  inventoryTracked?: boolean;
+  selectedOptions: Array<{ name: string; value: string }>;
+  imageUrl: string | null;
+}
+
+interface ProductData {
+  id: string;
+  shopifyProductId: string;
+  title: string;
+  vendor: string | null;
+  handle: string;
+  imageUrl: string | null;
+  variants: VariantData[];
 }
 
 interface CatalogData {
-  catalog: CatalogHeader;
-  shop: { shopDomain: string; currency?: string };
-  products: ProductItem[];
+  catalog: {
+    id: string;
+    name: string;
+    logoUrl: string | null;
+    accentColor: string;
+    showSku: boolean;
+    showInventory: boolean;
+    priceMode: string;
+    discountPercent: number;
+  };
+  shop: {
+    id: string;
+    shopDomain: string;
+    currency: string;
+  };
+  products: ProductData[];
+  totalProducts: number;
   dataVersion: number;
 }
 
@@ -154,8 +184,10 @@ export const BuyerCatalogApp: React.FC = () => {
       .filter(([_, qty]) => qty > 0)
       .map(([variantId, qty]) => ({ variantId, quantity: qty }));
 
-    // Generate unique client idempotency key
-    const idempotencyKey = `idemp-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    // Use session-backed idempotency key for this catalog & order-intent fingerprint.
+    // Survives page refreshes and network retries so ambiguous/network failures
+    // do not create duplicate Shopify Draft Orders on retry.
+    const idempotencyKey = getOrCreateBuyerIdempotencyKey(publicToken, lines);
 
     try {
       // Send to server submit endpoint
@@ -229,6 +261,8 @@ export const BuyerCatalogApp: React.FC = () => {
       }
 
       const result = await res.json();
+      // On confirmed success, clear the session idempotency key
+      clearBuyerIdempotencyKey(publicToken);
       setSubmittedOrder({
         submissionId: result.submissionId,
         reference: result.referenceNumber || result.submissionId,
@@ -369,6 +403,7 @@ export const BuyerCatalogApp: React.FC = () => {
             type="button"
             className="btn-primary"
             onClick={() => {
+              clearBuyerIdempotencyKey(publicToken);
               setSubmittedOrder(null);
               setQuantities({});
             }}

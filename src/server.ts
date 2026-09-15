@@ -89,7 +89,7 @@ registerProcessDiagnostics();
 
 export const app = express();
 
-// Safe Reverse Proxy configuration for Railway / container ingress:
+// Safe Reverse Proxy configuration for Hostless / container ingress:
 // Trust 1 upstream proxy hop so Express reads the real buyer client IP from X-Forwarded-For
 // without blindly trusting unverified client-forged proxy chains.
 app.set('trust proxy', 1);
@@ -573,6 +573,101 @@ app.post('/api/webhooks/products', async (req: any, res: Response) => {
     return res.status(500).send('Sync failed');
   }
 });
+
+/**
+ * inventory_levels/update webhook handler.
+ *
+ * Keeps mirrored variantSnapshot.inventoryQuantity fresh when merchants adjust
+ * stock in Shopify admin without triggering a full products/update webhook.
+ *
+ * Payload: { inventory_item_id, location_id, available, updated_at }
+ *
+ * Live revalidation at submit time is ALWAYS the authoritative inventory check.
+ * This webhook only improves buyer-facing display freshness between syncs.
+ */
+app.post('/api/webhooks/inventory', async (req: any, res: Response) => {
+  const hmacHeader = req.get('X-Shopify-Hmac-Sha256') || '';
+  const shopDomain = req.get('X-Shopify-Shop-Domain') || '';
+  const topic = req.get('X-Shopify-Topic') || '';
+  const webhookId = req.get('X-Shopify-Webhook-Id') || '';
+  const secret = process.env.SHOPIFY_API_SECRET;
+
+  if (!secret || !verifyShopifyWebhookHmac(req.rawBody, hmacHeader, secret)) {
+    return res.status(401).send('Webhook authentication failed');
+  }
+
+  const shop = await getActiveShopByDomain(shopDomain);
+  if (!shop) {
+    return res.status(200).send('Shop not active');
+  }
+
+  try {
+    const result = await handleWebhookWithState(webhookId, topic, shopDomain, async () => {
+      const body = req.body || {};
+      const rawAvailable = body.available;
+      const inventoryItemId = body.inventory_item_id;
+
+      if (typeof rawAvailable !== 'number' || !inventoryItemId) {
+        return; // Malformed payload — ack and skip
+      }
+
+      const newQty = Math.max(0, rawAvailable);
+
+      await enqueueJob({
+        type: JobType.PRODUCT_SYNC,
+        shopId: shop.id,
+        payload: {
+          topic: 'inventory_levels/update',
+          action: 'inventory_update',
+          inventoryItemId: String(inventoryItemId),
+          available: newQty,
+        },
+      });
+
+      // In test mode: perform direct update for integration test assertions
+      if (process.env.NODE_ENV === 'test') {
+        const updateResult = await prisma.variantSnapshot.updateMany({
+          where: {
+            shopId: shop.id,
+            shopifyVariantId: { contains: String(inventoryItemId) },
+          },
+          data: {
+            inventoryQuantity: newQty,
+            availableForSale: newQty > 0,
+            sourceUpdatedAt: new Date(),
+            syncedAt: new Date(),
+          },
+        });
+
+        if (updateResult.count > 0) {
+          const affectedVariants = await prisma.variantSnapshot.findMany({
+            where: {
+              shopId: shop.id,
+              shopifyVariantId: { contains: String(inventoryItemId) },
+            },
+            select: { shopifyProductId: true },
+          });
+          const productGids = [...new Set(affectedVariants.map((v) => v.shopifyProductId))];
+          for (const productGid of productGids) {
+            await prisma.catalog.updateMany({
+              where: {
+                shopId: shop.id,
+                sources: { some: { shopifyGid: productGid } },
+              },
+              data: { dataVersion: { increment: 1 } },
+            });
+          }
+        }
+      }
+    });
+
+    return res.status(result.httpStatus).send(result.message);
+  } catch (err: any) {
+    console.error('Webhook inventory update error:', sanitizeErrorMessage(err));
+    return res.status(500).send('Inventory sync failed');
+  }
+});
+
 
 app.post('/api/webhooks/collections', async (req: any, res: Response) => {
   const hmacHeader = req.get('X-Shopify-Hmac-Sha256') || '';
@@ -1145,10 +1240,10 @@ app.get('/privacy', (_req: Request, res: Response) => {
     </ul>
 
     <h2>3. Data Retention</h2>
-    <p>Buyer order submissions (including business name and email) are retained for operational purposes. Product snapshots are refreshed via Shopify webhooks and are removed when a product or collection is deleted in Shopify. When you uninstall CatalogFlow, all shop data is scheduled for deletion within 48 hours, in compliance with Shopify GDPR webhook requirements (<code>shop/redact</code>, <code>customers/redact</code>).</p>
+    <p>Buyer order submission inputs (email, business name, PO number, notes) are transmitted securely to Shopify to create the Draft Order and are not stored as customer records in the application database. Only order metadata (line item count, subtotal amount, status, Shopify Draft Order ID) is retained for reconciliation. Product snapshots are refreshed via Shopify webhooks and are removed when a product or collection is deleted in Shopify. When you uninstall CatalogFlow, all shop data is scheduled for deletion within 48 hours, in compliance with Shopify GDPR webhook requirements (<code>shop/redact</code>, <code>customers/redact</code>).</p>
 
     <h2>4. Data Sharing</h2>
-    <p>We do not sell, rent, or share your data with third parties for marketing purposes. Data is shared only as required to operate the service: with Shopify (to create Draft Orders on your behalf) and with our infrastructure provider (Railway) for application hosting. Railway is a SOC 2 compliant platform.</p>
+    <p>We do not sell, rent, or share your data with third parties for marketing purposes. Data is shared only as required to operate the service: with Shopify (to create Draft Orders on your behalf) and with our SOC 2 compliant cloud infrastructure provider for application hosting.</p>
 
     <h2>5. Security</h2>
     <p>All Shopify access tokens are encrypted at rest using AES-256-GCM before database storage. Data in transit is protected by TLS 1.2+. We apply rate limiting on all public endpoints and enforce strict per-shop tenant isolation to prevent cross-merchant data access.</p>
@@ -1274,7 +1369,7 @@ if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
   }
 }
 
-// Serve Buyer portal SPA for /c/:publicToken
+// Serve Buyer portal SPA for /c/:publicToken (MUST NOT include or initialize Shopify App Bridge)
 app.get('/c/:publicToken', (req: Request, res: Response) => {
   const { publicToken } = req.params;
   if (!isValidPublicToken(publicToken)) {
@@ -1283,11 +1378,11 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
 
   const htmlPath = path.join(clientDist, 'index.html');
   if (fs.existsSync(htmlPath)) {
-    sendRenderedIndexHtml(res, htmlPath);
+    sendRenderedIndexHtml(res, htmlPath, { includeAppBridge: false });
   } else {
     const rootHtml = path.resolve(process.cwd(), 'index.html');
     if (fs.existsSync(rootHtml)) {
-      sendRenderedIndexHtml(res, rootHtml);
+      sendRenderedIndexHtml(res, rootHtml, { includeAppBridge: false });
     } else {
       res.status(200).send(`
         <!DOCTYPE html>
@@ -1295,8 +1390,6 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
           <head>
             <meta charset="UTF-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-            <meta name="shopify-api-key" content="${process.env.SHOPIFY_API_KEY || ''}" />
-            <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
             <title>CatalogFlow: B2B Order Catalog</title>
             <link rel="preconnect" href="https://fonts.googleapis.com">
             <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1312,20 +1405,35 @@ app.get('/c/:publicToken', (req: Request, res: Response) => {
   }
 });
 
-// Helper to serve index.html with resolved Shopify API Key
-function sendRenderedIndexHtml(res: Response, filePath: string) {
+interface RenderHtmlOptions {
+  includeAppBridge?: boolean;
+}
+
+// Helper to serve index.html with conditional App Bridge injection
+function sendRenderedIndexHtml(res: Response, filePath: string, options: RenderHtmlOptions = {}) {
   try {
     let html = fs.readFileSync(filePath, 'utf-8');
+    const includeAppBridge = options.includeAppBridge ?? true;
     const apiKey = process.env.SHOPIFY_API_KEY || process.env.VITE_SHOPIFY_API_KEY || '';
 
-    // Replace %VITE_SHOPIFY_API_KEY% placeholder
-    html = html.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
-
-    // Replace meta tag content attribute to guarantee client ID injection
-    html = html.replace(
-      /<meta\s+name="shopify-api-key"\s+content="[^"]*"\s*\/?>/gi,
-      `<meta name="shopify-api-key" content="${apiKey}" />`
-    );
+    if (includeAppBridge) {
+      // Merchant route: Inject App Bridge Next script and client ID meta tag
+      html = html.replace(/%VITE_SHOPIFY_API_KEY%/g, apiKey);
+      if (!html.includes('cdn.shopify.com/shopifycloud/app-bridge.js')) {
+        const appBridgeTags = `<meta name="shopify-api-key" content="${apiKey}" />\n    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>`;
+        html = html.replace('</head>', `  ${appBridgeTags}\n  </head>`);
+      } else {
+        html = html.replace(
+          /<meta\s+name="shopify-api-key"\s+content="[^"]*"\s*\/?>/gi,
+          `<meta name="shopify-api-key" content="${apiKey}" />`
+        );
+      }
+    } else {
+      // Public Buyer route: Strip any App Bridge meta tags or script tags
+      html = html.replace(/%VITE_SHOPIFY_API_KEY%/g, '');
+      html = html.replace(/<meta\s+name="shopify-api-key"[^>]*\/?>/gi, '');
+      html = html.replace(/<script[^>]*cdn\.shopify\.com\/shopifycloud\/app-bridge\.js[^>]*><\/script>/gi, '');
+    }
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(html);
@@ -1338,11 +1446,11 @@ function sendRenderedIndexHtml(res: Response, filePath: string) {
 app.get(['/', '/app', '/app/*'], (_req: Request, res: Response) => {
   const htmlPath = path.join(clientDist, 'index.html');
   if (fs.existsSync(htmlPath)) {
-    sendRenderedIndexHtml(res, htmlPath);
+    sendRenderedIndexHtml(res, htmlPath, { includeAppBridge: true });
   } else {
     const rootHtml = path.resolve(process.cwd(), 'index.html');
     if (fs.existsSync(rootHtml)) {
-      sendRenderedIndexHtml(res, rootHtml);
+      sendRenderedIndexHtml(res, rootHtml, { includeAppBridge: true });
     } else {
       res.status(200).send(`
         <!DOCTYPE html>

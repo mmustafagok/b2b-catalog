@@ -100,7 +100,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     </span>
                   ) : hasFiniteCap ? (
                     <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-                      {showInventory || variant.effectiveAvailable! <= 20
+                  {showInventory
                         ? `${variant.effectiveAvailable} available`
                         : 'In stock'}
                     </span>

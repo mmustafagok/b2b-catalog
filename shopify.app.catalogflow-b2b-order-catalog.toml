@@ -19,6 +19,10 @@ topics = [ "app/uninstalled" ]
 uri = "/api/webhooks/app/uninstalled"
 
 [[webhooks.subscriptions]]
+topics = [ "inventory_levels/update" ]
+uri = "/api/webhooks/inventory"
+
+[[webhooks.subscriptions]]
 compliance_topics = [ "customers/data_request" ]
 uri = "/api/webhooks/compliance/customers-data-request"
 
@@ -40,5 +44,5 @@ redirect_urls = []
 
 [build]
 automatically_update_urls_on_dev = false
-dev_store_url = "catalogflow-test-store.myshopify.com"
 include_config_on_deploy = true
+dev_store_url = "catalogflow-test-store.myshopify.com"

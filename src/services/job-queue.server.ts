@@ -9,6 +9,7 @@ import {
   executeFullShopSync,
   syncSingleCollectionFromShopify,
   reconcileSourcedCollectionsForShop,
+  syncInventoryLevelUpdate,
 } from './sync.server.js';
 
 export enum JobType {
@@ -164,6 +165,8 @@ export async function executeJob(job: BackgroundJob): Promise<void> {
       if (!job.shopId) throw new Error('PRODUCT_SYNC requires shopId');
       if (payload.action === 'delete') {
         await deleteProductSnapshot(job.shopId, payload.productId);
+      } else if (payload.action === 'inventory_update') {
+        await syncInventoryLevelUpdate(job.shopId, payload);
       } else {
         await syncProductSnapshot(job.shopId, payload.product);
         if (payload.topic === 'products/update') {

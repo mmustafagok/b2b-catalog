@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { authenticatedFetch } from './appBridgeAuth.js';
+import { authenticatedFetch, ensureAppBridgeLoaded } from './appBridgeAuth.js';
 import './merchant.css';
 
 interface ShopInfo {
@@ -271,6 +271,10 @@ export const MerchantAppShell: React.FC = () => {
       setLoading(false);
     }
   }, [authenticatedFetch, submissionsPage, submissionStatusFilter]);
+
+  useEffect(() => {
+    ensureAppBridgeLoaded();
+  }, []);
 
   useEffect(() => {
     loadData();

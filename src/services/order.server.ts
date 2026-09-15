@@ -48,8 +48,12 @@ export function isShopifyDraftOrderGid(id: unknown): id is string {
  * Canonical helper for generating deterministic, collision-resistant Draft Order idempotency tags.
  * Ensures the generated tag is strictly <= 40 characters to comply with Shopify's tag length limit.
  *
- * Design: cfb2b:<sha256(idempotencyKey).slice(0, 32)>
- * Length: 6 ('cfb2b:') + 32 (hex) = 38 characters.
+ * Design: cfb2b-<sha256(idempotencyKey).slice(0, 32)>
+ * Length: 6 ('cfb2b-') + 32 (hex) = 38 characters.
+ *
+ * IMPORTANT: Uses a dash separator (not colon) because Shopify's Lucene-style tag search
+ * treats ':' as a field separator. `tag:cfb2b:abc` would be misinterpreted as field `tag:cfb2b`
+ * with value `abc`, breaking reconciliation lookups. A dash is a safe, literal character.
  */
 export function buildDraftOrderIdempotencyTag(idempotencyKey: string): string {
   if (!idempotencyKey || typeof idempotencyKey !== 'string') {
@@ -60,7 +64,7 @@ export function buildDraftOrderIdempotencyTag(idempotencyKey: string): string {
     .update(idempotencyKey.trim())
     .digest('hex')
     .slice(0, 32);
-  const tag = `cfb2b:${hash}`;
+  const tag = `cfb2b-${hash}`;
   if (tag.length > 40) {
     throw new Error(`Generated Draft Order idempotency tag exceeds Shopify 40-character limit: ${tag.length}`);
   }
@@ -389,6 +393,12 @@ export async function submitBuyerOrder(
             node {
               id
               name
+              subtotalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
               totalPriceSet {
                 shopMoney {
                   amount
@@ -402,13 +412,25 @@ export async function submitBuyerOrder(
     `;
 
     try {
-      const searchRes: any = await client.request(findDraftQuery, { query: `tag:${correlationTag}` });
+      // Wrap correlationTag in double quotes for Shopify Lucene safety.
+      // Without quotes, Shopify may mis-tokenize the dash-separated tag value.
+      const searchRes: any = await client.request(findDraftQuery, { query: `tag:"${correlationTag}"` });
       const edges = searchRes?.draftOrders?.edges || [];
       if (edges.length > 0 && edges[0]?.node?.id) {
         const foundDraft = edges[0].node;
-        const rawAmount = foundDraft.totalPriceSet?.shopMoney?.amount ?? foundDraft.totalPrice ?? '0.00';
+        const rawAmount =
+          foundDraft.subtotalPriceSet?.shopMoney?.amount ??
+          foundDraft.subtotalPrice ??
+          foundDraft.totalPriceSet?.shopMoney?.amount ??
+          foundDraft.totalPrice ??
+          '0.00';
         const subtotal = new Prisma.Decimal(rawAmount);
-        const resolvedCurrency = foundDraft.totalPriceSet?.shopMoney?.currencyCode || foundDraft.currencyCode || catalog.shop.currency || 'USD';
+        const resolvedCurrency =
+          foundDraft.subtotalPriceSet?.shopMoney?.currencyCode ||
+          foundDraft.totalPriceSet?.shopMoney?.currencyCode ||
+          foundDraft.currencyCode ||
+          catalog.shop.currency ||
+          'USD';
 
         const updated = await prisma.orderSubmission.update({
           where: { id: submission.id },
@@ -486,8 +508,20 @@ export async function submitBuyerOrder(
       if (reconcileSearchErr instanceof OrderSubmissionError) {
         throw reconcileSearchErr;
       }
-      console.error('[ReconcileSearchErr]', reconcileSearchErr);
-      // If query fails, keep attempt in REQUIRES_RECONCILIATION and fail closed
+      // Reconciliation query failed — keep REQUIRES_RECONCILIATION and fail closed
+      // Log sanitized error for diagnostics (no buyer PII)
+      void recordRuntimeIncident({
+        type: 'RECONCILIATION_QUERY_FAILED',
+        requestId: correlationId,
+        route: '/api/public/catalog/submit',
+        errorCode: 'SHOPIFY_API_ERROR',
+        message: reconcileSearchErr?.message ? reconcileSearchErr.message.slice(0, 200) : 'Reconciliation query failed',
+        metadata: {
+          submissionId: submission.id,
+          shopDomain: catalog.shop.shopDomain,
+          catalogId: catalog.id,
+        },
+      });
       throw new OrderSubmissionError(
         'Unable to verify prior submission state with Shopify. Please retry in a moment.',
         502,
@@ -756,12 +790,23 @@ export async function submitBuyerOrder(
   try {
     draftRes = await client.request(draftOrderMutation, { input: draftOrderInput });
   } catch (mutationErr: any) {
-    const isDefinitive =
-      mutationErr instanceof ShopifyGraphQLError &&
-      (mutationErr.isDefinitiveClientError() ||
-        (mutationErr.userErrors && mutationErr.userErrors.length > 0) ||
-        (mutationErr.errors && mutationErr.errors.length > 0) ||
-        (mutationErr.statusCode !== undefined && mutationErr.statusCode >= 400 && mutationErr.statusCode < 500 && mutationErr.statusCode !== 429));
+    // ─── CLASSIFICATION LOGIC ───────────────────────────────────────────────────
+    //
+    // DEFINITIVE: Shopify provably rejected before any side effect.
+    //   → mark FAILED, release quota, safe to retry from scratch.
+    //
+    // AMBIGUOUS: Shopify may have created the Draft Order before the error/disconnect.
+    //   → mark REQUIRES_RECONCILIATION, RETAIN quota, never retry draftOrderCreate.
+    //
+    // The `mutationErr.ambiguous` flag is set by ShopifyAdminClient:
+    //  - HTTP 200 + top-level errors[] (mutation may have executed) → ambiguous=true
+    //  - HTTP 5xx (server may have processed before crashing) → ambiguous=true
+    //  - Network timeout after dispatch → ambiguous=true (504)
+    //  - HTTP 4xx or userErrors[] → ambiguous=false (definitive)
+    // ────────────────────────────────────────────────────────────────────────────
+
+    const isAmbiguous = mutationErr instanceof ShopifyGraphQLError && mutationErr.ambiguous === true;
+    const isDefinitive = !isAmbiguous && mutationErr instanceof ShopifyGraphQLError && mutationErr.isDefinitiveClientError();
 
     if (isDefinitive) {
       // Conclusive rejection: Shopify rejected the mutation before creating any Draft Order.
@@ -795,6 +840,7 @@ export async function submitBuyerOrder(
 
       const structuralDiagnostics = {
         requestId: correlationId,
+        stage: 'DRAFT_ORDER_MUTATION_DEFINITIVE_FAILURE',
         hasResult: false,
         hasDraftOrderCreate: false,
         hasDraftOrder: false,
@@ -802,6 +848,8 @@ export async function submitBuyerOrder(
         draftOrderIdValid: false,
         userErrorCount: Array.isArray(mutationErr.userErrors) ? mutationErr.userErrors.length : 0,
         topLevelErrorCount: Array.isArray(mutationErr.errors) ? mutationErr.errors.length : 0,
+        shopDomain: catalog.shop.shopDomain,
+        catalogId: catalog.id,
       };
 
       console.warn('[DraftOrder:Diagnostic]', JSON.stringify(structuralDiagnostics));
@@ -814,8 +862,12 @@ export async function submitBuyerOrder(
         message: sanitizeErrorMessage(rawMsg),
         metadata: {
           submissionId: submission.id,
+          shopDomain: catalog.shop.shopDomain,
+          catalogId: catalog.id,
           userErrors: mutationErr.userErrors || null,
-          graphQLErrors: mutationErr.errors || null,
+          graphQLErrors: mutationErr.errors
+            ? mutationErr.errors.map((e: any) => ({ message: e.message, code: e.extensions?.code }))
+            : null,
           statusCode: mutationErr.statusCode || null,
           structuralDiagnostics,
         },
@@ -840,12 +892,36 @@ export async function submitBuyerOrder(
       );
     }
 
-    // Ambiguous failure: transport failure, timeout, ECONNRESET, HTTP 5xx, or socket disconnect.
-    // The request may have reached Shopify and created the draft order before the connection was lost.
-    // DO NOT release quota.
-    // Mark submission as REQUIRES_RECONCILIATION and preserve correlationRef for subsequent tag-based reconciliation.
+    // ─── AMBIGUOUS EXECUTION PATH ─────────────────────────────────────────────
+    // Reaches here for:
+    //  - isAmbiguous === true (HTTP 200 + top-level errors[], HTTP 5xx, timeout)
+    //  - Non-ShopifyGraphQLError network errors (ECONNRESET, etc.)
+    //
+    // The Draft Order may exist in Shopify. We MUST NOT:
+    //  - Release quota (the order slot may be consumed)
+    //  - Mark FAILED (that would allow bypassing reconciliation on retry)
+    //  - Retry draftOrderCreate (would create a duplicate)
+    //
+    // We MUST:
+    //  - Mark REQUIRES_RECONCILIATION
+    //  - Preserve correlationRef for Shopify tag-based lookup
+    //  - Return 502 so buyer knows to retry via reconciliation
+    // ─────────────────────────────────────────────────────────────────────────
     const isTimeout = mutationErr instanceof ShopifyGraphQLError && mutationErr.isTimeout();
     const ambiguousCode = isTimeout ? 'SHOPIFY_TIMEOUT' : 'SHOPIFY_API_ERROR';
+
+    const ambiguousStructuralDiag = {
+      requestId: correlationId,
+      stage: 'DRAFT_ORDER_MUTATION_AMBIGUOUS',
+      isAmbiguous: true,
+      isTimeout,
+      statusCode: mutationErr?.statusCode || null,
+      topLevelErrorCount: Array.isArray(mutationErr?.errors) ? mutationErr.errors.length : 0,
+      shopDomain: catalog.shop.shopDomain,
+      catalogId: catalog.id,
+    };
+
+    console.warn('[DraftOrder:Diagnostic]', JSON.stringify(ambiguousStructuralDiag));
 
     await prisma.orderSubmission.update({
       where: { id: submission.id },
@@ -853,7 +929,9 @@ export async function submitBuyerOrder(
         status: 'REQUIRES_RECONCILIATION',
         processingStartedAt: null,
         correlationRef: correlationTag,
-        lastError: isTimeout ? 'Request timed out during draft order creation' : 'Ambiguous transport failure during draft order creation',
+        lastError: isTimeout
+          ? 'Request timed out during draft order creation'
+          : `Ambiguous execution failure: ${sanitizeErrorMessage((mutationErr as any)?.message || 'Unknown error').slice(0, 200)}`,
       },
     });
 
@@ -864,10 +942,14 @@ export async function submitBuyerOrder(
       requestId: correlationId,
       route: '/api/public/catalog/submit',
       errorCode: ambiguousCode,
-      message: sanitizeErrorMessage(mutationErr.message),
+      message: sanitizeErrorMessage((mutationErr as any)?.message || 'Ambiguous draft order error'),
       metadata: {
         submissionId: submission.id,
+        shopDomain: catalog.shop.shopDomain,
+        catalogId: catalog.id,
         isTimeout,
+        isAmbiguous: true,
+        statusCode: mutationErr?.statusCode || null,
       },
     });
 
@@ -987,17 +1069,17 @@ export async function submitBuyerOrder(
   // From this point onward, NEVER classify any error as DRAFT_ORDER_CREATE_FAILED.
   tracker.transition('DRAFT_ORDER_CREATE_COMPLETED');
 
-  const draftMoney = createdDraft.totalPriceSet?.shopMoney ?? createdDraft.subtotalPriceSet?.shopMoney;
+  const draftMoney = createdDraft.subtotalPriceSet?.shopMoney ?? createdDraft.totalPriceSet?.shopMoney;
   let draftSubtotal = subtotalDecimal;
   try {
-    const rawAmount = draftMoney?.amount ?? createdDraft.totalPrice;
+    const rawAmount = draftMoney?.amount ?? createdDraft.subtotalPrice ?? createdDraft.totalPrice;
     if (rawAmount !== undefined && rawAmount !== null && String(rawAmount).trim() !== '') {
       draftSubtotal = new Prisma.Decimal(String(rawAmount));
     }
   } catch {
     draftSubtotal = subtotalDecimal;
   }
-  const currency = catalog.shop.currency || draftMoney?.currencyCode || createdDraft.currencyCode || 'USD';
+  const currency = draftMoney?.currencyCode || createdDraft.currencyCode || catalog.shop.currency || 'USD';
   const subtotalNumber = parseFloat(draftSubtotal.toFixed(2));
 
   // 9. Mark Submission COMPLETED
@@ -1318,7 +1400,7 @@ export async function reconcileSubmission(
   const correlationTag =
     submission.correlationRef ||
     (submission.idempotencyKeyHash
-      ? `cfb2b:${submission.idempotencyKeyHash.slice(0, 32)}`
+      ? `cfb2b-${submission.idempotencyKeyHash.slice(0, 32)}`
       : buildDraftOrderIdempotencyTag(submission.id));
 
   const findDraftQuery = `
@@ -1346,15 +1428,25 @@ export async function reconcileSubmission(
     }
   `;
 
-  const searchRes: any = await client.request(findDraftQuery, { query: `tag:${correlationTag}` });
+  // Wrap tag value in double quotes for Shopify Lucene safety
+  const searchRes: any = await client.request(findDraftQuery, { query: `tag:"${correlationTag}"` });
   const edges = searchRes?.draftOrders?.edges || [];
 
   if (edges.length > 0 && edges[0]?.node?.id) {
     const foundDraft = edges[0].node;
-    const rawAmount = foundDraft.totalPriceSet?.shopMoney?.amount ?? foundDraft.totalPrice ?? '0.00';
+    const rawAmount =
+      foundDraft.subtotalPriceSet?.shopMoney?.amount ??
+      foundDraft.subtotalPrice ??
+      foundDraft.totalPriceSet?.shopMoney?.amount ??
+      foundDraft.totalPrice ??
+      '0.00';
     const subtotal = new Prisma.Decimal(rawAmount);
     const resolvedCurrency =
-      foundDraft.totalPriceSet?.shopMoney?.currencyCode || foundDraft.currencyCode || shop.currency || 'USD';
+      foundDraft.subtotalPriceSet?.shopMoney?.currencyCode ||
+      foundDraft.totalPriceSet?.shopMoney?.currencyCode ||
+      foundDraft.currencyCode ||
+      shop.currency ||
+      'USD';
 
     const updated = await prisma.orderSubmission.update({
       where: { id: submission.id },

@@ -70,7 +70,9 @@ describe('Draft Order Tag Hardening & Shopify 40-Character Limit', () => {
     const uuidKey = crypto.randomUUID();
     const tag = buildDraftOrderIdempotencyTag(uuidKey);
 
-    expect(tag).toMatch(/^cfb2b:[0-9a-f]{32}$/);
+    // CORRECT format: dash separator, not colon
+    // cfb2b: would be misinterpreted by Shopify's Lucene engine as field:value separator
+    expect(tag).toMatch(/^cfb2b-[0-9a-f]{32}$/);
     expect(tag.length).toBe(38);
     expect(tag.length).toBeLessThanOrEqual(40);
   });
@@ -244,7 +246,8 @@ describe('Draft Order Tag Hardening & Shopify 40-Character Limit', () => {
     expect(res2.body.draftOrderId).toBe('gid://shopify/DraftOrder/tag-recov-1');
 
     const expectedCanonicalTag = buildDraftOrderIdempotencyTag(key);
-    expect(capturedSearchQuery).toBe(`tag:${expectedCanonicalTag}`);
+    // Tag search must be quoted for Shopify Lucene safety (dash separator requires quoting)
+    expect(capturedSearchQuery).toBe(`tag:"${expectedCanonicalTag}"`);
     expect(expectedCanonicalTag.length).toBeLessThanOrEqual(40);
   });
 

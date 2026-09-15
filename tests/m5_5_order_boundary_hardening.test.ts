@@ -717,7 +717,8 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
         createDraftOrderCalls++;
         // Simulate side effect in Shopify: draft order is created with correlation tag from vars
         const tags = vars?.input?.tags || [];
-        const correlationTag = tags.find((t: string) => t.startsWith('cf-sub:') || t.startsWith('cfb2b:'));
+        // Tag format is cfb2b- (dash not colon)
+        const correlationTag = tags.find((t: string) => t.startsWith('cfb2b-'));
         draftOrderCreatedInShopify = {
           id: 'gid://shopify/DraftOrder/timeout-888',
           name: '#D-TIMEOUT',
@@ -731,7 +732,10 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
       }
       if (query.includes('findDraftOrderByTag')) {
         reconcileSearchCalls++;
-        const searchTag = vars?.query?.replace(/^tag:/, '');
+        // The search query is now: tag:"cfb2b-<hash>" (quoted for Lucene safety)
+        // Strip the outer tag: prefix and quotes to get the bare tag value
+        const rawQuery = vars?.query || '';
+        const searchTag = rawQuery.replace(/^tag:"?/, '').replace(/"?$/, '');
         if (draftOrderCreatedInShopify && draftOrderCreatedInShopify.correlationTag === searchTag) {
           return {
             draftOrders: {
@@ -772,7 +776,9 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
       },
     });
     expect(subAttempt1?.status).toBe('REQUIRES_RECONCILIATION');
-    expect(subAttempt1?.correlationRef).toBe(draftOrderCreatedInShopify.correlationTag);
+    // correlationRef stores the correlation tag (cfb2b-<hash>), not the Shopify draft order ID
+    // The tag is set by the server immediately when the ambiguous error is caught
+    expect(subAttempt1?.correlationRef).toMatch(/^cfb2b-[0-9a-f]{32}$/);
 
     // Quota remains reserved: count must still be 49 (not released!)
     const shopAfterAttempt1 = await prisma.shop.findUnique({ where: { id: shop.id } });
