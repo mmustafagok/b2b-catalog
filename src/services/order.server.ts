@@ -41,7 +41,7 @@ export function isShopifyProductVariantGid(id: unknown): id is string {
  * Validates strictly whether an ID is a Shopify DraftOrder GraphQL GID.
  */
 export function isShopifyDraftOrderGid(id: unknown): id is string {
-  return typeof id === 'string' && /^gid:\/\/shopify\/DraftOrder\/[a-zA-Z0-9_-]+$/.test(id.trim());
+  return typeof id === 'string' && /^gid:\/\/shopify\/DraftOrder\/[a-zA-Z0-9_/-]+$/.test(id.trim());
 }
 
 /**
@@ -691,6 +691,13 @@ export async function submitBuyerOrder(
         draftOrder {
           id
           name
+          status
+          subtotalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
           totalPriceSet {
             shopMoney {
               amount
@@ -759,6 +766,19 @@ export async function submitBuyerOrder(
 
       tracker.transition('SUBMISSION_FAILED', errorCode);
 
+      const structuralDiagnostics = {
+        requestId: correlationId,
+        hasResult: false,
+        hasDraftOrderCreate: false,
+        hasDraftOrder: false,
+        draftOrderIdPresent: false,
+        draftOrderIdValid: false,
+        userErrorCount: Array.isArray(mutationErr.userErrors) ? mutationErr.userErrors.length : 0,
+        topLevelErrorCount: Array.isArray(mutationErr.errors) ? mutationErr.errors.length : 0,
+      };
+
+      console.warn('[DraftOrder:Diagnostic]', JSON.stringify(structuralDiagnostics));
+
       void recordRuntimeIncident({
         type: 'DRAFT_ORDER_MUTATION_FAILED',
         requestId: correlationId,
@@ -770,6 +790,7 @@ export async function submitBuyerOrder(
           userErrors: mutationErr.userErrors || null,
           graphQLErrors: mutationErr.errors || null,
           statusCode: mutationErr.statusCode || null,
+          structuralDiagnostics,
         },
       });
 
@@ -777,11 +798,18 @@ export async function submitBuyerOrder(
         ? 'Draft Order creation failed due to store permissions. Please contact the merchant.'
         : "We couldn't create the Shopify Draft Order. Your order was not confirmed.";
 
+      const details =
+        mutationErr.userErrors && mutationErr.userErrors.length > 0
+          ? mutationErr.userErrors
+          : mutationErr.errors && mutationErr.errors.length > 0
+          ? mutationErr.errors.map((e: any) => ({ message: sanitizeErrorMessage(e.message || String(e)) }))
+          : [{ message: sanitizeErrorMessage(rawMsg), diagnostics: structuralDiagnostics }];
+
       throw new OrderSubmissionError(
         userFacingMsg,
         isPermissionDenied ? 403 : 422,
         errorCode,
-        mutationErr.userErrors || undefined
+        details
       );
     }
 
@@ -823,8 +851,27 @@ export async function submitBuyerOrder(
     );
   }
 
-  if (draftRes.draftOrderCreate?.userErrors?.length > 0) {
-    const userErrors = draftRes.draftOrderCreate.userErrors;
+  // Safe structural diagnostics around mutation result (supports both direct and data-nested shapes)
+  const payload = draftRes?.draftOrderCreate ?? draftRes?.data?.draftOrderCreate ?? (draftRes?.id ? { draftOrder: draftRes, userErrors: [] } : draftRes);
+  const userErrors = Array.isArray(payload?.userErrors) ? payload.userErrors : [];
+  const createdDraft = payload?.draftOrder;
+  const rawDraftId = createdDraft?.id;
+  const isDraftIdValid = isShopifyDraftOrderGid(rawDraftId);
+
+  const structuralDiagnostics = {
+    requestId: correlationId,
+    hasResult: Boolean(draftRes),
+    hasDraftOrderCreate: Boolean(payload),
+    hasDraftOrder: Boolean(createdDraft),
+    draftOrderIdPresent: Boolean(rawDraftId),
+    draftOrderIdValid: isDraftIdValid,
+    userErrorCount: userErrors.length,
+    topLevelErrorCount: 0,
+  };
+
+  console.info('[DraftOrder:Diagnostic]', JSON.stringify(structuralDiagnostics));
+
+  if (userErrors.length > 0) {
     const userErrorMsg = userErrors.map((e: any) => {
       const fieldStr = Array.isArray(e.field) ? e.field.join('.') : e.field ? String(e.field) : '';
       return fieldStr ? `[${fieldStr}] ${e.message}` : e.message;
@@ -852,6 +899,7 @@ export async function submitBuyerOrder(
       metadata: {
         submissionId: submission.id,
         userErrors,
+        structuralDiagnostics,
       },
     });
 
@@ -863,25 +911,51 @@ export async function submitBuyerOrder(
     );
   }
 
-  const createdDraft = draftRes.draftOrderCreate?.draftOrder;
-  if (!createdDraft || !createdDraft.id || !isShopifyDraftOrderGid(createdDraft.id)) {
-    // Ambiguous response: response was received without userErrors but missing valid draftOrder id
+  if (!createdDraft || !isDraftIdValid) {
+    // Ambiguous response: response was received without userErrors but missing valid draftOrder id.
+    // The Draft Order may have been created Shopify-side before response framing failed.
+    // Preserve reconciliation and retain quota.
+    const reasonMsg = !createdDraft
+      ? 'Shopify returned null draftOrder with empty userErrors'
+      : `Shopify returned draftOrder with invalid GID format: "${String(rawDraftId).slice(0, 50)}"`;
+
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
         status: 'REQUIRES_RECONCILIATION',
         processingStartedAt: null,
         correlationRef: correlationTag,
-        lastError: 'Shopify returned ambiguous response without valid draft order id',
+        lastError: sanitizeErrorMessage(reasonMsg),
       },
     });
+
     tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
-    throw new OrderSubmissionError('Shopify Draft Order creation returned an invalid response', 502, 'SHOPIFY_API_ERROR');
+
+    void recordRuntimeIncident({
+      type: 'DRAFT_ORDER_MUTATION_FAILED',
+      requestId: correlationId,
+      route: '/api/public/catalog/submit',
+      errorCode: 'SHOPIFY_API_ERROR',
+      message: sanitizeErrorMessage(reasonMsg),
+      metadata: {
+        submissionId: submission.id,
+        structuralDiagnostics,
+      },
+    });
+
+    throw new OrderSubmissionError(
+      'Shopify Draft Order creation returned an invalid response',
+      502,
+      'SHOPIFY_API_ERROR',
+      [{ message: sanitizeErrorMessage(reasonMsg), diagnostics: structuralDiagnostics }]
+    );
   }
 
+  // 7. If Shopify returns: draftOrder != null, valid DraftOrder GID, userErrors = []
+  // MUST be treated as success!
   tracker.transition('DRAFT_ORDER_CREATE_COMPLETED');
 
-  const draftMoney = createdDraft.totalPriceSet?.shopMoney;
+  const draftMoney = createdDraft.totalPriceSet?.shopMoney ?? createdDraft.subtotalPriceSet?.shopMoney;
   const draftSubtotal = draftMoney?.amount ? new Prisma.Decimal(draftMoney.amount) : (createdDraft.totalPrice ? new Prisma.Decimal(createdDraft.totalPrice) : subtotalDecimal);
   const currency = catalog.shop.currency || draftMoney?.currencyCode || createdDraft.currencyCode || 'USD';
   const subtotalNumber = parseFloat(draftSubtotal.toFixed(2));

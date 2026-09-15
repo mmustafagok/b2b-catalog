@@ -359,4 +359,198 @@ describe('Draft Order Tag Hardening & Shopify 40-Character Limit', () => {
     expect(submission?.status).toBe('FAILED');
     expect(submission?.quotaReserved).toBe(false);
   });
+
+  // 9. null draftOrder with empty userErrors preserves reconciliation & quota
+  it('9. preserves reconciliation, retains quota, and returns SHOPIFY_API_ERROR with diagnostics when draftOrder is null and userErrors is empty', async () => {
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        return {
+          draftOrderCreate: {
+            draftOrder: null,
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const res = await request(app)
+      .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'null-draft-empty-user-errors')
+      .send({
+        dataVersion: publishedCatalog.dataVersion,
+        buyer: { businessName: 'Null Draft Buyer', email: 'nulldraft@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+      });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('SHOPIFY_API_ERROR');
+    expect(res.body.details).toBeDefined();
+    expect(res.body.details[0].message).toContain('null draftOrder');
+    expect(res.body.details[0].diagnostics).toBeDefined();
+    expect(res.body.details[0].diagnostics.hasDraftOrder).toBe(false);
+
+    // Quota retained for reconciliation
+    const submission = await prisma.orderSubmission.findFirst({ where: { shopId: shop.id } });
+    expect(submission?.status).toBe('REQUIRES_RECONCILIATION');
+    expect(submission?.quotaReserved).toBe(true);
+  });
+
+  // 10. Top-level GraphQL error propagates detailed messages
+  it('10. releases quota and returns DRAFT_ORDER_CREATE_FAILED with GraphQL error details on schema rejection', async () => {
+    const { ShopifyGraphQLError } = await import('../src/services/shopify-client.server.js');
+
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        throw new ShopifyGraphQLError(
+          'Shopify GraphQL Error: Field customField does not exist on type DraftOrder',
+          [{ message: 'Field customField does not exist on type DraftOrder' }],
+          undefined,
+          400
+        );
+      }
+      return {};
+    });
+
+    const res = await request(app)
+      .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'top-level-graphql-err-key')
+      .send({
+        dataVersion: publishedCatalog.dataVersion,
+        buyer: { businessName: 'Top Level Err Buyer', email: 'toperr@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('DRAFT_ORDER_CREATE_FAILED');
+    expect(res.body.details).toBeDefined();
+    expect(res.body.details[0].message).toContain('Field customField does not exist');
+
+    const shopRecord = await prisma.shop.findUnique({ where: { id: shop.id } });
+    expect(shopRecord?.monthlySubmissionsCount).toBe(0);
+  });
+
+  // 11. Malformed DraftOrder ID
+  it('11. rejects malformed DraftOrder GID and returns DRAFT_ORDER_CREATE_FAILED with diagnostics', async () => {
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        return {
+          draftOrderCreate: {
+            draftOrder: {
+              id: '12345-not-a-gid',
+              name: '#D-BAD-GID',
+            },
+            userErrors: [],
+          },
+        };
+      }
+      return {};
+    });
+
+    const res = await request(app)
+      .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'malformed-gid-key')
+      .send({
+        dataVersion: publishedCatalog.dataVersion,
+        buyer: { businessName: 'Bad GID Buyer', email: 'badgid@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+      });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('SHOPIFY_API_ERROR');
+    expect(res.body.details[0].message).toContain('invalid GID format');
+    expect(res.body.details[0].diagnostics.draftOrderIdValid).toBe(false);
+  });
+
+  // 12. Parser nesting handles both direct and data-wrapped responses
+  it('12. handles data-wrapped response objects correctly without failing parser', async () => {
+    vi.spyOn(ShopifyAdminClient.prototype, 'request').mockImplementation(async (query: string) => {
+      if (query.includes('getVariantsByIds')) {
+        return {
+          nodes: [
+            {
+              id: 'gid://shopify/ProductVariant/8001',
+              title: '60x30 Walnut',
+              price: '350.00',
+              availableForSale: true,
+              inventoryQuantity: 50,
+              product: { id: 'gid://shopify/Product/7001', status: 'ACTIVE', title: 'Ergonomic Desk' },
+            },
+          ],
+        };
+      }
+      if (query.includes('createDraftOrder')) {
+        // Nested data shape
+        return {
+          data: {
+            draftOrderCreate: {
+              draftOrder: {
+                id: 'gid://shopify/DraftOrder/nested-123',
+                name: '#D-NESTED',
+                status: 'OPEN',
+                subtotalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+                totalPriceSet: { shopMoney: { amount: '350.00', currencyCode: 'USD' } },
+              },
+              userErrors: [],
+            },
+          },
+        };
+      }
+      return {};
+    });
+
+    const res = await request(app)
+      .post(`/api/public/catalog/${publishedCatalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'nested-data-response-key')
+      .send({
+        dataVersion: publishedCatalog.dataVersion,
+        buyer: { businessName: 'Nested Buyer', email: 'nested@buyer.com' },
+        lines: [{ variantId: 'gid://shopify/ProductVariant/8001', quantity: 1 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.draftOrderId).toBe('gid://shopify/DraftOrder/nested-123');
+  });
 });

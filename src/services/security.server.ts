@@ -162,5 +162,8 @@ export function sanitizeErrorMessage(err: any): string {
   if (process.env.NODE_ENV === 'production') {
     return 'An unexpected server error occurred. Please try again later.';
   }
+  if (typeof err === 'string') {
+    return err;
+  }
   return err?.message || 'Server error';
 }
