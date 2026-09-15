@@ -15,6 +15,39 @@ export class ShopifyGraphQLError extends Error {
     super(message);
     this.name = 'ShopifyGraphQLError';
   }
+
+  /**
+   * Returns true if Shopify definitively rejected the request due to client/validation errors
+   * (e.g. invalid query syntax, undefined fields, bad variables, userErrors, HTTP 400/401/403/422).
+   * In these cases, no Shopify draft order was created and quota should be rolled back.
+   */
+  public isDefinitiveClientError(): boolean {
+    if (this.userErrors && this.userErrors.length > 0) return true;
+    if (this.statusCode && this.statusCode >= 400 && this.statusCode < 500 && this.statusCode !== 429) return true;
+    if (this.errors && this.errors.length > 0) {
+      // Top level GraphQL errors like undefinedField, variableTypeMismatch, syntax errors
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the error is a temporary rate limit (429 or THROTTLED).
+   */
+  public isThrottled(): boolean {
+    if (this.statusCode === 429) return true;
+    if (this.errors && this.errors.some((e: any) => e.extensions?.code === 'THROTTLED' || e.message?.toLowerCase().includes('throttled'))) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the error was caused by a network timeout or connection abort.
+   */
+  public isTimeout(): boolean {
+    return this.statusCode === 504 || this.message.toLowerCase().includes('timed out');
+  }
 }
 
 export interface ShopifyClientConfig {
@@ -162,7 +195,7 @@ export class ShopifyAdminClient {
             continue;
           }
           const errorMsg = json.errors.map((e: any) => e.message).join('; ');
-          throw new ShopifyGraphQLError(`Shopify GraphQL Error: ${errorMsg}`, json.errors);
+          throw new ShopifyGraphQLError(`Shopify GraphQL Error: ${errorMsg}`, json.errors, undefined, response.status || 400);
         }
 
         // Check for mutation userErrors if applicable
@@ -170,8 +203,11 @@ export class ShopifyAdminClient {
         for (const key of dataKeys) {
           const mutationPayload = json.data[key];
           if (mutationPayload && Array.isArray(mutationPayload.userErrors) && mutationPayload.userErrors.length > 0) {
-            const userErrorMsg = mutationPayload.userErrors.map((e: any) => e.message).join('; ');
-            throw new ShopifyGraphQLError(`Shopify UserError: ${userErrorMsg}`, undefined, mutationPayload.userErrors);
+            const userErrorMsg = mutationPayload.userErrors.map((e: any) => {
+              const fieldStr = Array.isArray(e.field) ? e.field.join('.') : e.field ? String(e.field) : '';
+              return fieldStr ? `[${fieldStr}] ${e.message}` : e.message;
+            }).join('; ');
+            throw new ShopifyGraphQLError(`Shopify UserError: ${userErrorMsg}`, undefined, mutationPayload.userErrors, 422);
           }
         }
 

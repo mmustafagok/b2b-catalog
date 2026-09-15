@@ -182,15 +182,15 @@ describe('Milestone 5: Submit-Time Live Revalidation, Draft Order Creation & Ide
     });
     expect(capturedDraftOrderInput.customAttributes).toEqual(
       expect.arrayContaining([
-        { name: 'Business Name', value: 'Acme Workspace LLC' },
-        { name: 'Catalog', value: 'Wholesale Desks 2026' },
-        { name: 'Catalog ID', value: publishedCatalog.id },
-        { name: 'Submission Reference', value: expect.stringContaining('CatalogFlow-Submission:') },
-        { name: 'PO Number', value: 'PO-2026-001' },
+        { key: 'Business Name', value: 'Acme Workspace LLC' },
+        { key: 'Catalog', value: 'Wholesale Desks 2026' },
+        { key: 'Catalog ID', value: publishedCatalog.id },
+        { key: 'Submission Reference', value: expect.stringContaining('CatalogFlow-Submission:') },
+        { key: 'PO Number', value: 'PO-2026-001' },
       ])
     );
-    const attrNames = capturedDraftOrderInput.customAttributes.map((a: any) => a.name);
-    expect(attrNames).not.toContain('CatalogFlow Public Token');
+    const attrKeys = capturedDraftOrderInput.customAttributes.map((a: any) => a.key);
+    expect(attrKeys).not.toContain('CatalogFlow Public Token');
 
     // Verify atomic persistence in DB
     const submissionInDb = await prisma.orderSubmission.findFirst({

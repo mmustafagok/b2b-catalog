@@ -15,7 +15,7 @@ import { hashIdempotencyKey } from './auth.server.js';
 import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server.js';
 import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 import { sanitizeErrorMessage } from './security.server.js';
-import { SubmitStageTracker } from './incident.server.js';
+import { SubmitStageTracker, recordRuntimeIncident } from './incident.server.js';
 import crypto from 'crypto';
 
 export class OrderSubmissionError extends Error {
@@ -28,6 +28,20 @@ export class OrderSubmissionError extends Error {
     super(message);
     this.name = 'OrderSubmissionError';
   }
+}
+
+/**
+ * Validates strictly whether an ID is a Shopify ProductVariant GraphQL GID.
+ */
+export function isShopifyProductVariantGid(id: unknown): id is string {
+  return typeof id === 'string' && /^gid:\/\/shopify\/ProductVariant\/[a-zA-Z0-9_-]+$/.test(id.trim());
+}
+
+/**
+ * Validates strictly whether an ID is a Shopify DraftOrder GraphQL GID.
+ */
+export function isShopifyDraftOrderGid(id: unknown): id is string {
+  return typeof id === 'string' && /^gid:\/\/shopify\/DraftOrder\/[a-zA-Z0-9_-]+$/.test(id.trim());
 }
 
 export interface InventoryChangedItem {
@@ -137,7 +151,23 @@ export async function submitBuyerOrder(
     );
   }
 
-  // 3. Enforce Catalog Membership Authorization
+  // 3. Enforce Catalog Membership Authorization & Variant GID Integrity
+  const malformedGids: string[] = [];
+  for (const line of validated.lines) {
+    if (!isShopifyProductVariantGid(line.variantId)) {
+      malformedGids.push(line.variantId);
+    }
+  }
+  if (malformedGids.length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'INVALID_LINES');
+    throw new OrderSubmissionError(
+      'One or more requested items have invalid variant identifiers.',
+      422,
+      'INVALID_LINES',
+      { invalidVariants: malformedGids }
+    );
+  }
+
   const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
   const variantGids = validated.lines.map((l) => l.variantId);
 
@@ -300,8 +330,12 @@ export async function submitBuyerOrder(
             node {
               id
               name
-              totalPrice
-              currencyCode
+              totalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
             }
           }
         }
@@ -313,7 +347,9 @@ export async function submitBuyerOrder(
       const edges = searchRes?.draftOrders?.edges || [];
       if (edges.length > 0 && edges[0]?.node?.id) {
         const foundDraft = edges[0].node;
-        const subtotal = new Prisma.Decimal(foundDraft.totalPrice || '0.00');
+        const rawAmount = foundDraft.totalPriceSet?.shopMoney?.amount ?? foundDraft.totalPrice ?? '0.00';
+        const subtotal = new Prisma.Decimal(rawAmount);
+        const resolvedCurrency = foundDraft.totalPriceSet?.shopMoney?.currencyCode || foundDraft.currencyCode || catalog.shop.currency || 'USD';
 
         const updated = await prisma.orderSubmission.update({
           where: { id: submission.id },
@@ -323,7 +359,7 @@ export async function submitBuyerOrder(
             draftOrderName: foundDraft.name || null,
             correlationRef: correlationTag,
             subtotalAmount: subtotal,
-            currency: foundDraft.currencyCode || catalog.shop.currency || 'USD',
+            currency: resolvedCurrency,
             processingStartedAt: null,
             quotaReserved: true,
           },
@@ -542,8 +578,10 @@ export async function submitBuyerOrder(
     Number(catalog.discountPercent) > 0;
 
   const lineItemsInput = validated.lines.map((l) => {
+    const liveVariant = liveVariantMap.get(l.variantId);
+    const resolvedVariantGid = (liveVariant && liveVariant.id) || l.variantId;
     const item: any = {
-      variantId: l.variantId,
+      variantId: resolvedVariantGid,
       quantity: l.quantity,
     };
     if (hasDiscount) {
@@ -557,35 +595,36 @@ export async function submitBuyerOrder(
   });
 
   // Strict privacy: No publicToken, no raw idempotency key
-  const noteAttributes = [
-    { name: 'Business Name', value: validated.buyer.businessName },
-    { name: 'Catalog', value: catalog.name },
-    { name: 'Catalog ID', value: catalog.id },
-    { name: 'Submission Reference', value: correlationReference },
+  // Custom attributes must strictly follow AttributeInput { key, value }
+  const customAttributes: Array<{ key: string; value: string }> = [
+    { key: 'Business Name', value: String(validated.buyer.businessName).trim() },
+    { key: 'Catalog', value: String(catalog.name).trim() },
+    { key: 'Catalog ID', value: String(catalog.id).trim() },
+    { key: 'Submission Reference', value: String(correlationReference).trim() },
   ];
-  if (validated.buyer.poNumber) {
-    noteAttributes.push({ name: 'PO Number', value: validated.buyer.poNumber });
+  if (validated.buyer.poNumber && validated.buyer.poNumber.trim().length > 0) {
+    customAttributes.push({ key: 'PO Number', value: validated.buyer.poNumber.trim() });
   }
 
-  let noteBody = `[B2B Catalog Order]\nBusiness: ${validated.buyer.businessName}`;
-  if (validated.buyer.poNumber) {
-    noteBody += `\nPO Number: ${validated.buyer.poNumber}`;
+  let noteBody = `[B2B Catalog Order]\nBusiness: ${validated.buyer.businessName.trim()}`;
+  if (validated.buyer.poNumber && validated.buyer.poNumber.trim().length > 0) {
+    noteBody += `\nPO Number: ${validated.buyer.poNumber.trim()}`;
   }
-  if (validated.buyer.note) {
-    noteBody += `\nBuyer Notes: ${validated.buyer.note}`;
+  if (validated.buyer.note && validated.buyer.note.trim().length > 0) {
+    noteBody += `\nBuyer Notes: ${validated.buyer.note.trim()}`;
   }
 
+  // Minimal, standards-compliant DraftOrderInput
   const draftOrderInput: any = {
-    email: validated.buyer.email,
+    email: validated.buyer.email.trim(),
     note: noteBody,
     tags: ['B2B-Catalog', 'CatalogFlow', catalog.name, correlationTag],
-    customAttributes: noteAttributes,
+    customAttributes,
     lineItems: lineItemsInput,
-    useCustomerDefaultAddress: false,
   };
 
-  if (validated.buyer.poNumber) {
-    draftOrderInput.poNumber = validated.buyer.poNumber;
+  if (validated.buyer.poNumber && validated.buyer.poNumber.trim().length > 0) {
+    draftOrderInput.poNumber = validated.buyer.poNumber.trim();
   }
 
   const draftOrderMutation = `
@@ -594,8 +633,12 @@ export async function submitBuyerOrder(
         draftOrder {
           id
           name
-          totalPrice
-          currencyCode
+          totalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
         }
         userErrors {
           field
@@ -621,17 +664,66 @@ export async function submitBuyerOrder(
   try {
     draftRes = await client.request(draftOrderMutation, { input: draftOrderInput });
   } catch (mutationErr: any) {
-    // Conclusive rejection: GraphQL userErrors returned by Shopify
-    if (mutationErr instanceof ShopifyGraphQLError && mutationErr.userErrors && mutationErr.userErrors.length > 0) {
+    const isDefinitive =
+      mutationErr instanceof ShopifyGraphQLError &&
+      (mutationErr.isDefinitiveClientError() ||
+        (mutationErr.userErrors && mutationErr.userErrors.length > 0) ||
+        (mutationErr.errors && mutationErr.errors.length > 0) ||
+        (mutationErr.statusCode !== undefined && mutationErr.statusCode >= 400 && mutationErr.statusCode < 500 && mutationErr.statusCode !== 429));
+
+    if (isDefinitive) {
+      // Conclusive rejection: Shopify rejected the mutation before creating any Draft Order.
+      // Quota MUST be released exactly once.
       await releaseSubmissionQuotaReservation(submission.id);
+
+      const rawMsg = mutationErr.message || 'Shopify rejected draft order creation';
+      const isPermissionDenied =
+        mutationErr.statusCode === 401 ||
+        mutationErr.statusCode === 403 ||
+        rawMsg.toLowerCase().includes('access denied') ||
+        rawMsg.toLowerCase().includes('permission');
+
+      const errorCode = isPermissionDenied
+        ? 'DRAFT_ORDER_PERMISSION_DENIED'
+        : mutationErr.userErrors && mutationErr.userErrors.length > 0
+        ? 'DRAFT_ORDER_VALIDATION_FAILED'
+        : 'DRAFT_ORDER_CREATE_FAILED';
+
       await prisma.orderSubmission.update({
         where: { id: submission.id },
-        data: { status: 'FAILED', processingStartedAt: null, lastError: 'Shopify rejected draft order creation' },
+        data: {
+          status: 'FAILED',
+          processingStartedAt: null,
+          quotaReserved: false,
+          lastError: sanitizeErrorMessage(rawMsg),
+        },
       });
+
+      tracker.transition('SUBMISSION_FAILED', errorCode);
+
+      void recordRuntimeIncident({
+        type: 'DRAFT_ORDER_MUTATION_FAILED',
+        requestId: correlationId,
+        route: '/api/public/catalog/submit',
+        errorCode,
+        message: sanitizeErrorMessage(rawMsg),
+        metadata: {
+          submissionId: submission.id,
+          userErrors: mutationErr.userErrors || null,
+          graphQLErrors: mutationErr.errors || null,
+          statusCode: mutationErr.statusCode || null,
+        },
+      });
+
+      const userFacingMsg = isPermissionDenied
+        ? 'Draft Order creation failed due to store permissions. Please contact the merchant.'
+        : "We couldn't create the Shopify Draft Order. Your order was not confirmed.";
+
       throw new OrderSubmissionError(
-        'Shopify Draft Order creation was rejected. Please review order items.',
-        422,
-        'VALIDATION_FAILED'
+        userFacingMsg,
+        isPermissionDenied ? 403 : 422,
+        errorCode,
+        mutationErr.userErrors || undefined
       );
     }
 
@@ -639,47 +731,90 @@ export async function submitBuyerOrder(
     // The request may have reached Shopify and created the draft order before the connection was lost.
     // DO NOT release quota.
     // Mark submission as REQUIRES_RECONCILIATION and preserve correlationRef for subsequent tag-based reconciliation.
+    const isTimeout = mutationErr instanceof ShopifyGraphQLError && mutationErr.isTimeout();
+    const ambiguousCode = isTimeout ? 'SHOPIFY_TIMEOUT' : 'SHOPIFY_API_ERROR';
+
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
         status: 'REQUIRES_RECONCILIATION',
         processingStartedAt: null,
         correlationRef: correlationTag,
-        lastError: 'Ambiguous transport failure during draft order creation',
+        lastError: isTimeout ? 'Request timed out during draft order creation' : 'Ambiguous transport failure during draft order creation',
       },
     });
-    tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
+
+    tracker.transition('SUBMISSION_FAILED', ambiguousCode);
+
+    void recordRuntimeIncident({
+      type: 'DRAFT_ORDER_TRANSPORT_ERROR',
+      requestId: correlationId,
+      route: '/api/public/catalog/submit',
+      errorCode: ambiguousCode,
+      message: sanitizeErrorMessage(mutationErr.message),
+      metadata: {
+        submissionId: submission.id,
+        isTimeout,
+      },
+    });
+
     throw new OrderSubmissionError(
       'Draft order creation encountered a network error or timeout. Please retry to confirm order status.',
       502,
-      'SHOPIFY_API_ERROR'
+      ambiguousCode
     );
   }
 
   if (draftRes.draftOrderCreate?.userErrors?.length > 0) {
+    const userErrors = draftRes.draftOrderCreate.userErrors;
+    const userErrorMsg = userErrors.map((e: any) => {
+      const fieldStr = Array.isArray(e.field) ? e.field.join('.') : e.field ? String(e.field) : '';
+      return fieldStr ? `[${fieldStr}] ${e.message}` : e.message;
+    }).join('; ');
+
     await releaseSubmissionQuotaReservation(submission.id);
     await prisma.orderSubmission.update({
       where: { id: submission.id },
-      data: { status: 'FAILED', processingStartedAt: null, lastError: 'Shopify rejected draft order creation' },
+      data: {
+        status: 'FAILED',
+        processingStartedAt: null,
+        quotaReserved: false,
+        lastError: sanitizeErrorMessage(userErrorMsg),
+      },
     });
-    tracker.transition('SUBMISSION_FAILED', 'VALIDATION_FAILED');
+
+    tracker.transition('SUBMISSION_FAILED', 'DRAFT_ORDER_VALIDATION_FAILED');
+
+    void recordRuntimeIncident({
+      type: 'DRAFT_ORDER_MUTATION_FAILED',
+      requestId: correlationId,
+      route: '/api/public/catalog/submit',
+      errorCode: 'DRAFT_ORDER_VALIDATION_FAILED',
+      message: sanitizeErrorMessage(userErrorMsg),
+      metadata: {
+        submissionId: submission.id,
+        userErrors,
+      },
+    });
+
     throw new OrderSubmissionError(
-      'Shopify Draft Order creation was rejected. Please review order items.',
+      "We couldn't create the Shopify Draft Order. Your order was not confirmed.",
       422,
-      'VALIDATION_FAILED'
+      'DRAFT_ORDER_VALIDATION_FAILED',
+      userErrors
     );
   }
 
   const createdDraft = draftRes.draftOrderCreate?.draftOrder;
-  if (!createdDraft || !createdDraft.id) {
-    // Ambiguous response: response was received without userErrors but missing draftOrder id
+  if (!createdDraft || !createdDraft.id || !isShopifyDraftOrderGid(createdDraft.id)) {
+    // Ambiguous response: response was received without userErrors but missing valid draftOrder id
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
         status: 'REQUIRES_RECONCILIATION',
         processingStartedAt: null,
         correlationRef: correlationTag,
-        lastError: 'Shopify returned ambiguous response without draft order id',
+        lastError: 'Shopify returned ambiguous response without valid draft order id',
       },
     });
     tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
@@ -688,8 +823,10 @@ export async function submitBuyerOrder(
 
   tracker.transition('DRAFT_ORDER_CREATE_COMPLETED');
 
-  const currency = catalog.shop.currency || createdDraft.currencyCode || 'USD';
-  const subtotalNumber = parseFloat(subtotalDecimal.toFixed(2));
+  const draftMoney = createdDraft.totalPriceSet?.shopMoney;
+  const draftSubtotal = draftMoney?.amount ? new Prisma.Decimal(draftMoney.amount) : (createdDraft.totalPrice ? new Prisma.Decimal(createdDraft.totalPrice) : subtotalDecimal);
+  const currency = catalog.shop.currency || draftMoney?.currencyCode || createdDraft.currencyCode || 'USD';
+  const subtotalNumber = parseFloat(draftSubtotal.toFixed(2));
 
   // 9. Mark Submission COMPLETED
   // If local DB fails here, mark status as REQUIRES_RECONCILIATION so retry recovers draft order without duplicate creation
