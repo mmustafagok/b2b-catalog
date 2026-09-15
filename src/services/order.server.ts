@@ -44,6 +44,63 @@ export function isShopifyDraftOrderGid(id: unknown): id is string {
   return typeof id === 'string' && /^gid:\/\/shopify\/DraftOrder\/[a-zA-Z0-9_-]+$/.test(id.trim());
 }
 
+/**
+ * Canonical helper for generating deterministic, collision-resistant Draft Order idempotency tags.
+ * Ensures the generated tag is strictly <= 40 characters to comply with Shopify's tag length limit.
+ *
+ * Design: cfb2b:<sha256(idempotencyKey).slice(0, 32)>
+ * Length: 6 ('cfb2b:') + 32 (hex) = 38 characters.
+ */
+export function buildDraftOrderIdempotencyTag(idempotencyKey: string): string {
+  if (!idempotencyKey || typeof idempotencyKey !== 'string') {
+    throw new Error('idempotencyKey is required to generate Draft Order idempotency tag');
+  }
+  const hash = crypto
+    .createHash('sha256')
+    .update(idempotencyKey.trim())
+    .digest('hex')
+    .slice(0, 32);
+  const tag = `cfb2b:${hash}`;
+  if (tag.length > 40) {
+    throw new Error(`Generated Draft Order idempotency tag exceeds Shopify 40-character limit: ${tag.length}`);
+  }
+  return tag;
+}
+
+/**
+ * Sanitizes and bounds any dynamic or user-provided tag to guarantee it never exceeds Shopify's 40-character limit.
+ */
+export function sanitizeShopifyTag(tag: string, maxLength = 40): string {
+  const cleaned = String(tag || '').trim();
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+  return cleaned.slice(0, maxLength);
+}
+
+/**
+ * Centralized Draft Order tag builder ensuring every single generated tag strictly satisfies length <= 40.
+ */
+export function buildDraftOrderTags(catalogName: string, idempotencyKey: string): string[] {
+  const idempotencyTag = buildDraftOrderIdempotencyTag(idempotencyKey);
+  const sanitizedCatalogName = sanitizeShopifyTag(catalogName, 40);
+
+  const candidateTags = ['B2B-Catalog', 'CatalogFlow', sanitizedCatalogName, idempotencyTag];
+
+  const uniqueTags: string[] = [];
+  for (const raw of candidateTags) {
+    const sanitized = sanitizeShopifyTag(raw, 40);
+    if (sanitized.length > 0 && !uniqueTags.includes(sanitized)) {
+      if (sanitized.length > 40) {
+        throw new Error(`Shopify tag exceeds 40 characters: "${sanitized}" (${sanitized.length})`);
+      }
+      uniqueTags.push(sanitized);
+    }
+  }
+
+  return uniqueTags;
+}
+
 export interface InventoryChangedItem {
   variantId: string;
   title: string;
@@ -303,6 +360,7 @@ export async function submitBuyerOrder(
           quotaCycleAnchor: activeAnchor,
           quotaReserved: true,
           currency: catalog.shop.currency || 'USD',
+          correlationRef: buildDraftOrderIdempotencyTag(idempotencyKey),
         },
       });
     } catch (insertErr: any) {
@@ -318,7 +376,7 @@ export async function submitBuyerOrder(
 
   tracker.transition('QUOTA_RESERVED');
 
-  const correlationTag = `cf-sub:${submission.id}`;
+  const correlationTag = buildDraftOrderIdempotencyTag(idempotencyKey);
   const correlationReference = `CatalogFlow-Submission:${submission.id}`;
 
   // 6. Shopify-Side Reconciliation for Ambiguous Retries
@@ -618,7 +676,7 @@ export async function submitBuyerOrder(
   const draftOrderInput: any = {
     email: validated.buyer.email.trim(),
     note: noteBody,
-    tags: ['B2B-Catalog', 'CatalogFlow', catalog.name, correlationTag],
+    tags: buildDraftOrderTags(catalog.name, idempotencyKey),
     customAttributes,
     lineItems: lineItemsInput,
   };
@@ -1130,7 +1188,11 @@ export async function reconcileSubmission(
 
   const shop = submission.catalog.shop;
   const client = customClient || new ShopifyAdminClient({ shopId: shop.id, shopDomain: shop.shopDomain });
-  const correlationTag = `cf-sub:${submission.id}`;
+  const correlationTag =
+    submission.correlationRef ||
+    (submission.idempotencyKeyHash
+      ? `cfb2b:${submission.idempotencyKeyHash.slice(0, 32)}`
+      : buildDraftOrderIdempotencyTag(submission.id));
 
   const findDraftQuery = `
     query findDraftOrderByCorrelationTag($query: String!) {
@@ -1139,8 +1201,18 @@ export async function reconcileSubmission(
           node {
             id
             name
-            totalPrice
-            currencyCode
+            subtotalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            totalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
           }
         }
       }
@@ -1152,7 +1224,10 @@ export async function reconcileSubmission(
 
   if (edges.length > 0 && edges[0]?.node?.id) {
     const foundDraft = edges[0].node;
-    const subtotal = new Prisma.Decimal(foundDraft.totalPrice || '0.00');
+    const rawAmount = foundDraft.totalPriceSet?.shopMoney?.amount ?? foundDraft.totalPrice ?? '0.00';
+    const subtotal = new Prisma.Decimal(rawAmount);
+    const resolvedCurrency =
+      foundDraft.totalPriceSet?.shopMoney?.currencyCode || foundDraft.currencyCode || shop.currency || 'USD';
 
     const updated = await prisma.orderSubmission.update({
       where: { id: submission.id },
@@ -1162,7 +1237,7 @@ export async function reconcileSubmission(
         draftOrderName: foundDraft.name || null,
         correlationRef: correlationTag,
         subtotalAmount: subtotal,
-        currency: foundDraft.currencyCode || shop.currency || 'USD',
+        currency: resolvedCurrency,
         processingStartedAt: null,
         quotaReserved: true,
         lastError: null,

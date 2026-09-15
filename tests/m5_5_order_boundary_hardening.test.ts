@@ -717,7 +717,7 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
         createDraftOrderCalls++;
         // Simulate side effect in Shopify: draft order is created with correlation tag from vars
         const tags = vars?.input?.tags || [];
-        const correlationTag = tags.find((t: string) => t.startsWith('cf-sub:'));
+        const correlationTag = tags.find((t: string) => t.startsWith('cf-sub:') || t.startsWith('cfb2b:'));
         draftOrderCreatedInShopify = {
           id: 'gid://shopify/DraftOrder/timeout-888',
           name: '#D-TIMEOUT',
