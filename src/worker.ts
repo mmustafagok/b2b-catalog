@@ -1,6 +1,12 @@
 import 'dotenv/config';
+import './services/worker-env.js';
 import { validateEnvironment } from './services/env.server.js';
 import { claimNextJob, executeJob, failJob, recoverStaleJobs } from './services/job-queue.server.js';
+
+// In worker process, assign WORKER_DATABASE_URL before PrismaClient initializes if present
+if (process.env.WORKER_DATABASE_URL) {
+  process.env.DATABASE_URL = process.env.WORKER_DATABASE_URL;
+}
 
 validateEnvironment();
 
