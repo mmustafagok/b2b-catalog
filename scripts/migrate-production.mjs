@@ -38,24 +38,30 @@ function normalizeDbUrl(raw) {
   return url;
 }
 
-function safeProtocol(url) {
-  // Returns protocol label without exposing credentials
-  if (!url) return 'none';
-  const match = url.match(/^([a-z]+:\/\/)/);
-  return match ? match[1] : url.slice(0, 12) + '...';
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const raw = process.env.DATABASE_URL;
 const normalized = normalizeDbUrl(raw);
 
-// Safe diagnostics — never print the full URL or credentials
+// Safe diagnostics — never print credentials, raw URL, or sensitive data
+let parsedHostname = null;
+if (normalized) {
+  try {
+    parsedHostname = new URL(normalized).hostname || null;
+  } catch {
+    parsedHostname = 'invalid_url';
+  }
+}
+
 console.log('[migrate-production] DATABASE_URL diagnostics:');
-console.log(`  exists   : ${Boolean(raw)}`);
-console.log(`  raw len  : ${raw ? raw.length : 0}`);
-console.log(`  norm len : ${normalized ? normalized.length : 0}`);
-console.log(`  protocol : ${safeProtocol(normalized)}`);
+console.log(`  raw length: ${raw ? raw.length : 0}`);
+console.log(`  raw starts with "postgresql://": ${Boolean(raw && raw.startsWith('postgresql://'))}`);
+console.log(`  raw starts with "postgres://": ${Boolean(raw && raw.startsWith('postgres://'))}`);
+console.log(`  raw starts with "//": ${Boolean(raw && raw.startsWith('//'))}`);
+console.log(`  raw contains "@": ${Boolean(raw && raw.includes('@'))}`);
+console.log(`  raw contains "?sslmode=require": ${Boolean(raw && raw.includes('?sslmode=require'))}`);
+console.log(`  parsed hostname only AFTER normalization: ${parsedHostname}`);
+console.log(`  normalized length: ${normalized ? normalized.length : 0}`);
 
 if (!normalized) {
   console.error('[migrate-production] FATAL: DATABASE_URL is not set. Exiting.');
@@ -63,8 +69,7 @@ if (!normalized) {
 }
 
 if (!normalized.startsWith('postgresql://') && !normalized.startsWith('postgres://')) {
-  const safeHead = normalized.slice(0, 16).replace(/./g, (c, i) => (i < 12 ? c : '*'));
-  console.error(`[migrate-production] FATAL: Normalized URL does not start with postgresql:// or postgres://. Head: "${safeHead}..."`);
+  console.error('[migrate-production] FATAL: Normalized URL does not start with postgresql:// or postgres://.');
   process.exit(1);
 }
 
