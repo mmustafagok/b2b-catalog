@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { authenticatedFetch, ensureAppBridgeLoaded } from './appBridgeAuth.js';
 import { EditCatalogModal, CatalogSummary } from './EditCatalogModal.js';
+import { CatalogConfigurationForm, CatalogFormState } from './CatalogConfigurationForm.js';
 import { OrderLinksModal } from './OrderLinksModal.js';
 import { VariantConfigsModal } from './VariantConfigsModal.js';
 import './merchant.css';
@@ -424,124 +425,64 @@ export const MerchantAppShell: React.FC = () => {
     }
   };
 
+  const [createWizardTab, setCreateWizardTab] = useState<'sources' | 'pricing' | 'rules' | 'form'>('sources');
+  const [createFormState, setCreateFormState] = useState<CatalogFormState>({
+    name: '',
+    priceMode: 'SHOPIFY_PRICE',
+    discountPercent: 10,
+    customPriceAmount: '',
+    accentColor: '#108043',
+    showSku: true,
+    inventoryMode: 'STATUS_ONLY',
+    inventoryCap: '50',
+    minQty: 1,
+    maxQty: '',
+    qtyIncrement: 1,
+    buyerFormConfig: { showBuyerName: true, requireBuyerName: false, showPhone: false, requirePhone: false, showTaxId: false, requireTaxId: false, showPoNumber: true, requirePoNumber: false, showNote: true, requireNote: false },
+    sources: [],
+  });
+
   // ── Wizard helpers ─────────────────────────────────────────────────────────
   const openCreateWizard = () => {
-    setWizardStep(1);
-    setSearchTab('COLLECTION');
-    setSearchQuery('');
-    setSearchResults([]);
-    setSelectedSources([]);
-    setNewPriceMode('SHOPIFY_PRICE');
-    setNewDiscount(10);
-    setNewCustomPriceAmount('');
-    setNewInventoryMode('STATUS_ONLY');
-    setNewInventoryCap('50');
-    setNewMinQty(1);
-    setNewMaxQty('');
-    setNewQtyIncrement(1);
-    setNewShowPhone(false);
-    setNewRequirePhone(false);
-    setNewShowTaxId(false);
-    setNewRequireTaxId(false);
-    setNewShowPoNumber(true);
-    setNewRequirePoNumber(false);
-    setNewShowNote(true);
-    setNewCatalogName('');
-    setNewAccentColor('#108043');
+    setCreateWizardTab('sources');
+    setCreateFormState({
+      name: '',
+      priceMode: 'SHOPIFY_PRICE',
+      discountPercent: 10,
+      customPriceAmount: '',
+      accentColor: '#108043',
+      showSku: true,
+      inventoryMode: 'STATUS_ONLY',
+      inventoryCap: '50',
+      minQty: 1,
+      maxQty: '',
+      qtyIncrement: 1,
+      buyerFormConfig: { showBuyerName: true, requireBuyerName: false, showPhone: false, requirePhone: false, showTaxId: false, requireTaxId: false, showPoNumber: true, requirePoNumber: false, showNote: true, requireNote: false },
+      sources: [],
+    });
     setNewPublish(false);
     setShowCreateModal(true);
   };
 
-  const runSearch = useCallback(async (tab: 'COLLECTION' | 'PRODUCT', q: string) => {
-    setSearchLoading(true);
-    setSearchResults([]);
-    setSearchError(null);
-    try {
-      const endpoint = tab === 'COLLECTION'
-        ? `/api/admin/collections/search?q=${encodeURIComponent(q)}&limit=20`
-        : `/api/admin/products/search?q=${encodeURIComponent(q)}&limit=20`;
-      const res = await authenticatedFetch(endpoint);
-      if (!res.ok) {
-        setSearchError(`Search failed (${res.status}). Please try again.`);
-        return;
-      }
-      const data = await res.json();
-      if (tab === 'COLLECTION') {
-        setSearchResults((data.collections || []).map((c: any) => ({
-          id: c.id, title: c.title, imageUrl: c.imageUrl,
-          detail: c.productsCount != null ? `${c.productsCount} products` : null,
-        })));
-      } else {
-        setSearchResults((data.products || []).map((p: any) => {
-          const variants = p.variants || [];
-          let stockDetail = p.price ? `From $${p.price}` : '';
-          if (variants.length > 0) {
-            const variantSummaries = variants
-              .slice(0, 5)
-              .map((v: any) => `${v.title}: ${v.inventoryQuantity ?? 0} available`)
-              .join(', ');
-            const more = variants.length > 5 ? ` +${variants.length - 5} more` : '';
-            stockDetail = stockDetail ? `${stockDetail} • ${variantSummaries}${more}` : `${variantSummaries}${more}`;
-          }
-          return {
-            id: p.id,
-            title: p.title,
-            imageUrl: p.imageUrl,
-            detail: stockDetail || null,
-          };
-        }));
-      }
-    } catch (err: any) {
-      setSearchError(err.message || 'Network error during search. Please try again.');
-    } finally {
-      setSearchLoading(false);
-    }
-  }, [authenticatedFetch]);
-
-  // Debounced search
-  useEffect(() => {
-    if (!showCreateModal || wizardStep !== 1) return;
-    const t = setTimeout(() => runSearch(searchTab, searchQuery), 350);
-    return () => clearTimeout(t);
-  }, [searchQuery, searchTab, showCreateModal, wizardStep, runSearch]);
-
-  const toggleSource = (item: ResourceItem) => {
-    setSelectedSources((prev) => {
-      const exists = prev.some((s) => s.id === item.id);
-      if (exists) return prev.filter((s) => s.id !== item.id);
-      return [...prev, { type: searchTab, id: item.id, title: item.title }];
-    });
-  };
-
-  const removeSource = (id: string) => setSelectedSources((prev) => prev.filter((s) => s.id !== id));
-
   const handleCreateCatalog = async () => {
-    if (!newCatalogName.trim()) { showToast('Catalog name is required'); return; }
-    if (selectedSources.length === 0) { showToast('Select at least one product or collection'); return; }
+    if (!createFormState.name.trim()) { showToast('Catalog name is required'); return; }
+    if (createFormState.sources.length === 0) { showToast('Select at least one product or collection'); return; }
     setCreatingCatalog(true);
     try {
       const payload = {
-        name: newCatalogName.trim(),
-        priceMode: newPriceMode,
-        discountPercent: newPriceMode === 'PERCENT_DISCOUNT' ? Number(newDiscount) : 0,
-        customPriceAmount: newPriceMode === 'CUSTOM_PRICE' ? (parseFloat(newCustomPriceAmount) || null) : null,
-        accentColor: newAccentColor,
-        showSku: true,
-        inventoryMode: newInventoryMode,
-        inventoryCap: newInventoryMode === 'CAPPED' ? (parseInt(newInventoryCap, 10) || 50) : null,
-        minQty: Math.max(1, newMinQty),
-        maxQty: newMaxQty ? parseInt(newMaxQty, 10) : null,
-        qtyIncrement: Math.max(1, newQtyIncrement),
-        buyerFormConfig: {
-          showPhone: newShowPhone,
-          requirePhone: newRequirePhone,
-          showTaxId: newShowTaxId,
-          requireTaxId: newRequireTaxId,
-          showPoNumber: newShowPoNumber,
-          requirePoNumber: newRequirePoNumber,
-          showNote: newShowNote,
-        },
-        sources: selectedSources.map((s) => ({ type: s.type, shopifyGid: s.id })),
+        name: createFormState.name.trim(),
+        priceMode: createFormState.priceMode,
+        discountPercent: createFormState.priceMode === 'PERCENT_DISCOUNT' ? Number(createFormState.discountPercent) : 0,
+        customPriceAmount: createFormState.priceMode === 'CUSTOM_PRICE' ? (parseFloat(createFormState.customPriceAmount) || null) : null,
+        accentColor: createFormState.accentColor,
+        showSku: createFormState.showSku,
+        inventoryMode: createFormState.inventoryMode,
+        inventoryCap: createFormState.inventoryMode === 'CAPPED' ? (parseInt(createFormState.inventoryCap, 10) || 50) : null,
+        minQty: Math.max(1, createFormState.minQty),
+        maxQty: createFormState.maxQty ? parseInt(createFormState.maxQty, 10) : null,
+        qtyIncrement: Math.max(1, createFormState.qtyIncrement),
+        buyerFormConfig: createFormState.buyerFormConfig,
+        sources: createFormState.sources.map((s) => ({ type: s.type, shopifyGid: s.id })),
       };
       const res = await authenticatedFetch('/api/admin/catalogs', {
         method: 'POST',
@@ -900,11 +841,11 @@ export const MerchantAppShell: React.FC = () => {
                     <table className="cf-table">
                       <thead>
                         <tr>
-                          <th>Name</th>
+                          <th>Catalog Name</th>
                           <th>Status</th>
-                          <th>Inventory Scope</th>
-                          <th>Pricing Rule</th>
-                          <th>Buyer Link</th>
+                          <th>Products & Variants</th>
+                          <th>Pricing & Inventory</th>
+                          <th>Share Link</th>
                           <th>Actions</th>
                         </tr>
                       </thead>
@@ -913,6 +854,9 @@ export const MerchantAppShell: React.FC = () => {
                           <tr key={cat.id}>
                             <td>
                               <strong>{cat.name}</strong>
+                              <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#64748b', marginTop: '2px' }}>
+                                ID: {cat.id.slice(0, 8)}…
+                              </div>
                             </td>
                             <td>
                               <span
@@ -924,46 +868,65 @@ export const MerchantAppShell: React.FC = () => {
                               </span>
                             </td>
                             <td>
-                              <span style={{ fontSize: '0.86rem' }}>
-                                {cat.variantCount ?? 0} variants ({cat.productCount ?? 0} products)
+                              <span style={{ fontSize: '0.86rem', fontWeight: 500 }}>
+                                {cat.productCount ?? 0} products ({cat.variantCount ?? 0} variants)
                               </span>
                             </td>
                             <td>
-                              {cat.priceMode === 'PERCENT_DISCOUNT'
-                                ? `${cat.discountPercent}% Wholesale Discount`
-                                : 'Shopify Retail Price'}
+                              <div style={{ fontSize: '0.86rem' }}>
+                                <div>
+                                  {cat.priceMode === 'PERCENT_DISCOUNT'
+                                    ? `${cat.discountPercent}% Wholesale Discount`
+                                    : cat.priceMode === 'CUSTOM_PRICE'
+                                    ? `$${cat.customPriceAmount ?? '—'} Fixed Wholesale`
+                                    : 'Shopify Retail Price'}
+                                </div>
+                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                  Inventory: {cat.inventoryMode || 'STATUS_ONLY'}
+                                </span>
+                              </div>
                             </td>
                             <td>
                               {cat.status === 'PUBLISHED' ? (
-                                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                                  <button
-                                    className="cf-btn cf-btn-sm cf-btn-secondary"
-                                    onClick={() => handleCopyLink(cat.publicToken)}
-                                    title="Copy buyer link"
-                                  >
-                                    📋 Copy
-                                  </button>
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-outline"
+                                  onClick={() => handleCopyLink(cat.publicToken)}
+                                  title="Copy live buyer link to clipboard"
+                                >
+                                  📋 Copy Link
+                                </button>
+                              ) : (
+                                <span className="cf-text-muted" style={{ fontSize: '0.82rem' }}>
+                                  Draft (Unpublished)
+                                </span>
+                              )}
+                            </td>
+                            <td>
+                              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                {cat.status === 'PUBLISHED' && (
                                   <a
                                     href={`/c/${cat.publicToken}`}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="cf-btn cf-btn-sm cf-btn-outline"
-                                    title="Open catalog preview"
+                                    className="cf-btn cf-btn-sm cf-btn-primary"
+                                    title="Open catalog preview in new tab"
                                   >
                                     Preview ↗
                                   </a>
-                                </div>
-                              ) : (
-                                <span className="cf-text-muted">Unpublished (Draft)</span>
-                              )}
-                            </td>
-                            <td>
-                              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                )}
                                 <button
-                                  className="cf-btn cf-btn-sm cf-btn-outline"
-                                  onClick={() => handlePublishToggle(cat)}
+                                  className="cf-btn cf-btn-sm cf-btn-secondary"
+                                  onClick={() => setEditingCatalog(cat)}
+                                  title="Edit products and catalog configuration"
                                 >
-                                  {cat.status === 'PUBLISHED' ? 'Unpublish' : 'Publish'}
+                                  ✏️ Edit
+                                </button>
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-secondary"
+                                  onClick={() => setVariantConfigsCatalog(cat)}
+                                  title="Configure variant availability and overrides"
+                                >
+                                  ⚙️ Variants
                                 </button>
                                 <button
                                   className="cf-btn cf-btn-sm cf-btn-secondary"
@@ -973,18 +936,10 @@ export const MerchantAppShell: React.FC = () => {
                                   🔗 Links
                                 </button>
                                 <button
-                                  className="cf-btn cf-btn-sm cf-btn-secondary"
-                                  onClick={() => setVariantConfigsCatalog(cat)}
-                                  title="Configure variant availability and rules"
+                                  className="cf-btn cf-btn-sm cf-btn-outline"
+                                  onClick={() => handlePublishToggle(cat)}
                                 >
-                                  ⚙️ Variants
-                                </button>
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-secondary"
-                                  onClick={() => setEditingCatalog(cat)}
-                                  title="Edit catalog settings"
-                                >
-                                  ✏️ Edit
+                                  {cat.status === 'PUBLISHED' ? 'Unpublish' : 'Publish'}
                                 </button>
                               </div>
                             </td>
@@ -1367,260 +1322,131 @@ export const MerchantAppShell: React.FC = () => {
         )}
       </main>
 
-      {/* ── Catalog Creation Wizard ─────────────────────────────── */}
+      {/* ── Catalog Creation Modal ─────────────────────────────── */}
       {showCreateModal && (
-        <div className="cf-modal-backdrop">
-          <div className="cf-modal cf-modal-wide">
+        <div className="cf-modal-backdrop" onClick={() => setShowCreateModal(false)}>
+          <div className="cf-modal cf-modal-wide" onClick={(e) => e.stopPropagation()}>
             {/* Header */}
             <div className="cf-modal-header">
-              <div className="cf-wizard-header-inner">
-                <h3>Create Wholesale Catalog</h3>
-                <div className="cf-wizard-steps">
-                  {[1, 2, 3].map((s) => (
-                    <div key={s} className={`cf-wizard-step ${wizardStep === s ? 'active' : ''} ${wizardStep > s ? 'done' : ''}`}>
-                      <span className="cf-wizard-dot">{wizardStep > s ? '✓' : s}</span>
-                      <span className="cf-wizard-label">{s === 1 ? 'Sources' : s === 2 ? 'Pricing' : 'Details'}</span>
-                    </div>
-                  ))}
-                </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <h3 style={{ margin: 0 }}>Create Wholesale Catalog</h3>
               </div>
               <button type="button" className="cf-close-btn" onClick={() => setShowCreateModal(false)}>✕</button>
             </div>
 
-            <div className="cf-modal-body">
+            <div className="cf-modal-body" style={{ minHeight: '380px' }}>
+              {/* Navigation Tabs */}
+              <div
+                className="cf-tab-header"
+                style={{
+                  display: 'flex',
+                  gap: '0.5rem',
+                  borderBottom: '1px solid #e2e8f0',
+                  marginBottom: '1.25rem',
+                  paddingBottom: '0.5rem',
+                }}
+              >
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${createWizardTab === 'sources' ? 'active' : ''}`}
+                  onClick={() => setCreateWizardTab('sources')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: createWizardTab === 'sources' ? 700 : 500,
+                    color: createWizardTab === 'sources' ? '#108043' : '#64748b',
+                    borderBottom: createWizardTab === 'sources' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  📦 Products & Sources ({createFormState.sources.length})
+                </button>
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${createWizardTab === 'pricing' ? 'active' : ''}`}
+                  onClick={() => setCreateWizardTab('pricing')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: createWizardTab === 'pricing' ? 700 : 500,
+                    color: createWizardTab === 'pricing' ? '#108043' : '#64748b',
+                    borderBottom: createWizardTab === 'pricing' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  🏷️ Pricing & Inventory
+                </button>
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${createWizardTab === 'rules' ? 'active' : ''}`}
+                  onClick={() => setCreateWizardTab('rules')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: createWizardTab === 'rules' ? 700 : 500,
+                    color: createWizardTab === 'rules' ? '#108043' : '#64748b',
+                    borderBottom: createWizardTab === 'rules' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  ⚙️ Quantity Rules & Branding
+                </button>
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${createWizardTab === 'form' ? 'active' : ''}`}
+                  onClick={() => setCreateWizardTab('form')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: createWizardTab === 'form' ? 700 : 500,
+                    color: createWizardTab === 'form' ? '#108043' : '#64748b',
+                    borderBottom: createWizardTab === 'form' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  📋 Buyer Checkout Form
+                </button>
+              </div>
 
-              {/* ── STEP 1: Source Selector ──────────────────────── */}
-              {wizardStep === 1 && (
-                <div className="cf-wizard-pane">
-                  <p className="cf-wizard-hint">Select the Shopify collections or products to include in this catalog.</p>
+              <CatalogConfigurationForm
+                formState={createFormState}
+                onChange={(updates) => setCreateFormState((prev) => ({ ...prev, ...updates }))}
+                activeTab={createWizardTab}
+              />
 
-                  {/* Tab toggle */}
-                  <div className="cf-seg-tabs">
-                    <button
-                      type="button"
-                      className={`cf-seg-tab ${searchTab === 'COLLECTION' ? 'active' : ''}`}
-                      onClick={() => { setSearchTab('COLLECTION'); setSearchQuery(''); setSearchResults([]); }}
-                    >
-                      Collections
-                    </button>
-                    <button
-                      type="button"
-                      className={`cf-seg-tab ${searchTab === 'PRODUCT' ? 'active' : ''}`}
-                      onClick={() => { setSearchTab('PRODUCT'); setSearchQuery(''); setSearchResults([]); }}
-                    >
-                      Products
-                    </button>
-                  </div>
+              <div style={{ marginTop: '1rem', paddingTop: '0.75rem', borderTop: '1px solid #e2e8f0' }}>
+                <label className="cf-publish-toggle" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={newPublish}
+                    onChange={(e) => setNewPublish(e.target.checked)}
+                    id="cf-publish-on-create"
+                  />
+                  <span style={{ fontSize: '0.88rem', fontWeight: 500 }}>Publish immediately after creation</span>
+                </label>
+              </div>
+            </div>
 
-                  {/* Search input */}
-                  <div className="cf-search-bar">
-                    <span className="cf-search-icon">🔍</span>
-                    <input
-                      id="cf-resource-search"
-                      type="search"
-                      className="cf-input cf-search-input"
-                      placeholder={searchTab === 'COLLECTION' ? 'Search collections…' : 'Search products…'}
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      autoFocus
-                    />
-                  </div>
-
-                  {/* Results list */}
-                  <div className="cf-resource-list">
-                    {searchLoading && <div className="cf-resource-loading"><div className="cf-spinner-sm"></div> Searching…</div>}
-                    {/* Search error state — shown distinctly from empty results */}
-                  {searchError && (
-                    <div className="cf-resource-empty" style={{ color: '#c52707' }}>
-                      ⚠️ {searchError}
-                    </div>
-                  )}
-                  {!searchLoading && !searchError && searchResults.length === 0 && searchQuery.length > 0 && (
-                      <div className="cf-resource-empty">No {searchTab === 'COLLECTION' ? 'collections' : 'products'} found for "{searchQuery}"</div>
-                    )}
-                    {!searchLoading && !searchError && searchResults.length === 0 && searchQuery.length === 0 && (
-                      <div className="cf-resource-empty">Start typing to search your Shopify {searchTab === 'COLLECTION' ? 'collections' : 'products'}.</div>
-                    )}
-                    {searchResults.map((item) => {
-                      const selected = selectedSources.some((s) => s.id === item.id);
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          className={`cf-resource-row ${selected ? 'selected' : ''}`}
-                          onClick={() => toggleSource(item)}
-                        >
-                          <div className="cf-resource-thumb">
-                            {item.imageUrl
-                              ? <img src={item.imageUrl} alt="" />
-                              : <span className="cf-resource-placeholder">{searchTab === 'COLLECTION' ? '📂' : '📦'}</span>}
-                          </div>
-                          <div className="cf-resource-info">
-                            <span className="cf-resource-title">{item.title}</span>
-                            {item.detail && <span className="cf-resource-detail">{item.detail}</span>}
-                          </div>
-                          <div className="cf-resource-check">{selected ? '✓' : ''}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Selected sources summary */}
-                  {selectedSources.length > 0 && (
-                    <div className="cf-selected-sources">
-                      <p className="cf-selected-label">Selected ({selectedSources.length})</p>
-                      <div className="cf-source-chips">
-                        {selectedSources.map((s) => (
-                          <span key={s.id} className="cf-source-chip">
-                            {s.type === 'COLLECTION' ? '📂' : '📦'} {s.title}
-                            <button type="button" className="cf-chip-remove" onClick={() => removeSource(s.id)}>×</button>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── STEP 2: Pricing ─────────────────────────────── */}
-              {wizardStep === 2 && (
-                <div className="cf-wizard-pane">
-                  <p className="cf-wizard-hint">Choose how prices will be shown to your wholesale buyers.</p>
-
-                  <div className="cf-pricing-options">
-                    <label className={`cf-pricing-card ${newPriceMode === 'SHOPIFY_PRICE' ? 'selected' : ''}`}>
-                      <input
-                        type="radio"
-                        name="priceMode"
-                        value="SHOPIFY_PRICE"
-                        checked={newPriceMode === 'SHOPIFY_PRICE'}
-                        onChange={() => setNewPriceMode('SHOPIFY_PRICE')}
-                      />
-                      <div className="cf-pricing-card-inner">
-                        <span className="cf-pricing-icon">🏷️</span>
-                        <span className="cf-pricing-name">Shopify Retail Price</span>
-                        <span className="cf-pricing-desc">Show prices exactly as set in your Shopify product listings.</span>
-                      </div>
-                    </label>
-
-                    <label className={`cf-pricing-card ${newPriceMode === 'PERCENT_DISCOUNT' ? 'selected' : ''}`}>
-                      <input
-                        type="radio"
-                        name="priceMode"
-                        value="PERCENT_DISCOUNT"
-                        checked={newPriceMode === 'PERCENT_DISCOUNT'}
-                        onChange={() => setNewPriceMode('PERCENT_DISCOUNT')}
-                      />
-                      <div className="cf-pricing-card-inner">
-                        <span className="cf-pricing-icon">💸</span>
-                        <span className="cf-pricing-name">Catalog-Wide Wholesale Discount</span>
-                        <span className="cf-pricing-desc">Apply a uniform % discount off Shopify prices for all items in this catalog.</span>
-                      </div>
-                    </label>
-                  </div>
-
-                  {newPriceMode === 'PERCENT_DISCOUNT' && (
-                    <div className="cf-form-group cf-discount-group">
-                      <label htmlFor="cf-discount-pct">Discount Percentage</label>
-                      <div className="cf-discount-row">
-                        <input
-                          id="cf-discount-pct"
-                          type="number"
-                          min={1}
-                          max={90}
-                          value={newDiscount}
-                          onChange={(e) => setNewDiscount(Math.min(90, Math.max(1, Number(e.target.value))))}
-                          className="cf-input cf-input-sm"
-                        />
-                        <span className="cf-discount-pct-label">% off retail</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── STEP 3: Details ─────────────────────────────── */}
-              {wizardStep === 3 && (
-                <div className="cf-wizard-pane">
-                  <p className="cf-wizard-hint">Name your catalog and set branding. You can publish immediately or save as a draft first.</p>
-
-                  <div className="cf-form-group">
-                    <label htmlFor="cf-catalog-name">Catalog Name <span className="cf-required">*</span></label>
-                    <input
-                      id="cf-catalog-name"
-                      type="text"
-                      required
-                      placeholder="e.g. Summer 2026 Wholesale"
-                      value={newCatalogName}
-                      onChange={(e) => setNewCatalogName(e.target.value)}
-                      className="cf-input"
-                      autoFocus
-                    />
-                  </div>
-
-                  <div className="cf-form-group">
-                    <label htmlFor="cf-accent-color">Buyer Portal Accent Color</label>
-                    <div className="cf-color-row">
-                      <input
-                        id="cf-accent-color"
-                        type="color"
-                        value={newAccentColor}
-                        onChange={(e) => setNewAccentColor(e.target.value)}
-                        className="cf-color-input"
-                      />
-                      <span className="cf-color-hex">{newAccentColor}</span>
-                    </div>
-                  </div>
-
-                  {/* Summary */}
-                  <div className="cf-wizard-summary">
-                    <h4>Summary</h4>
-                    <div className="cf-summary-row"><span>Sources</span><span>{selectedSources.length} selected</span></div>
-                    <div className="cf-summary-row"><span>Pricing</span><span>{newPriceMode === 'SHOPIFY_PRICE' ? 'Shopify Price' : `${newDiscount}% Discount`}</span></div>
-                  </div>
-
-                  <label className="cf-publish-toggle">
-                    <input
-                      type="checkbox"
-                      checked={newPublish}
-                      onChange={(e) => setNewPublish(e.target.checked)}
-                      id="cf-publish-on-create"
-                    />
-                    <span>Publish immediately after creation</span>
-                  </label>
-                </div>
-              )}
-
-            </div>{/* cf-modal-body */}
-
-            {/* Footer nav */}
             <div className="cf-modal-footer">
-              {wizardStep === 1 && (
-                <button type="button" className="cf-btn cf-btn-secondary" onClick={() => setShowCreateModal(false)}>Cancel</button>
-              )}
-              {wizardStep > 1 && (
-                <button type="button" className="cf-btn cf-btn-secondary" onClick={() => setWizardStep((wizardStep - 1) as 1 | 2 | 3)}>← Back</button>
-              )}
-              {wizardStep < 3 && (
-                <button
-                  type="button"
-                  className="cf-btn cf-btn-primary"
-                  disabled={wizardStep === 1 && selectedSources.length === 0}
-                  onClick={() => setWizardStep((wizardStep + 1) as 2 | 3)}
-                >
-                  Next →
-                </button>
-              )}
-              {wizardStep === 3 && (
-                <button
-                  type="button"
-                  className="cf-btn cf-btn-primary"
-                  disabled={creatingCatalog || !newCatalogName.trim()}
-                  onClick={handleCreateCatalog}
-                >
-                  {creatingCatalog ? 'Creating…' : newPublish ? 'Create & Publish' : 'Create Draft'}
-                </button>
-              )}
+              <button type="button" className="cf-btn cf-btn-secondary" onClick={() => setShowCreateModal(false)} disabled={creatingCatalog}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cf-btn cf-btn-primary"
+                disabled={creatingCatalog || !createFormState.name.trim() || createFormState.sources.length === 0}
+                onClick={handleCreateCatalog}
+              >
+                {creatingCatalog ? 'Creating…' : newPublish ? 'Create & Publish Catalog' : 'Create Draft Catalog'}
+              </button>
             </div>
           </div>
         </div>

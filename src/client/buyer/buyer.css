@@ -768,3 +768,161 @@ body {
   font-size: 0.875rem;
   margin-bottom: 1.5rem;
 }
+
+/* ── Mobile Responsive Rules (320px - 768px) ───────────────────────────────── */
+
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+.portal-container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.25rem;
+  padding-bottom: 7rem;
+  box-sizing: border-box;
+}
+
+@media (max-width: 768px) {
+  .portal-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1rem;
+    padding: 1rem;
+  }
+
+  .header-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    width: 100%;
+  }
+
+  .view-mode-toggle {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .view-toggle-btn {
+    text-align: center;
+    justify-content: center;
+  }
+
+  .csv-upload-trigger-btn, .cart-trigger-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .brand-info {
+    width: 100%;
+    word-break: break-word;
+  }
+
+  .catalog-name {
+    word-break: break-word;
+    font-size: 1.25rem;
+  }
+
+  /* Quick Order Mobile Table -> Card Conversion */
+  .quick-order-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.75rem;
+  }
+
+  .quick-order-table, 
+  .quick-order-table thead, 
+  .quick-order-table tbody, 
+  .quick-order-table th, 
+  .quick-order-table td, 
+  .quick-order-table tr { 
+    display: block; 
+  }
+
+  .quick-order-table thead {
+    display: none;
+  }
+
+  .quick-order-table tr {
+    margin: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 0.85rem;
+    background: #ffffff;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .quick-order-table td {
+    padding: 0.4rem 0;
+    border-bottom: 1px dashed #f1f5f9;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.875rem;
+  }
+
+  .quick-order-table td:last-child {
+    border-bottom: none;
+    padding-top: 0.65rem;
+  }
+
+  .quick-order-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-right: 0.5rem;
+  }
+
+  /* Drawer & Modal Mobile Fit */
+  .drawer-content {
+    max-width: 100%;
+    width: 100%;
+    padding: 1.25rem;
+  }
+
+  .passcode-card {
+    padding: 1.5rem;
+    max-width: 95vw;
+  }
+
+  .csv-bulk-modal {
+    width: 95vw;
+    max-height: 90vh;
+  }
+
+  .sticky-order-bar {
+    left: 0;
+    right: 0;
+    padding: 0.75rem 1rem;
+  }
+
+  .sticky-bar-content {
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: stretch;
+  }
+
+  .sticky-bar-content button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 380px) {
+  .brand-title {
+    font-size: 1.15rem;
+  }
+
+  .portal-container {
+    padding: 0.5rem;
+    padding-bottom: 8rem;
+  }
+
+  .qty-control {
+    transform: scale(0.95);
+    transform-origin: right center;
+  }
+}

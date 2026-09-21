@@ -114,7 +114,7 @@ export const CreateCatalogInputSchema = z.object({
   accentColor: z.string().regex(/^#([0-9a-fA-F]{3}){1,2}$/, 'Valid hex color required').optional().default('#108043'),
   showSku: z.boolean().default(true),
   showInventory: z.boolean().default(false),
-  inventoryMode: z.enum([InventoryMode.STATUS_ONLY, InventoryMode.CAPPED, InventoryMode.EXACT, InventoryMode.HIDDEN]).optional().default(InventoryMode.STATUS_ONLY),
+  inventoryMode: z.enum([InventoryMode.STATUS_ONLY, InventoryMode.CAPPED, InventoryMode.EXACT, InventoryMode.HIDDEN]).optional(),
   inventoryCap: optionalNullableInt(1),
   minQty: z.number().int().min(1).max(10000).optional().default(1),
   maxQty: optionalNullableInt(1, 100000),

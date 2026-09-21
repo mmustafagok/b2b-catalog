@@ -1462,13 +1462,26 @@ async function _buildCatalogPayload(
       // Inventory qty to expose based on inventoryMode
       let exposedQty: number | null | undefined = undefined;
       let exposedEffective: number | null | undefined = undefined;
+      let isCappedOverThreshold = false;
 
-      if (inventoryMode === 'EXACT' || (catalog.showInventory && inventoryMode !== 'HIDDEN' && inventoryMode !== 'CAPPED')) {
+      if (inventoryMode === 'EXACT' || (catalog.showInventory && inventoryMode !== 'HIDDEN' && inventoryMode !== 'CAPPED' && inventoryMode !== 'STATUS_ONLY')) {
         exposedQty = v.inventoryQuantity;
         exposedEffective = effectiveAvailable;
       } else if (inventoryMode === 'CAPPED' && inventoryCap !== null) {
-        exposedQty = effectiveAvailable !== null ? Math.min(effectiveAvailable, inventoryCap) : null;
-        exposedEffective = exposedQty;
+        if (effectiveAvailable !== null) {
+          if (effectiveAvailable >= inventoryCap) {
+            exposedQty = inventoryCap;
+            exposedEffective = inventoryCap;
+            isCappedOverThreshold = true;
+          } else {
+            exposedQty = effectiveAvailable;
+            exposedEffective = effectiveAvailable;
+            isCappedOverThreshold = false;
+          }
+        } else {
+          exposedQty = null;
+          exposedEffective = null;
+        }
       } else {
         // STATUS_ONLY or HIDDEN: never expose exact qty
         exposedQty = undefined;
@@ -1491,6 +1504,7 @@ async function _buildCatalogPayload(
         availableForSale: isAvailable,
         inventoryQuantity: exposedQty,
         effectiveAvailable: exposedEffective,
+        isCappedOverThreshold,
         inventoryPolicy,
         inventoryTracked,
         selectedOptions,

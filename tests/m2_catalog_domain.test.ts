@@ -158,4 +158,73 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
     publicView = await getPublishedCatalogByToken(catalog.publicToken);
     expect(publicView).toBeNull();
   });
+
+  it('should support adding and removing products from a catalog while preserving token and incrementing dataVersion', async () => {
+    const catalog = await createCatalog(shopA.id, {
+      name: 'Product Edit Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      sources: [
+        { type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1' },
+        { type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/2' },
+      ],
+    });
+
+    const initialToken = catalog.publicToken;
+    expect(catalog.sources).toHaveLength(2);
+
+    // Update catalog: remove product 2 and add product 3
+    const updated = await updateCatalog(shopA.id, catalog.id, {
+      sources: [
+        { type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1' },
+        { type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/3' },
+      ],
+    });
+
+    expect(updated.publicToken).toBe(initialToken);
+    expect(updated.dataVersion).toBe(2);
+    expect(updated.sources).toHaveLength(2);
+    const gids = updated.sources.map((s) => s.shopifyGid);
+    expect(gids).toContain('gid://shopify/Product/1');
+    expect(gids).toContain('gid://shopify/Product/3');
+    expect(gids).not.toContain('gid://shopify/Product/2');
+  });
+
+  it('should respect Inventory Display Modes (STATUS_ONLY, CAPPED, EXACT, HIDDEN) and maintain strict privacy', async () => {
+    // 1. Create with STATUS_ONLY
+    const statusCat = await createCatalog(shopA.id, {
+      name: 'Status Only Catalog',
+      inventoryMode: 'STATUS_ONLY' as any,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/100' }],
+    });
+    expect(statusCat.inventoryMode).toBe('STATUS_ONLY');
+    expect(statusCat.showInventory).toBe(true);
+
+    // 2. Create with CAPPED
+    const cappedCat = await createCatalog(shopA.id, {
+      name: 'Capped Inventory Catalog',
+      inventoryMode: 'CAPPED' as any,
+      inventoryCap: 15,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/101' }],
+    });
+    expect(cappedCat.inventoryMode).toBe('CAPPED');
+    expect(cappedCat.inventoryCap).toBe(15);
+    expect(cappedCat.showInventory).toBe(true);
+
+    // 3. Create with HIDDEN
+    const hiddenCat = await createCatalog(shopA.id, {
+      name: 'Hidden Inventory Catalog',
+      inventoryMode: 'HIDDEN' as any,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/102' }],
+    });
+    expect(hiddenCat.inventoryMode).toBe('HIDDEN');
+    expect(hiddenCat.showInventory).toBe(false);
+
+    // 4. Update to EXACT
+    const exactCat = await updateCatalog(shopA.id, statusCat.id, {
+      inventoryMode: 'EXACT' as any,
+    });
+    expect(exactCat.inventoryMode).toBe('EXACT');
+    expect(exactCat.showInventory).toBe(true);
+  });
 });
+

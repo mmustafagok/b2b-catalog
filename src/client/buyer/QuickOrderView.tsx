@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ProductItem } from './VariantMatrix.js';
+import { ProductItem, renderStockBadge } from './VariantMatrix.js';
 
 interface QuickOrderViewProps {
   products: ProductItem[];
@@ -7,6 +7,8 @@ interface QuickOrderViewProps {
   onQuantityChange: (variantId: string, qty: number) => void;
   showSku: boolean;
   showInventory: boolean;
+  inventoryMode?: string;
+  inventoryCap?: number | null;
   currency?: string;
 }
 
@@ -16,6 +18,8 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
   onQuantityChange,
   showSku,
   showInventory,
+  inventoryMode = 'STATUS_ONLY',
+  inventoryCap,
   currency = 'USD',
 }) => {
   const [filterQuery, setFilterQuery] = useState('');
@@ -35,6 +39,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
       availableForSale: boolean;
       effectiveAvailable?: number | null;
       inventoryQuantity?: number;
+      isCappedOverThreshold?: boolean;
       minQty?: number | null;
       maxQty?: number | null;
       qtyIncrement?: number | null;
@@ -55,6 +60,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
           availableForSale: variant.availableForSale,
           effectiveAvailable: variant.effectiveAvailable,
           inventoryQuantity: variant.inventoryQuantity,
+          isCappedOverThreshold: variant.isCappedOverThreshold,
           minQty: (variant as any).minQty,
           maxQty: (variant as any).maxQty,
           qtyIncrement: (variant as any).qtyIncrement,
@@ -144,7 +150,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
               <th style={{ width: '48px' }}></th>
               <th>Product / Variant</th>
               {showSku && <th>SKU</th>}
-              <th>Availability</th>
+              {inventoryMode !== 'HIDDEN' && <th>Availability</th>}
               <th>Unit Price</th>
               <th style={{ width: '180px', textAlign: 'right' }}>Quantity</th>
               <th style={{ width: '120px', textAlign: 'right' }}>Line Total</th>
@@ -153,7 +159,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
           <tbody>
             {filteredRows.length === 0 ? (
               <tr>
-                <td colSpan={showSku ? 7 : 6} className="empty-table-msg">
+                <td colSpan={showSku ? (inventoryMode !== 'HIDDEN' ? 7 : 6) : (inventoryMode !== 'HIDDEN' ? 6 : 5)} className="empty-table-msg">
                   No variants match "{filterQuery}"
                 </td>
               </tr>
@@ -168,14 +174,14 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
 
                 return (
                   <tr key={row.variantId} className={currentQty > 0 ? 'row-selected' : ''}>
-                    <td>
+                    <td data-label="Image">
                       {row.imageUrl ? (
                         <img src={row.imageUrl} alt={row.productTitle} className="quick-order-thumb" />
                       ) : (
                         <div className="quick-order-thumb-placeholder">📦</div>
                       )}
                     </td>
-                    <td>
+                    <td data-label="Product">
                       <div className="quick-order-product-title">{row.productTitle}</div>
                       <div className="quick-order-variant-title">{row.variantTitle}</div>
                       {(row.minQty || row.maxQty || row.qtyIncrement) && (
@@ -187,22 +193,16 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                       )}
                     </td>
                     {showSku && (
-                      <td>
+                      <td data-label="SKU">
                         <span className="variant-sku">{row.sku || '—'}</span>
                       </td>
                     )}
-                    <td>
-                      {isOutOfStock ? (
-                        <span className="stock-tag out-of-stock">Out of stock</span>
-                      ) : (
-                        <span className="stock-tag in-stock">
-                          {showInventory && row.effectiveAvailable !== null && row.effectiveAvailable !== undefined
-                            ? `${row.effectiveAvailable} in stock`
-                            : 'In stock'}
-                        </span>
-                      )}
-                    </td>
-                    <td>
+                    {inventoryMode !== 'HIDDEN' && (
+                      <td data-label="Availability">
+                        {renderStockBadge(row, inventoryMode, inventoryCap)}
+                      </td>
+                    )}
+                    <td data-label="Price">
                       <div className="price-box">
                         <span className="display-price">
                           {row.formattedPrice || `$${row.displayPrice.toFixed(2)}`}
@@ -212,7 +212,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                         )}
                       </div>
                     </td>
-                    <td style={{ textAlign: 'right' }}>
+                    <td data-label="Quantity" style={{ textAlign: 'right' }}>
                       <div className="qty-control">
                         <button
                           type="button"

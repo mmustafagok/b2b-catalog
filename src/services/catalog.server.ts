@@ -36,9 +36,9 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
   const validated = CreateCatalogInputSchema.parse(input);
 
   const publicToken = generateOpaqueToken();
-  const inventoryMode = validated.inventoryMode || InventoryMode.STATUS_ONLY;
+  const inventoryMode = validated.inventoryMode ?? (validated.showInventory ? InventoryMode.EXACT : InventoryMode.STATUS_ONLY);
   const inventoryCap = inventoryMode === InventoryMode.CAPPED ? (validated.inventoryCap ?? null) : null;
-  const showInventory = inventoryMode === InventoryMode.EXACT || (validated.showInventory && inventoryMode !== InventoryMode.HIDDEN);
+  const showInventory = inventoryMode !== InventoryMode.HIDDEN;
 
   return prisma.$transaction(async (tx) => {
     const catalog = await tx.catalog.create({
@@ -125,12 +125,17 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
         : null;
 
     // Handle inventoryMode & inventoryCap consistency
-    const effectiveInventoryMode = validated.inventoryMode ?? (existing.inventoryMode as InventoryMode) ?? InventoryMode.STATUS_ONLY;
+    const effectiveInventoryMode =
+      validated.inventoryMode ??
+      (validated.showInventory !== undefined
+        ? (validated.showInventory ? InventoryMode.EXACT : InventoryMode.STATUS_ONLY)
+        : ((existing.inventoryMode as InventoryMode) ?? InventoryMode.STATUS_ONLY));
+
     let effectiveInventoryCap: number | null = null;
     if (effectiveInventoryMode === InventoryMode.CAPPED) {
       effectiveInventoryCap = validated.inventoryCap !== undefined ? validated.inventoryCap : (existing.inventoryCap ?? 50);
     }
-    const effectiveShowInventory = effectiveInventoryMode === InventoryMode.EXACT || (validated.showInventory ?? existing.showInventory);
+    const effectiveShowInventory = effectiveInventoryMode !== InventoryMode.HIDDEN;
 
     const updated = await tx.catalog.update({
       where: { id: catalogId },
@@ -438,6 +443,52 @@ export async function deleteCatalog(shopId: string, catalogId: string) {
 
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
+async function _enrichSources(
+  shopId: string,
+  sources: Array<{ id: string; catalogId: string; type: string; shopifyGid: string }>
+) {
+  if (!sources || sources.length === 0) return [];
+
+  const productGids = sources.filter((s) => s.type === 'PRODUCT').map((s) => s.shopifyGid);
+  const collectionGids = sources.filter((s) => s.type === 'COLLECTION').map((s) => s.shopifyGid);
+
+  const [products, collections] = await Promise.all([
+    productGids.length > 0
+      ? prisma.productSnapshot.findMany({
+          where: { shopId, shopifyProductId: { in: productGids } },
+          select: { shopifyProductId: true, title: true, imageUrl: true },
+        })
+      : [],
+    collectionGids.length > 0
+      ? prisma.collectionSnapshot.findMany({
+          where: { shopId, shopifyCollectionId: { in: collectionGids } },
+          select: { shopifyCollectionId: true, title: true },
+        })
+      : [],
+  ]);
+
+  const productMap = new Map(products.map((p) => [p.shopifyProductId, p]));
+  const collectionMap = new Map(collections.map((c) => [c.shopifyCollectionId, c]));
+
+  return sources.map((s) => {
+    if (s.type === 'PRODUCT') {
+      const p = productMap.get(s.shopifyGid);
+      return {
+        ...s,
+        title: p?.title || s.shopifyGid,
+        imageUrl: p?.imageUrl || null,
+      };
+    } else {
+      const c = collectionMap.get(s.shopifyGid);
+      return {
+        ...s,
+        title: c?.title || s.shopifyGid,
+        imageUrl: null,
+      };
+    }
+  });
+}
+
 export async function getCatalogsByShop(shopId: string) {
   const catalogs = await prisma.catalog.findMany({
     where: { shopId },
@@ -455,7 +506,10 @@ export async function getCatalogsByShop(shopId: string) {
 
   return Promise.all(
     catalogs.map(async (cat) => {
-      const allowedGids = await resolveCatalogAllowedProductGids(shopId, cat.sources);
+      const [allowedGids, enrichedSources] = await Promise.all([
+        resolveCatalogAllowedProductGids(shopId, cat.sources),
+        _enrichSources(shopId, cat.sources),
+      ]);
       const productCount = allowedGids.size;
       const variantCount =
         productCount > 0
@@ -470,6 +524,7 @@ export async function getCatalogsByShop(shopId: string) {
 
       return {
         ...cat,
+        sources: enrichedSources,
         productCount,
         variantCount,
         linkCount: cat._count.orderLinks,
@@ -497,7 +552,10 @@ export async function getCatalogById(shopId: string, catalogId: string) {
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
   }
 
-  const allowedGids = await resolveCatalogAllowedProductGids(shopId, catalog.sources);
+  const [allowedGids, enrichedSources] = await Promise.all([
+    resolveCatalogAllowedProductGids(shopId, catalog.sources),
+    _enrichSources(shopId, catalog.sources),
+  ]);
   const productCount = allowedGids.size;
   const variantCount =
     productCount > 0
@@ -512,6 +570,7 @@ export async function getCatalogById(shopId: string, catalogId: string) {
 
   return {
     ...catalog,
+    sources: enrichedSources,
     productCount,
     variantCount,
     linkCount: catalog._count.orderLinks,

@@ -811,11 +811,19 @@ export async function submitBuyerOrder(
       const liveQty = liveVariant.inventoryQuantity;
       const liveAvailable = Math.max(0, liveQty);
       if (line.quantity > liveAvailable) {
+        const invMode = (catalog as any).inventoryMode || 'STATUS_ONLY';
+        const cap = (catalog as any).inventoryCap ?? null;
+        let reportedAvailable = liveAvailable;
+        if (invMode === 'STATUS_ONLY' || invMode === 'HIDDEN') {
+          reportedAvailable = 0;
+        } else if (invMode === 'CAPPED' && cap !== null) {
+          reportedAvailable = Math.min(liveAvailable, cap);
+        }
         inventoryChangedItems.push({
           variantId: line.variantId,
           title: itemTitle,
           requested: line.quantity,
-          available: liveAvailable,
+          available: reportedAvailable,
         });
         continue;
       }
@@ -873,9 +881,33 @@ export async function submitBuyerOrder(
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Inventory changed during submit' },
     });
     tracker.transition('SUBMISSION_FAILED', 'INVENTORY_CHANGED');
+
+    const invMode = (catalog as any).inventoryMode || 'STATUS_ONLY';
+    const invCap = (catalog as any).inventoryCap ?? null;
+
+    let errorMessage = 'Requested quantity exceeds currently available inventory. Please review and update your order.';
+    let sanitizedDetails = inventoryChangedItems;
+
+    if (invMode === 'STATUS_ONLY' || invMode === 'HIDDEN') {
+      errorMessage = 'The requested quantity is no longer available.';
+      sanitizedDetails = inventoryChangedItems.map((item) => ({
+        variantId: item.variantId,
+        title: item.title,
+        requested: item.requested,
+        available: 0,
+      }));
+    } else if (invMode === 'CAPPED' && invCap !== null) {
+      sanitizedDetails = inventoryChangedItems.map((item) => ({
+        variantId: item.variantId,
+        title: item.title,
+        requested: item.requested,
+        available: Math.min(item.available, invCap),
+      }));
+    }
+
     throw new InventoryChangedError(
-      'Requested quantity exceeds currently available inventory. Please review and update your order.',
-      inventoryChangedItems
+      errorMessage,
+      sanitizedDetails
     );
   }
 

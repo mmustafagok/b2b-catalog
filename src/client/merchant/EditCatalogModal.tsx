@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { BuyerFormConfig } from '../../types/index.js';
+import { CatalogConfigurationForm, CatalogFormState } from './CatalogConfigurationForm.js';
 
 export interface CatalogSummary {
   id: string;
@@ -22,7 +23,7 @@ export interface CatalogSummary {
   updatedAt: string;
   productCount?: number;
   variantCount?: number;
-  sources: Array<{ type: 'COLLECTION' | 'PRODUCT'; shopifyGid: string }>;
+  sources: Array<{ type: 'COLLECTION' | 'PRODUCT'; shopifyGid: string; title?: string; imageUrl?: string | null }>;
 }
 
 interface EditCatalogModalProps {
@@ -31,76 +32,82 @@ interface EditCatalogModalProps {
   onClose: () => void;
 }
 
+type EditTab = 'sources' | 'pricing' | 'rules' | 'form';
+
 export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
   catalog,
   onSave,
   onClose,
 }) => {
-  const [name, setName] = useState(catalog.name);
-  const [priceMode, setPriceMode] = useState<'SHOPIFY_PRICE' | 'PERCENT_DISCOUNT' | 'CUSTOM_PRICE'>(
-    (catalog.priceMode as any) || 'SHOPIFY_PRICE'
-  );
-  const [discountPercent, setDiscountPercent] = useState<number>(catalog.discountPercent || 10);
-  const [customPriceAmount, setCustomPriceAmount] = useState<string>(
-    catalog.customPriceAmount ? String(catalog.customPriceAmount) : ''
-  );
-  const [accentColor, setAccentColor] = useState(catalog.accentColor || '#108043');
-  const [inventoryMode, setInventoryMode] = useState<'STATUS_ONLY' | 'CAPPED' | 'EXACT' | 'HIDDEN'>(
-    catalog.inventoryMode || 'STATUS_ONLY'
-  );
-  const [inventoryCap, setInventoryCap] = useState<string>(
-    catalog.inventoryCap ? String(catalog.inventoryCap) : '50'
-  );
-  const [minQty, setMinQty] = useState<number>(catalog.minQty || 1);
-  const [maxQty, setMaxQty] = useState<string>(catalog.maxQty ? String(catalog.maxQty) : '');
-  const [qtyIncrement, setQtyIncrement] = useState<number>(catalog.qtyIncrement || 1);
-  const [showSku, setShowSku] = useState(catalog.showSku !== false);
+  const [activeTab, setActiveTab] = useState<EditTab>('sources');
 
-  // Buyer Form Configuration
-  const initialFormConfig: BuyerFormConfig = typeof catalog.buyerFormConfig === 'string'
-    ? JSON.parse(catalog.buyerFormConfig || '{}')
-    : catalog.buyerFormConfig || {};
+  const initialBuyerForm: BuyerFormConfig =
+    typeof catalog.buyerFormConfig === 'string'
+      ? JSON.parse(catalog.buyerFormConfig || '{}')
+      : catalog.buyerFormConfig || {};
 
-  const [showPhone, setShowPhone] = useState(initialFormConfig.showPhone !== false);
-  const [requirePhone, setRequirePhone] = useState(!!initialFormConfig.requirePhone);
-  const [showTaxId, setShowTaxId] = useState(initialFormConfig.showTaxId !== false);
-  const [requireTaxId, setRequireTaxId] = useState(!!initialFormConfig.requireTaxId);
-  const [showPoNumber, setShowPoNumber] = useState(initialFormConfig.showPoNumber !== false);
-  const [requirePoNumber, setRequirePoNumber] = useState(!!initialFormConfig.requirePoNumber);
-  const [showNote, setShowNote] = useState(initialFormConfig.showNote !== false);
+  const [formState, setFormState] = useState<CatalogFormState>({
+    name: catalog.name || '',
+    priceMode: (catalog.priceMode as any) || 'SHOPIFY_PRICE',
+    discountPercent: catalog.discountPercent || 10,
+    customPriceAmount: catalog.customPriceAmount ? String(catalog.customPriceAmount) : '',
+    accentColor: catalog.accentColor || '#108043',
+    showSku: catalog.showSku !== false,
+    inventoryMode: catalog.inventoryMode || 'STATUS_ONLY',
+    inventoryCap: catalog.inventoryCap ? String(catalog.inventoryCap) : '50',
+    minQty: catalog.minQty || 1,
+    maxQty: catalog.maxQty ? String(catalog.maxQty) : '',
+    qtyIncrement: catalog.qtyIncrement || 1,
+    buyerFormConfig: initialBuyerForm,
+    sources: (catalog.sources || []).map((s) => ({
+      type: s.type,
+      id: s.shopifyGid,
+      title: s.title || s.shopifyGid,
+      imageUrl: s.imageUrl || null,
+    })),
+  });
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const handleFormChange = (updates: Partial<CatalogFormState>) => {
+    setFormState((prev) => ({ ...prev, ...updates }));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || saving) return;
+    if (!formState.name.trim()) {
+      setError('Catalog name is required');
+      return;
+    }
+    if (formState.sources.length === 0) {
+      setError('Please select at least one product or collection for this catalog');
+      return;
+    }
+    if (saving) return;
 
     try {
       setSaving(true);
       setError(null);
 
       const updates: Record<string, any> = {
-        name: name.trim(),
-        priceMode,
-        discountPercent: priceMode === 'PERCENT_DISCOUNT' ? discountPercent : 0,
-        customPriceAmount: priceMode === 'CUSTOM_PRICE' ? (parseFloat(customPriceAmount) || null) : null,
-        accentColor,
-        showSku,
-        inventoryMode,
-        inventoryCap: inventoryMode === 'CAPPED' ? (parseInt(inventoryCap, 10) || 50) : null,
-        minQty: Math.max(1, minQty),
-        maxQty: maxQty ? parseInt(maxQty, 10) : null,
-        qtyIncrement: Math.max(1, qtyIncrement),
-        buyerFormConfig: {
-          showPhone,
-          requirePhone,
-          showTaxId,
-          requireTaxId,
-          showPoNumber,
-          requirePoNumber,
-          showNote,
-        },
+        name: formState.name.trim(),
+        priceMode: formState.priceMode,
+        discountPercent: formState.priceMode === 'PERCENT_DISCOUNT' ? formState.discountPercent : 0,
+        customPriceAmount:
+          formState.priceMode === 'CUSTOM_PRICE' ? (parseFloat(formState.customPriceAmount) || null) : null,
+        accentColor: formState.accentColor,
+        showSku: formState.showSku,
+        inventoryMode: formState.inventoryMode,
+        inventoryCap: formState.inventoryMode === 'CAPPED' ? (parseInt(formState.inventoryCap, 10) || 50) : null,
+        minQty: Math.max(1, formState.minQty),
+        maxQty: formState.maxQty ? parseInt(formState.maxQty, 10) : null,
+        qtyIncrement: Math.max(1, formState.qtyIncrement),
+        buyerFormConfig: formState.buyerFormConfig,
+        sources: formState.sources.map((s) => ({
+          type: s.type,
+          shopifyGid: s.id,
+        })),
       };
 
       await onSave(updates);
@@ -114,244 +121,138 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
 
   return (
     <div className="cf-modal-backdrop" onClick={onClose}>
-      <div className="cf-modal cf-modal-lg" onClick={(e) => e.stopPropagation()}>
+      <div className="cf-modal cf-modal-wide" onClick={(e) => e.stopPropagation()}>
+        {/* Modal Header */}
         <div className="cf-modal-header">
-          <h3>Edit Catalog: {catalog.name}</h3>
-          <button type="button" className="cf-modal-close" onClick={onClose}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <h3 style={{ margin: 0 }}>Edit Catalog: {catalog.name}</h3>
+            <span
+              className={`cf-badge ${
+                catalog.status === 'PUBLISHED' ? 'cf-badge-success' : 'cf-badge-outline'
+              }`}
+            >
+              {catalog.status}
+            </span>
+          </div>
+          <button type="button" className="cf-close-btn" onClick={onClose}>
             ✕
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-          <div className="cf-modal-body" style={{ maxHeight: '72vh', overflowY: 'auto', overflowX: 'hidden' }}>
-            {error && <div className="cf-alert cf-alert-danger" style={{ marginBottom: '1rem' }}>{error}</div>}
-
-            {/* General */}
-            <div className="cf-form-group">
-              <label className="cf-label" htmlFor="cat-name">Catalog Name</label>
-              <input
-                id="cat-name"
-                className="cf-input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
-
-            {/* Pricing Mode */}
-            <div className="cf-form-group">
-              <label className="cf-label">Pricing Rule</label>
-              <div className="cf-pricing-cards">
-                <label className={`cf-pricing-card ${priceMode === 'SHOPIFY_PRICE' ? 'selected' : ''}`}>
-                  <input
-                    type="radio"
-                    name="editPriceMode"
-                    value="SHOPIFY_PRICE"
-                    checked={priceMode === 'SHOPIFY_PRICE'}
-                    onChange={() => setPriceMode('SHOPIFY_PRICE')}
-                  />
-                  <div className="cf-pricing-card-inner">
-                    <span className="cf-pricing-icon">🏷️</span>
-                    <span className="cf-pricing-name">Retail Price</span>
-                  </div>
-                </label>
-
-                <label className={`cf-pricing-card ${priceMode === 'PERCENT_DISCOUNT' ? 'selected' : ''}`}>
-                  <input
-                    type="radio"
-                    name="editPriceMode"
-                    value="PERCENT_DISCOUNT"
-                    checked={priceMode === 'PERCENT_DISCOUNT'}
-                    onChange={() => setPriceMode('PERCENT_DISCOUNT')}
-                  />
-                  <div className="cf-pricing-card-inner">
-                    <span className="cf-pricing-icon">💸</span>
-                    <span className="cf-pricing-name">% Discount</span>
-                  </div>
-                </label>
-
-                <label className={`cf-pricing-card ${priceMode === 'CUSTOM_PRICE' ? 'selected' : ''}`}>
-                  <input
-                    type="radio"
-                    name="editPriceMode"
-                    value="CUSTOM_PRICE"
-                    checked={priceMode === 'CUSTOM_PRICE'}
-                    onChange={() => setPriceMode('CUSTOM_PRICE')}
-                  />
-                  <div className="cf-pricing-card-inner">
-                    <span className="cf-pricing-icon">💲</span>
-                    <span className="cf-pricing-name">Fixed Custom Price</span>
-                  </div>
-                </label>
-              </div>
-
-              {priceMode === 'PERCENT_DISCOUNT' && (
-                <div style={{ marginTop: '0.75rem' }}>
-                  <label className="cf-label" htmlFor="edit-discount">Discount %</label>
-                  <input
-                    id="edit-discount"
-                    type="number"
-                    min="1"
-                    max="90"
-                    className="cf-input cf-input-sm"
-                    value={discountPercent}
-                    onChange={(e) => setDiscountPercent(Number(e.target.value))}
-                  />
-                </div>
-              )}
-
-              {priceMode === 'CUSTOM_PRICE' && (
-                <div style={{ marginTop: '0.75rem' }}>
-                  <label className="cf-label" htmlFor="edit-custom-price">Fixed Price for all items ($)</label>
-                  <input
-                    id="edit-custom-price"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    placeholder="e.g. 25.00"
-                    className="cf-input"
-                    style={{ maxWidth: '140px' }}
-                    value={customPriceAmount}
-                    onChange={(e) => setCustomPriceAmount(e.target.value)}
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* Inventory Privacy & Display */}
-            <div className="cf-form-group">
-              <label className="cf-label" htmlFor="edit-inv-mode">Inventory Display Mode</label>
-              <select
-                id="edit-inv-mode"
-                className="cf-select"
-                value={inventoryMode}
-                onChange={(e) => setInventoryMode(e.target.value as any)}
+        {/* Modal Body & Navigation Tabs */}
+        <form onSubmit={handleSubmit}>
+          <div className="cf-modal-body" style={{ minHeight: '380px' }}>
+            {error && (
+              <div
+                style={{
+                  background: '#fee2e2',
+                  color: '#dc2626',
+                  padding: '0.65rem 0.85rem',
+                  borderRadius: '6px',
+                  marginBottom: '1rem',
+                  fontSize: '0.88rem',
+                }}
               >
-                <option value="STATUS_ONLY">Status Only ("In Stock" / "Out of Stock")</option>
-                <option value="CAPPED">Capped Numbers (e.g. "50+ available")</option>
-                <option value="EXACT">Exact Inventory Counts</option>
-                <option value="HIDDEN">Hide Stock Indicators</option>
-              </select>
-
-              {inventoryMode === 'CAPPED' && (
-                <div style={{ marginTop: '0.5rem' }}>
-                  <label className="cf-label" htmlFor="edit-cap" style={{ fontSize: '0.8rem' }}>Threshold Cap</label>
-                  <input
-                    id="edit-cap"
-                    type="number"
-                    min="1"
-                    className="cf-input cf-input-sm"
-                    value={inventoryCap}
-                    onChange={(e) => setInventoryCap(e.target.value)}
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* Quantity Rules */}
-            <div className="cf-form-group">
-              <label className="cf-label">Default Quantity Rules</label>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.75rem' }}>
-                <div>
-                  <label style={{ fontSize: '0.8rem', color: '#64748b' }}>Min Quantity</label>
-                  <input
-                    type="number"
-                    min="1"
-                    className="cf-input"
-                    value={minQty}
-                    onChange={(e) => setMinQty(Number(e.target.value))}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: '0.8rem', color: '#64748b' }}>Max Quantity</label>
-                  <input
-                    type="number"
-                    min="1"
-                    placeholder="Unlimited"
-                    className="cf-input"
-                    value={maxQty}
-                    onChange={(e) => setMaxQty(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: '0.8rem', color: '#64748b' }}>Step Increment</label>
-                  <input
-                    type="number"
-                    min="1"
-                    className="cf-input"
-                    value={qtyIncrement}
-                    onChange={(e) => setQtyIncrement(Number(e.target.value))}
-                  />
-                </div>
+                ⚠️ {error}
               </div>
+            )}
+
+            {/* Navigation Tabs */}
+            <div
+              className="cf-tab-header"
+              style={{
+                display: 'flex',
+                gap: '0.5rem',
+                borderBottom: '1px solid #e2e8f0',
+                marginBottom: '1.25rem',
+                paddingBottom: '0.5rem',
+              }}
+            >
+              <button
+                type="button"
+                className={`cf-tab-btn ${activeTab === 'sources' ? 'active' : ''}`}
+                onClick={() => setActiveTab('sources')}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: '0.45rem 0.85rem',
+                  fontWeight: activeTab === 'sources' ? 700 : 500,
+                  color: activeTab === 'sources' ? '#108043' : '#64748b',
+                  borderBottom: activeTab === 'sources' ? '2px solid #108043' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontSize: '0.9rem',
+                }}
+              >
+                📦 Products & Sources ({formState.sources.length})
+              </button>
+              <button
+                type="button"
+                className={`cf-tab-btn ${activeTab === 'pricing' ? 'active' : ''}`}
+                onClick={() => setActiveTab('pricing')}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: '0.45rem 0.85rem',
+                  fontWeight: activeTab === 'pricing' ? 700 : 500,
+                  color: activeTab === 'pricing' ? '#108043' : '#64748b',
+                  borderBottom: activeTab === 'pricing' ? '2px solid #108043' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontSize: '0.9rem',
+                }}
+              >
+                🏷️ Pricing & Inventory
+              </button>
+              <button
+                type="button"
+                className={`cf-tab-btn ${activeTab === 'rules' ? 'active' : ''}`}
+                onClick={() => setActiveTab('rules')}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: '0.45rem 0.85rem',
+                  fontWeight: activeTab === 'rules' ? 700 : 500,
+                  color: activeTab === 'rules' ? '#108043' : '#64748b',
+                  borderBottom: activeTab === 'rules' ? '2px solid #108043' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontSize: '0.9rem',
+                }}
+              >
+                ⚙️ Quantity Rules & Branding
+              </button>
+              <button
+                type="button"
+                className={`cf-tab-btn ${activeTab === 'form' ? 'active' : ''}`}
+                onClick={() => setActiveTab('form')}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: '0.45rem 0.85rem',
+                  fontWeight: activeTab === 'form' ? 700 : 500,
+                  color: activeTab === 'form' ? '#108043' : '#64748b',
+                  borderBottom: activeTab === 'form' ? '2px solid #108043' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontSize: '0.9rem',
+                }}
+              >
+                📋 Buyer Checkout Form
+              </button>
             </div>
 
-            {/* Buyer Form Fields */}
-            <div className="cf-form-group">
-              <label className="cf-label">Buyer Checkout Form Fields</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: '#f8fafc', padding: '0.75rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <input type="checkbox" checked={showPhone} onChange={(e) => setShowPhone(e.target.checked)} />
-                  Show Phone Number Field
-                  {showPhone && (
-                    <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem', color: '#64748b' }}>
-                      <input type="checkbox" checked={requirePhone} onChange={(e) => setRequirePhone(e.target.checked)} />
-                      Required
-                    </label>
-                  )}
-                </label>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <input type="checkbox" checked={showTaxId} onChange={(e) => setShowTaxId(e.target.checked)} />
-                  Show Tax ID / VAT Field
-                  {showTaxId && (
-                    <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem', color: '#64748b' }}>
-                      <input type="checkbox" checked={requireTaxId} onChange={(e) => setRequireTaxId(e.target.checked)} />
-                      Required
-                    </label>
-                  )}
-                </label>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <input type="checkbox" checked={showPoNumber} onChange={(e) => setShowPoNumber(e.target.checked)} />
-                  Show Purchase Order (PO) Field
-                  {showPoNumber && (
-                    <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem', color: '#64748b' }}>
-                      <input type="checkbox" checked={requirePoNumber} onChange={(e) => setRequirePoNumber(e.target.checked)} />
-                      Required
-                    </label>
-                  )}
-                </label>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <input type="checkbox" checked={showNote} onChange={(e) => setShowNote(e.target.checked)} />
-                  Show Order Notes / Special Instructions
-                </label>
-              </div>
-            </div>
-
-            {/* Accent Color */}
-            <div className="cf-form-group">
-              <label className="cf-label" htmlFor="edit-accent">Buyer Portal Accent Color</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <input
-                  id="edit-accent"
-                  type="color"
-                  value={accentColor}
-                  onChange={(e) => setAccentColor(e.target.value)}
-                  className="cf-color-input"
-                />
-                <span style={{ fontSize: '0.85rem', color: '#64748b' }}>{accentColor}</span>
-              </div>
-            </div>
+            {/* Render Shared Form */}
+            <CatalogConfigurationForm
+              formState={formState}
+              onChange={handleFormChange}
+              activeTab={activeTab}
+            />
           </div>
 
+          {/* Modal Footer */}
           <div className="cf-modal-footer">
-            <button type="button" className="cf-btn cf-btn-secondary" onClick={onClose}>
+            <button type="button" className="cf-btn cf-btn-secondary" onClick={onClose} disabled={saving}>
               Cancel
             </button>
             <button type="submit" className="cf-btn cf-btn-primary" disabled={saving}>
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? 'Saving Changes…' : 'Save Catalog Changes'}
             </button>
           </div>
         </form>

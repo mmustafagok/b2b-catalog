@@ -8,7 +8,7 @@ import { syncProductSnapshot, getPublicCatalogPayload } from '../src/services/sy
 import { submitBuyerOrder } from '../src/services/order.server.js';
 import { recordRuntimeIncident, getShopRuntimeIncidents } from '../src/services/incident.server.js';
 import { ShopifyAdminClient, ShopifyGraphQLError } from '../src/services/shopify-client.server.js';
-import { CatalogSourceType, PriceMode } from '../src/types/index.js';
+import { CatalogSourceType, PriceMode, InventoryMode } from '../src/types/index.js';
 
 describe('Part A & Part B Hardening Regression Suite', () => {
   const shopDomainA = 'hardening-shop-a.myshopify.com';
@@ -400,6 +400,8 @@ describe('Part A & Part B Hardening Regression Suite', () => {
       const cat = await createCatalog(shopA.id, {
         name: 'Skates Catalog',
         priceMode: PriceMode.SHOPIFY_PRICE,
+        showInventory: true,
+        inventoryMode: InventoryMode.EXACT,
         sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid }],
       });
       const published = await publishCatalog(shopA.id, cat.id);

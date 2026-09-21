@@ -11,6 +11,7 @@ export interface VariantItem {
   availableForSale: boolean;
   inventoryQuantity?: number;
   effectiveAvailable?: number | null;
+  isCappedOverThreshold?: boolean;
   inventoryPolicy?: string;
   inventoryTracked?: boolean;
   minQty?: number | null;
@@ -18,6 +19,67 @@ export interface VariantItem {
   qtyIncrement?: number | null;
   selectedOptions: Array<{ name: string; value: string }>;
   imageUrl: string | null;
+}
+
+export function renderStockBadge(
+  variant: {
+    availableForSale: boolean;
+    effectiveAvailable?: number | null;
+    isCappedOverThreshold?: boolean;
+  },
+  inventoryMode: string = 'STATUS_ONLY',
+  inventoryCap?: number | null
+) {
+  if (inventoryMode === 'HIDDEN') {
+    return null;
+  }
+
+  const isOutOfStock = !variant.availableForSale || variant.effectiveAvailable === 0;
+  if (isOutOfStock) {
+    return (
+      <span className="stock-tag out-of-stock" style={{ color: '#dc2626', fontWeight: 600 }}>
+        Out of stock
+      </span>
+    );
+  }
+
+  if (variant.effectiveAvailable === null || variant.effectiveAvailable === undefined) {
+    return (
+      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+        In stock
+      </span>
+    );
+  }
+
+  if (inventoryMode === 'EXACT') {
+    return (
+      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+        {variant.effectiveAvailable} in stock
+      </span>
+    );
+  }
+
+  if (inventoryMode === 'CAPPED') {
+    if (variant.isCappedOverThreshold || (inventoryCap && variant.effectiveAvailable >= inventoryCap)) {
+      return (
+        <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+          {inventoryCap || variant.effectiveAvailable}+ available
+        </span>
+      );
+    }
+    return (
+      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+        {variant.effectiveAvailable} available
+      </span>
+    );
+  }
+
+  // Default STATUS_ONLY
+  return (
+    <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+      In stock
+    </span>
+  );
 }
 
 export interface ProductItem {
@@ -85,54 +147,6 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
     onQuantityChange(variantId, next);
   };
 
-  const renderStockBadge = (variant: VariantItem) => {
-    if (inventoryMode === 'HIDDEN') {
-      return null;
-    }
-
-    const isOutOfStock = !variant.availableForSale || variant.effectiveAvailable === 0;
-    if (isOutOfStock) {
-      return (
-        <span className="stock-tag out-of-stock" style={{ color: '#dc2626', fontWeight: 600 }}>
-          Out of stock
-        </span>
-      );
-    }
-
-    if (inventoryMode === 'EXACT' && variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined) {
-      return (
-        <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-          {variant.effectiveAvailable} in stock
-        </span>
-      );
-    }
-
-    if (inventoryMode === 'CAPPED' && inventoryCap) {
-      if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable > inventoryCap) {
-        return (
-          <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-            {inventoryCap}+ available
-          </span>
-        );
-      } else if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined) {
-        return (
-          <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-            {variant.effectiveAvailable} available
-          </span>
-        );
-      }
-    }
-
-    // Default STATUS_ONLY
-    return (
-      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-        {showInventory && variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined
-          ? `${variant.effectiveAvailable} available`
-          : 'In stock'}
-      </span>
-    );
-  };
-
   return (
     <div className="product-card" id={`product-${product.id}`}>
       <div className="product-card-header">
@@ -181,7 +195,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     <span className="variant-sku">{variant.sku || '—'}</span>
                   </td>
                 )}
-                {inventoryMode !== 'HIDDEN' && <td>{renderStockBadge(variant)}</td>}
+                {inventoryMode !== 'HIDDEN' && <td>{renderStockBadge(variant, inventoryMode, inventoryCap)}</td>}
                 <td>
                   <div className="price-box">
                     <span className="display-price">

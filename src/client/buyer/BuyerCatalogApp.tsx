@@ -562,6 +562,8 @@ export const BuyerCatalogApp: React.FC = () => {
             onQuantityChange={handleQuantityChange}
             showSku={data.catalog.showSku}
             showInventory={data.catalog.showInventory}
+            inventoryMode={data.catalog.inventoryMode}
+            inventoryCap={data.catalog.inventoryCap}
             currency={data.shop.currency}
           />
         )}

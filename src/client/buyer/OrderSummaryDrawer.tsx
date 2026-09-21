@@ -132,8 +132,8 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             setClientError(`Invalid quantity for "${product.title} / ${variant.title}". Must be a positive integer.`);
             return;
           }
-          if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && qty > variant.effectiveAvailable) {
-            setClientError(`"${product.title} / ${variant.title}": ${qty} requested, but only ${variant.effectiveAvailable} is currently available.`);
+          if (!variant.isCappedOverThreshold && variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && qty > variant.effectiveAvailable) {
+            setClientError(`"${product.title} / ${variant.title}": The requested quantity exceeds available stock.`);
             return;
           }
           if (!variant.availableForSale || variant.effectiveAvailable === 0) {
