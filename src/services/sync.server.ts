@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { calculateDisplayPrice, toDecimal, formatMoney } from './pricing.server.js';
+import { calculateDisplayPrice, toDecimal, formatMoney, roundDecimal } from './pricing.server.js';
 import { CatalogSourceType, CatalogStatus } from '../types/index.js';
 import { ShopifyAdminClient, createShopifyClient } from './shopify-client.server.js';
 import { Prisma } from '@prisma/client';
@@ -1257,6 +1257,7 @@ export async function triggerManualShopSync(
 
 /**
  * Ingests a public catalog snapshot and transforms into buyer DTO.
+ * Supports all inventory modes, variant-level enables, qty rules, custom prices.
  */
 export async function getPublicCatalogPayload(publicToken: string) {
   const catalog = await prisma.catalog.findUnique({
@@ -1264,6 +1265,7 @@ export async function getPublicCatalogPayload(publicToken: string) {
     include: {
       shop: true,
       sources: true,
+      variantConfigs: true,
     },
   });
 
@@ -1271,22 +1273,115 @@ export async function getPublicCatalogPayload(publicToken: string) {
     return null;
   }
 
+  return _buildCatalogPayload(catalog);
+}
+
+/**
+ * Resolves an OrderLink token → catalog payload (for link-based buyer URLs).
+ */
+export async function getPublicCatalogPayloadByLinkToken(linkToken: string) {
+  const link = await prisma.orderLink.findUnique({
+    where: { token: linkToken },
+    include: {
+      catalog: {
+        include: {
+          shop: true,
+          sources: true,
+          variantConfigs: true,
+        },
+      },
+    },
+  });
+
+  if (!link || !link.active) return null;
+  if (link.expiresAt && new Date() > link.expiresAt) return null;
+
+  const { catalog } = link;
+  if (catalog.status !== CatalogStatus.PUBLISHED || catalog.shop.uninstalledAt !== null) {
+    return null;
+  }
+
+  const payload = await _buildCatalogPayload(catalog);
+  if (!payload) return null;
+
+  return {
+    ...payload,
+    orderLink: {
+      id: link.id,
+      token: link.token,
+      label: link.label,
+      requiresPasscode: !!link.passcodeHash,
+      source: link.source,
+      expiresAt: link.expiresAt ? link.expiresAt.toISOString() : null,
+    },
+  };
+}
+
+/**
+ * Shared internal builder for catalog → buyer DTO.
+ * Applies: inventory mode, variant config (enable/disable, custom price, qty rules).
+ */
+async function _buildCatalogPayload(
+  catalog: Awaited<ReturnType<typeof prisma.catalog.findUnique>> & {
+    shop: { shopDomain: string; currency: string; uninstalledAt: Date | null };
+    sources: Array<{ type: string; shopifyGid: string }>;
+    variantConfigs: Array<{
+      shopifyVariantId: string;
+      enabled: boolean;
+      customPrice: any;
+      minQty: number | null;
+      maxQty: number | null;
+      qtyIncrement: number | null;
+    }>;
+  }
+) {
+  if (!catalog) return null;
+
   // Exact source resolution: Collect all product GIDs from explicit products and collections
   const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
+
+  // Build variant config map
+  const variantConfigMap = new Map(
+    catalog.variantConfigs.map((vc) => [vc.shopifyVariantId, vc])
+  );
+
+  // Parse buyer form config
+  let buyerFormConfig: Record<string, boolean> = {};
+  try {
+    buyerFormConfig = JSON.parse((catalog as any).buyerFormConfig || '{}');
+  } catch {
+    buyerFormConfig = {};
+  }
+
+  const inventoryMode: string = (catalog as any).inventoryMode || 'STATUS_ONLY';
+  const inventoryCap: number | null = (catalog as any).inventoryCap ?? null;
+  const catalogMinQty: number = (catalog as any).minQty ?? 1;
+  const catalogMaxQty: number | null = (catalog as any).maxQty ?? null;
+  const catalogQtyIncrement: number = (catalog as any).qtyIncrement ?? 1;
+  const customPriceAmount = (catalog as any).customPriceAmount ?? null;
+
+  const catalogSection = {
+    id: catalog.id,
+    name: catalog.name,
+    logoUrl: catalog.logoUrl,
+    accentColor: catalog.accentColor || '#108043',
+    showSku: catalog.showSku,
+    showInventory: catalog.showInventory,
+    inventoryMode,
+    inventoryCap,
+    priceMode: catalog.priceMode,
+    discountPercent: catalog.discountPercent ? parseFloat(catalog.discountPercent.toFixed(2)) : 0,
+    customPriceAmount: customPriceAmount ? parseFloat(Number(customPriceAmount).toFixed(2)) : null,
+    minQty: catalogMinQty,
+    maxQty: catalogMaxQty,
+    qtyIncrement: catalogQtyIncrement,
+    buyerFormConfig,
+  };
 
   // If no products match the sources, return empty products list
   if (allowedProductGids.size === 0) {
     return {
-      catalog: {
-        id: catalog.id,
-        name: catalog.name,
-        logoUrl: catalog.logoUrl,
-        accentColor: catalog.accentColor || '#108043',
-        showSku: catalog.showSku,
-        showInventory: catalog.showInventory,
-        priceMode: catalog.priceMode,
-        discountPercent: catalog.discountPercent ? parseFloat(catalog.discountPercent.toFixed(2)) : 0,
-      },
+      catalog: catalogSection,
       shop: {
         id: catalog.shopId,
         shopDomain: catalog.shop.shopDomain,
@@ -1316,6 +1411,99 @@ export async function getPublicCatalogPayload(publicToken: string) {
 
   // Transform into clean public buyer DTO with calculated wholesale prices
   const products = productSnapshots.map((p) => {
+    // Filter to only enabled variants for this product
+    const enabledVariants = p.variants.filter((v) => {
+      const vcfg = variantConfigMap.get(v.shopifyVariantId);
+      // Default enabled if no config exists
+      return vcfg ? vcfg.enabled : true;
+    });
+
+    const mappedVariants = enabledVariants.map((v) => {
+      const vcfg = variantConfigMap.get(v.shopifyVariantId);
+
+      let selectedOptions: Array<{ name: string; value: string }> = [];
+      try {
+        selectedOptions = JSON.parse(v.selectedOptionsJson);
+      } catch {
+        selectedOptions = [];
+      }
+
+      // Pricing: custom per-variant price > catalog custom price > percent discount > shopify price
+      let displayPriceDecimal: ReturnType<typeof calculateDisplayPrice>;
+      if (vcfg?.customPrice) {
+        displayPriceDecimal = roundDecimal(vcfg.customPrice);
+      } else if (catalog.priceMode === 'CUSTOM_PRICE' && customPriceAmount) {
+        displayPriceDecimal = roundDecimal(customPriceAmount);
+      } else {
+        displayPriceDecimal = calculateDisplayPrice(
+          v.shopifyPrice,
+          catalog.priceMode,
+          catalog.discountPercent
+        );
+      }
+
+      const basePriceNum = parseFloat(v.shopifyPrice.toFixed(2));
+      const displayPriceNum = parseFloat(displayPriceDecimal.toFixed(2));
+
+      // Inventory display logic by mode
+      const inventoryTracked = v.inventoryTracked;
+      const inventoryPolicy = v.inventoryPolicy || 'DENY';
+      let effectiveAvailable: number | null = null;
+      let isAvailable = v.availableForSale;
+
+      if (!inventoryTracked || inventoryPolicy === 'CONTINUE') {
+        effectiveAvailable = null;
+        isAvailable = true;
+      } else {
+        effectiveAvailable = Math.max(0, v.inventoryQuantity);
+        isAvailable = v.availableForSale && effectiveAvailable > 0;
+      }
+
+      // Inventory qty to expose based on inventoryMode
+      let exposedQty: number | null | undefined = undefined;
+      let exposedEffective: number | null | undefined = undefined;
+
+      if (inventoryMode === 'EXACT' || (catalog.showInventory && inventoryMode !== 'HIDDEN' && inventoryMode !== 'CAPPED')) {
+        exposedQty = v.inventoryQuantity;
+        exposedEffective = effectiveAvailable;
+      } else if (inventoryMode === 'CAPPED' && inventoryCap !== null) {
+        exposedQty = effectiveAvailable !== null ? Math.min(effectiveAvailable, inventoryCap) : null;
+        exposedEffective = exposedQty;
+      } else {
+        // STATUS_ONLY or HIDDEN: never expose exact qty
+        exposedQty = undefined;
+        exposedEffective = undefined;
+      }
+
+      // Quantity rules: variant override → catalog default
+      const variantMinQty = vcfg?.minQty ?? catalogMinQty;
+      const variantMaxQty = vcfg?.maxQty ?? catalogMaxQty;
+      const variantQtyIncrement = vcfg?.qtyIncrement ?? catalogQtyIncrement;
+
+      return {
+        id: v.id,
+        shopifyVariantId: v.shopifyVariantId,
+        title: v.title,
+        sku: v.sku,
+        basePrice: basePriceNum,
+        displayPrice: displayPriceNum,
+        formattedPrice: formatMoney(displayPriceDecimal, currency),
+        availableForSale: isAvailable,
+        inventoryQuantity: exposedQty,
+        effectiveAvailable: exposedEffective,
+        inventoryPolicy,
+        inventoryTracked,
+        selectedOptions,
+        imageUrl: v.imageUrl || p.imageUrl,
+        minQty: variantMinQty,
+        maxQty: variantMaxQty,
+        qtyIncrement: variantQtyIncrement,
+      };
+    });
+
+    // Only include product if it has at least one enabled variant
+    if (mappedVariants.length === 0) return null;
+
     return {
       id: p.id,
       shopifyProductId: p.shopifyProductId,
@@ -1323,67 +1511,12 @@ export async function getPublicCatalogPayload(publicToken: string) {
       vendor: p.vendor,
       handle: p.handle,
       imageUrl: p.imageUrl,
-      variants: p.variants.map((v) => {
-        let selectedOptions: Array<{ name: string; value: string }> = [];
-        try {
-          selectedOptions = JSON.parse(v.selectedOptionsJson);
-        } catch {
-          selectedOptions = [];
-        }
-
-        const displayPriceDecimal = calculateDisplayPrice(
-          v.shopifyPrice,
-          catalog.priceMode,
-          catalog.discountPercent
-        );
-
-        const basePriceNum = parseFloat(v.shopifyPrice.toFixed(2));
-        const displayPriceNum = parseFloat(displayPriceDecimal.toFixed(2));
-
-        const inventoryTracked = v.inventoryTracked;
-        const inventoryPolicy = v.inventoryPolicy || 'DENY';
-        let effectiveAvailable: number | null = null;
-        let isAvailable = v.availableForSale;
-
-        if (!inventoryTracked || inventoryPolicy === 'CONTINUE') {
-          effectiveAvailable = null;
-          isAvailable = true;
-        } else {
-          effectiveAvailable = Math.max(0, v.inventoryQuantity);
-          isAvailable = v.availableForSale && effectiveAvailable > 0;
-        }
-
-        return {
-          id: v.id,
-          shopifyVariantId: v.shopifyVariantId,
-          title: v.title,
-          sku: v.sku,
-          basePrice: basePriceNum,
-          displayPrice: displayPriceNum,
-          formattedPrice: formatMoney(displayPriceDecimal, currency),
-          availableForSale: isAvailable,
-          inventoryQuantity: catalog.showInventory ? v.inventoryQuantity : undefined,
-          effectiveAvailable: catalog.showInventory ? effectiveAvailable : undefined,
-          inventoryPolicy,
-          inventoryTracked,
-          selectedOptions,
-          imageUrl: v.imageUrl || p.imageUrl,
-        };
-      }),
+      variants: mappedVariants,
     };
-  });
+  }).filter(Boolean);
 
   return {
-    catalog: {
-      id: catalog.id,
-      name: catalog.name,
-      logoUrl: catalog.logoUrl,
-      accentColor: catalog.accentColor || '#108043',
-      showSku: catalog.showSku,
-      showInventory: catalog.showInventory,
-      priceMode: catalog.priceMode,
-      discountPercent: catalog.discountPercent ? parseFloat(catalog.discountPercent.toFixed(2)) : 0,
-    },
+    catalog: catalogSection,
     shop: {
       id: catalog.shopId,
       shopDomain: catalog.shop.shopDomain,

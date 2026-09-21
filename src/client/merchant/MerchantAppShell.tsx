@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { authenticatedFetch, ensureAppBridgeLoaded } from './appBridgeAuth.js';
+import { EditCatalogModal, CatalogSummary } from './EditCatalogModal.js';
+import { OrderLinksModal } from './OrderLinksModal.js';
+import { VariantConfigsModal } from './VariantConfigsModal.js';
 import './merchant.css';
 
 interface ShopInfo {
@@ -80,22 +83,6 @@ interface AnalyticsData {
   };
 }
 
-interface CatalogSummary {
-  id: string;
-  name: string;
-  publicToken: string;
-  status: 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
-  priceMode: 'SHOPIFY_PRICE' | 'PERCENT_DISCOUNT';
-  discountPercent: number | null;
-  accentColor: string;
-  showSku: boolean;
-  showInventory: boolean;
-  createdAt: string;
-  updatedAt: string;
-  productCount?: number;
-  variantCount?: number;
-  sources: Array<{ type: 'COLLECTION' | 'PRODUCT'; shopifyGid: string }>;
-}
 
 interface OrderSubmissionItem {
   id: string;
@@ -175,6 +162,11 @@ export const MerchantAppShell: React.FC = () => {
   const [billingUnavailable, setBillingUnavailable] = useState<boolean>(false);
   const [quotaError, setQuotaError] = useState<boolean>(false);
   const [analyticsError, setAnalyticsError] = useState<boolean>(false);
+
+  // ── Extra Modals state (Order Links, Variant Configs, Edit Catalog) ─────────
+  const [editingCatalog, setEditingCatalog] = useState<CatalogSummary | null>(null);
+  const [linksCatalog, setLinksCatalog] = useState<CatalogSummary | null>(null);
+  const [variantConfigsCatalog, setVariantConfigsCatalog] = useState<CatalogSummary | null>(null);
 
   // ── Catalog creation wizard state ─────────────────────────────────────────
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -386,6 +378,38 @@ export const MerchantAppShell: React.FC = () => {
       showToast(`Reconciliation error: ${err.message}`);
     } finally {
       setReconcilingId(null);
+    }
+  };
+
+  const handleSaveCatalog = async (updates: Record<string, any>) => {
+    if (!editingCatalog) return;
+    const res = await authenticatedFetch(`/api/admin/catalogs/${editingCatalog.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || 'Failed to update catalog');
+    }
+    showToast('Catalog updated successfully!');
+    loadData();
+  };
+
+  const handleCreateReorderLink = async (submissionId: string) => {
+    try {
+      const res = await authenticatedFetch(`/api/admin/submissions/${submissionId}/reorder-link`, {
+        method: 'POST',
+        body: JSON.stringify({ expiresInDays: 30 }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to create reorder link');
+      }
+      const data = await res.json();
+      navigator.clipboard.writeText(data.reorderUrl);
+      showToast('Reorder link copied to clipboard!');
+    } catch (err: any) {
+      showToast(`Error: ${err.message}`);
     }
   };
 
@@ -896,12 +920,35 @@ export const MerchantAppShell: React.FC = () => {
                               )}
                             </td>
                             <td>
-                              <button
-                                className="cf-btn cf-btn-sm cf-btn-outline"
-                                onClick={() => handlePublishToggle(cat)}
-                              >
-                                {cat.status === 'PUBLISHED' ? 'Unpublish' : 'Publish'}
-                              </button>
+                              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-outline"
+                                  onClick={() => handlePublishToggle(cat)}
+                                >
+                                  {cat.status === 'PUBLISHED' ? 'Unpublish' : 'Publish'}
+                                </button>
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-secondary"
+                                  onClick={() => setLinksCatalog(cat)}
+                                  title="Manage order links & QR codes"
+                                >
+                                  🔗 Links
+                                </button>
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-secondary"
+                                  onClick={() => setVariantConfigsCatalog(cat)}
+                                  title="Configure variant availability and rules"
+                                >
+                                  ⚙️ Variants
+                                </button>
+                                <button
+                                  className="cf-btn cf-btn-sm cf-btn-secondary"
+                                  onClick={() => setEditingCatalog(cat)}
+                                  title="Edit catalog settings"
+                                >
+                                  ✏️ Edit
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -992,27 +1039,38 @@ export const MerchantAppShell: React.FC = () => {
                             </td>
                             <td>{new Date(sub.createdAt).toLocaleString()}</td>
                             <td>
-                              {sub.draftOrderUrl ? (
-                                <a
-                                  href={sub.draftOrderUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="cf-btn cf-btn-sm cf-btn-primary"
-                                >
-                                  Open in Shopify ↗
-                                </a>
-                              ) : sub.status === 'REQUIRES_RECONCILIATION' ? (
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-warning"
-                                  onClick={() => handleReconcileSubmission(sub.id)}
-                                  disabled={reconcilingId === sub.id}
-                                  title="Check if Shopify has processed the order mutation"
-                                >
-                                  {reconcilingId === sub.id ? 'Checking...' : 'Check Shopify ↻'}
-                                </button>
-                              ) : (
-                                <span className="cf-text-muted">No Shopify Link</span>
-                              )}
+                              <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                                {sub.draftOrderUrl ? (
+                                  <a
+                                    href={sub.draftOrderUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="cf-btn cf-btn-sm cf-btn-primary"
+                                  >
+                                    Open in Shopify ↗
+                                  </a>
+                                ) : sub.status === 'REQUIRES_RECONCILIATION' ? (
+                                  <button
+                                    className="cf-btn cf-btn-sm cf-btn-warning"
+                                    onClick={() => handleReconcileSubmission(sub.id)}
+                                    disabled={reconcilingId === sub.id}
+                                    title="Check if Shopify has processed the order mutation"
+                                  >
+                                    {reconcilingId === sub.id ? 'Checking...' : 'Check Shopify ↻'}
+                                  </button>
+                                ) : (
+                                  <span className="cf-text-muted">No Shopify Link</span>
+                                )}
+                                {sub.status === 'COMPLETED' && (
+                                  <button
+                                    className="cf-btn cf-btn-sm cf-btn-secondary"
+                                    onClick={() => handleCreateReorderLink(sub.id)}
+                                    title="Create shareable 1-click reorder link for this buyer"
+                                  >
+                                    🔄 Reorder Link
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -1528,6 +1586,33 @@ export const MerchantAppShell: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Edit Catalog Modal */}
+      {editingCatalog && (
+        <EditCatalogModal
+          catalog={editingCatalog}
+          onSave={handleSaveCatalog}
+          onClose={() => setEditingCatalog(null)}
+        />
+      )}
+
+      {/* Order Links Modal */}
+      {linksCatalog && (
+        <OrderLinksModal
+          catalog={linksCatalog}
+          onClose={() => setLinksCatalog(null)}
+          onToast={showToast}
+        />
+      )}
+
+      {/* Variant Configs Modal */}
+      {variantConfigsCatalog && (
+        <VariantConfigsModal
+          catalog={variantConfigsCatalog}
+          onClose={() => setVariantConfigsCatalog(null)}
+          onToast={showToast}
+        />
       )}
     </div>
   );

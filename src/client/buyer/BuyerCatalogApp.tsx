@@ -1,35 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { VariantMatrix } from './VariantMatrix.js';
+import { VariantMatrix, ProductItem } from './VariantMatrix.js';
+import { QuickOrderView } from './QuickOrderView.js';
+import { CsvBulkUpload } from './CsvBulkUpload.js';
+import { PasscodeGate } from './PasscodeGate.js';
 import { OrderSummaryDrawer } from './OrderSummaryDrawer.js';
-import { parseBuyerRoute } from '../routeUtils.js';
+import { parseBuyerRoute, BuyerRouteType } from '../routeUtils.js';
 import { getOrCreateBuyerIdempotencyKey, clearBuyerIdempotencyKey } from './idempotencySession.js';
+import { BuyerFormConfig } from '../../types/index.js';
 import './buyer.css';
-
-interface VariantData {
-  id: string;
-  shopifyVariantId: string;
-  title: string;
-  sku: string | null;
-  basePrice: number;
-  displayPrice: number;
-  formattedPrice?: string;
-  availableForSale: boolean;
-  inventoryQuantity?: number;
-  inventoryPolicy?: string;
-  inventoryTracked?: boolean;
-  selectedOptions: Array<{ name: string; value: string }>;
-  imageUrl: string | null;
-}
-
-interface ProductData {
-  id: string;
-  shopifyProductId: string;
-  title: string;
-  vendor: string | null;
-  handle: string;
-  imageUrl: string | null;
-  variants: VariantData[];
-}
 
 interface CatalogData {
   catalog: {
@@ -39,15 +17,28 @@ interface CatalogData {
     accentColor: string;
     showSku: boolean;
     showInventory: boolean;
+    inventoryMode?: string;
+    inventoryCap?: number | null;
+    minQty?: number | null;
+    maxQty?: number | null;
+    qtyIncrement?: number | null;
     priceMode: string;
     discountPercent: number;
+    buyerFormConfig?: BuyerFormConfig;
   };
   shop: {
     id: string;
     shopDomain: string;
     currency: string;
   };
-  products: ProductData[];
+  orderLink?: {
+    id: string;
+    token: string;
+    label: string;
+    requiresPasscode?: boolean;
+  };
+  requiresPasscode?: boolean;
+  products: ProductItem[];
   totalProducts: number;
   dataVersion: number;
 }
@@ -69,56 +60,176 @@ export const BuyerCatalogApp: React.FC = () => {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'matrix' | 'quick'>('matrix');
+  const [showCsvModal, setShowCsvModal] = useState(false);
+
+  // Passcode gating (scoped access credential, NO passcodes in URLs)
+  const [passcodeRequired, setPasscodeRequired] = useState(false);
+  const [linkAccessToken, setLinkAccessToken] = useState<string | null>(() => {
+    try {
+      const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+      return (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(`cf_link_token_${pathname}`)) || null;
+    } catch {
+      return null;
+    }
+  });
+  const [passcodeError, setPasscodeError] = useState<string | null>(null);
+  const [passcodeLoading, setPasscodeLoading] = useState(false);
+
+  // Reorder tracking
+  const [reorderIntentToken, setReorderIntentToken] = useState<string | null>(null);
+  const [reorderNotice, setReorderNotice] = useState<string | null>(null);
+
   const [submittedOrder, setSubmittedOrder] = useState<{
     submissionId: string;
     reference: string;
     subtotal: number;
   } | null>(null);
 
-  // Extract publicToken from URL path using strict canonical route: /c/<64 hex token>
-  // IMPORTANT: Never fall back to query params — Shopify App Bridge passes ?id_token=
-  // which must never be treated as a catalog token.
-  const publicToken = useMemo(() => {
+  // Parse current route
+  const { routeToken, routeType } = useMemo(() => {
     const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
-    const { token } = parseBuyerRoute(pathname);
-    return token || '';
+    const parsed = parseBuyerRoute(pathname);
+    return {
+      routeToken: parsed.token || '',
+      routeType: (parsed.routeType || 'catalog') as BuyerRouteType,
+    };
   }, []);
 
-  useEffect(() => {
-    if (!publicToken) {
-      setError('Missing catalog token in URL.');
+  const fetchCatalogData = async (overrideAccessToken?: string | null) => {
+    if (!routeToken) {
+      setError('Missing catalog link in URL.');
       setLoading(false);
       return;
     }
 
-    const fetchCatalog = async () => {
-      try {
-        setLoading(true);
-        const res = await fetch(`/api/public/catalog/${publicToken}`);
-        if (!res.ok) {
-          if (res.status === 404) {
-            setError('This wholesale catalog is currently unavailable or unpublished.');
-          } else {
-            setError('Failed to load wholesale catalog.');
-          }
-          return;
-        }
-        const json: CatalogData = await res.json();
-        setData(json);
+    try {
+      setLoading(true);
+      setError(null);
 
-        // Apply merchant custom accent color
-        if (json.catalog.accentColor) {
-          document.documentElement.style.setProperty('--accent-color', json.catalog.accentColor);
-        }
-      } catch (err: any) {
-        setError(err.message || 'Network error loading catalog.');
-      } finally {
-        setLoading(false);
+      let url = '';
+      const headers: Record<string, string> = {};
+
+      const tokenToUse = overrideAccessToken !== undefined ? overrideAccessToken : linkAccessToken;
+      if (tokenToUse) {
+        headers['X-Link-Access-Token'] = tokenToUse;
       }
-    };
 
-    fetchCatalog();
-  }, [publicToken]);
+      if (routeType === 'reorder') {
+        // First fetch reorder intent payload
+        const reorderRes = await fetch(`/api/public/reorder/${routeToken}`);
+        if (!reorderRes.ok) {
+          const errJson = await reorderRes.json().catch(() => ({}));
+          throw new Error(errJson.error || 'Reorder link expired or invalid');
+        }
+        const reorderData = await reorderRes.json();
+        setReorderIntentToken(reorderData.intentToken);
+
+        // Prepopulate cart
+        const prefill: Record<string, number> = {};
+        let unavailableCount = 0;
+        for (const line of reorderData.prefillLines || []) {
+          if (line.currentlyAvailable && !line.deleted) {
+            prefill[line.variantId] = line.quantity;
+          } else {
+            unavailableCount++;
+          }
+        }
+        setQuantities(prefill);
+
+        if (unavailableCount > 0) {
+          setReorderNotice(`${unavailableCount} previously ordered item(s) are currently out of stock or unavailable.`);
+        }
+
+        // Now load the underlying catalog
+        url = `/api/public/catalog/${reorderData.catalogPublicToken}`;
+      } else if (routeType === 'link') {
+        // Passcode is NEVER in the query string or URL
+        url = `/api/public/link/${routeToken}`;
+      } else {
+        url = `/api/public/catalog/${routeToken}`;
+      }
+
+      const res = await fetch(url, { headers });
+
+      if (res.status === 401) {
+        setPasscodeRequired(true);
+        setPasscodeError('Access credential expired or invalid. Please re-enter passcode.');
+        setLoading(false);
+        return;
+      }
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          setError('This wholesale catalog is currently unavailable, expired, or unpublished.');
+        } else if (res.status === 410) {
+          setError('This wholesale order link or catalog has expired.');
+        } else {
+          setError('Failed to load wholesale catalog.');
+        }
+        return;
+      }
+
+      const json: CatalogData = await res.json();
+
+      if (json.requiresPasscode) {
+        setPasscodeRequired(true);
+        setData(json);
+        setLoading(false);
+        return;
+      }
+
+      setPasscodeRequired(false);
+      setData(json);
+
+      // Apply merchant accent color if specified
+      if (json.catalog.accentColor) {
+        document.documentElement.style.setProperty('--accent-color', json.catalog.accentColor);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Network error loading catalog.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCatalogData();
+  }, [routeToken, routeType]);
+
+  const handlePasscodeSubmit = async (enteredPasscode: string) => {
+    try {
+      setPasscodeLoading(true);
+      setPasscodeError(null);
+
+      // Passcode verification happens via POST request body ONLY
+      const unlockRes = await fetch(`/api/public/link/${routeToken}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passcode: enteredPasscode }),
+      });
+
+      if (!unlockRes.ok) {
+        const errJson = await unlockRes.json().catch(() => ({}));
+        setPasscodeError(errJson.error || 'Invalid passcode. Please try again.');
+        return;
+      }
+
+      const unlockData = await unlockRes.json();
+      const newToken = unlockData.linkAccessToken;
+      setLinkAccessToken(newToken);
+      try {
+        const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem(`cf_link_token_${pathname}`, newToken);
+        }
+      } catch {}
+
+      await fetchCatalogData(newToken);
+    } finally {
+      setPasscodeLoading(false);
+    }
+  };
 
   const handleQuantityChange = (variantId: string, qty: number) => {
     setQuantities((prev) => ({
@@ -127,7 +238,17 @@ export const BuyerCatalogApp: React.FC = () => {
     }));
   };
 
-  // High-performance search filtering (p95 < 250ms)
+  const handleApplyCsvLines = (lines: Array<{ variantId: string; quantity: number }>) => {
+    setQuantities((prev) => {
+      const next = { ...prev };
+      for (const line of lines) {
+        next[line.variantId] = line.quantity;
+      }
+      return next;
+    });
+  };
+
+  // Search filtering
   const filteredProducts = useMemo(() => {
     if (!data?.products) return [];
     if (!searchQuery.trim()) return data.products;
@@ -171,106 +292,83 @@ export const BuyerCatalogApp: React.FC = () => {
 
   const handleSubmitOrder = async (buyerInfo: {
     businessName: string;
+    buyerName?: string;
     email: string;
+    phone?: string;
+    taxId?: string;
     poNumber?: string;
     note?: string;
   }) => {
     if (!data) return;
 
-    setIsSubmitting(true);
-    setSubmitError(null);
-
-    const lines = Object.entries(quantities)
-      .filter(([_, qty]) => qty > 0)
-      .map(([variantId, qty]) => ({ variantId, quantity: qty }));
-
-    // Use session-backed idempotency key for this catalog & order-intent fingerprint.
-    // Survives page refreshes and network retries so ambiguous/network failures
-    // do not create duplicate Shopify Draft Orders on retry.
-    const idempotencyKey = getOrCreateBuyerIdempotencyKey(publicToken, lines);
-
     try {
-      // Send to server submit endpoint
-      const res = await fetch(`/api/public/catalog/${publicToken}/submit`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': idempotencyKey,
-        },
-        body: JSON.stringify({
-          dataVersion: data.dataVersion,
-          lines,
-          buyer: buyerInfo,
-        }),
-      });
+      setIsSubmitting(true);
+      setSubmitError(null);
 
-      if (!res.ok) {
-        const requestIdHeader = res.headers.get('X-Request-ID') || res.headers.get('x-request-id');
-        let errJson: any = null;
-        let isJson = false;
+      const items = Object.entries(quantities)
+        .filter(([_, qty]) => qty > 0)
+        .map(([variantId, qty]) => ({
+          variantId,
+          quantity: qty,
+        }));
 
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          try {
-            errJson = await res.json();
-            isJson = true;
-          } catch {
-            isJson = false;
-          }
-        }
-
-        const reqId = errJson?.requestId || requestIdHeader;
-        const refSuffix = reqId ? ` (Reference: ${reqId})` : '';
-
-        if (!isJson) {
-          // Cloudflare HTML 502, origin drop, or upstream gateway timeout
-          setSubmitError(
-            `We could not reach the ordering service. Your order was not confirmed. Please try again shortly.${refSuffix}`
-          );
-          return;
-        }
-
-        // Structured error format: { error: { code, message, details }, requestId }
-        const errObj = typeof errJson.error === 'object' && errJson.error !== null ? errJson.error : null;
-        const errCode = errObj?.code || errJson.code;
-        const errMsg = errObj?.message || (typeof errJson.error === 'string' ? errJson.error : errJson.message);
-        const errDetails = errObj?.details || errJson.details;
-
-        if (errCode === 'INVENTORY_CHANGED' && Array.isArray(errDetails) && errDetails.length > 0) {
-          const detailStrings = errDetails.map((item: any) => {
-            if (item.available <= 0) {
-              return `${item.title}: currently out of stock`;
-            }
-            return `${item.title}: ${item.requested} requested, but only ${item.available} is currently available`;
-          });
-          setSubmitError(
-            `Inventory changed before order submission:\n• ${detailStrings.join('\n• ')}\n\nPlease review and adjust your quantities.${refSuffix}`
-          );
-        } else if (errCode === 'CATALOG_CHANGED' || res.status === 409) {
-          setSubmitError(
-            (errMsg || 'Some catalog items changed since you opened this page. Review the updated quantities and submit again.') + refSuffix
-          );
-        } else if (res.status === 502 || errCode === 'SHOPIFY_API_ERROR') {
-          setSubmitError(
-            `Shopify ordering service is temporarily unavailable. Your order was not confirmed. Please retry shortly.${refSuffix}`
-          );
-        } else {
-          setSubmitError((errMsg || 'Submission failed. Please try again.') + refSuffix);
-        }
+      if (items.length === 0) {
+        setSubmitError('Please select at least one item to order.');
         return;
       }
 
-      const result = await res.json();
-      // On confirmed success, clear the session idempotency key
-      clearBuyerIdempotencyKey(publicToken);
+      const tokenKey = routeToken || data.catalog.id;
+      const idempotencyKey = getOrCreateBuyerIdempotencyKey(tokenKey, items);
+
+      const payload = {
+        buyer: buyerInfo,
+        items,
+        dataVersion: data.dataVersion,
+        orderLinkToken: routeType === 'link' ? routeToken : undefined,
+        linkAccessToken: routeType === 'link' ? (linkAccessToken || undefined) : undefined,
+        reorderIntentToken: reorderIntentToken || undefined,
+      };
+
+      const submitEndpoint = routeType === 'link'
+        ? `/api/public/link/${routeToken}/submit`
+        : `/api/public/catalog/${routeToken}/submit`;
+
+      const submitHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+      };
+      if (routeType === 'link' && linkAccessToken) {
+        submitHeaders['X-Link-Access-Token'] = linkAccessToken;
+      }
+
+      const res = await fetch(submitEndpoint, {
+        method: 'POST',
+        headers: submitHeaders,
+        body: JSON.stringify(payload),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok) {
+        if (res.status === 409) {
+          throw new Error(
+            json.error?.message || json.message || 'Product catalog or inventory changed. Please refresh and review.'
+          );
+        }
+        throw new Error(
+          json.error?.message || json.message || json.error || 'Failed to submit order to Shopify.'
+        );
+      }
+
+      clearBuyerIdempotencyKey(tokenKey);
       setSubmittedOrder({
-        submissionId: result.submissionId,
-        reference: result.referenceNumber || result.submissionId,
-        subtotal: result.subtotalAmount || subtotal,
+        submissionId: json.submissionId,
+        reference: json.reference || json.draftOrderName || 'DRAFT-ORDER',
+        subtotal,
       });
       setIsDrawerOpen(false);
     } catch (err: any) {
-      setSubmitError(err.message || 'Network error occurred during submission.');
+      setSubmitError(err.message || 'Submission error');
     } finally {
       setIsSubmitting(false);
     }
@@ -278,132 +376,52 @@ export const BuyerCatalogApp: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="portal-container" style={{ textAlign: 'center', padding: '4rem' }}>
-        <p style={{ color: '#64748b', fontSize: '1.125rem' }}>Loading wholesale catalog...</p>
+      <div className="buyer-loading-container">
+        <div className="spinner" />
+        <p>Loading wholesale catalog...</p>
       </div>
     );
   }
 
-  if (error || !data) {
-    const isUnpublished = error?.toLowerCase().includes('inactive') || error?.toLowerCase().includes('not found');
-    const isStoreInactive = error?.toLowerCase().includes('store');
-    const isQuota = error?.toLowerCase().includes('quota') || error?.toLowerCase().includes('limit');
-
+  if (passcodeRequired) {
     return (
-      <div className="portal-container" style={{ maxWidth: '600px', margin: '4rem auto', textAlign: 'center' }}>
-        <div
-          style={{
-            background: '#ffffff',
-            padding: '3rem 2rem',
-            borderRadius: '16px',
-            border: '1px solid #e2e8f0',
-            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)',
-          }}
-        >
-          <div
-            style={{
-              width: '64px',
-              height: '64px',
-              background: isQuota ? '#fef3c7' : '#fee2e2',
-              borderRadius: '50%',
-              margin: '0 auto 1.5rem',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '1.75rem',
-              color: isQuota ? '#d97706' : '#dc2626',
-            }}
-          >
-            {isQuota ? '⚠️' : '🔒'}
-          </div>
-          <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.75rem', color: '#0f172a' }}>
-            {isQuota
-              ? 'Catalog Temporarily Unavailable'
-              : isStoreInactive
-              ? 'Store Temporarily Inactive'
-              : isUnpublished
-              ? 'Catalog Unavailable'
-              : 'Catalog Unavailable'}
-          </h2>
-          <p style={{ color: '#64748b', lineHeight: 1.6, marginBottom: '1.5rem' }}>
-            {error ||
-              'This wholesale catalog is either unpublished, private, or has reached its ordering limit. Please contact the merchant directly for assistance.'}
-          </p>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => window.location.reload()}
-            style={{ padding: '0.65rem 1.25rem', fontSize: '0.9rem' }}
-          >
-            ↻ Try Refreshing Page
-          </button>
+      <PasscodeGate
+        catalogName={data?.catalog?.name}
+        linkLabel={data?.orderLink?.label}
+        onSubmitPasscode={handlePasscodeSubmit}
+        error={passcodeError}
+        loading={passcodeLoading}
+      />
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <div className="buyer-error-container">
+        <div className="error-card">
+          <h2>Catalog Unavailable</h2>
+          <p>{error || 'This wholesale catalog could not be loaded.'}</p>
         </div>
       </div>
     );
   }
 
-  // Success screen
   if (submittedOrder) {
     return (
-      <div className="portal-container" style={{ maxWidth: '600px', margin: '4rem auto', textAlign: 'center' }}>
-        <div
-          style={{
-            background: '#ffffff',
-            padding: '3rem 2rem',
-            borderRadius: '16px',
-            border: '1px solid #e2e8f0',
-            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)',
-          }}
-        >
-          <div
-            style={{
-              width: '64px',
-              height: '64px',
-              background: '#dcfce7',
-              borderRadius: '50%',
-              margin: '0 auto 1.5rem',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '2rem',
-              color: '#15803d',
-            }}
-          >
-            ✓
-          </div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.75rem' }}>
-            Wholesale Order Submitted!
-          </h1>
-          <p style={{ color: '#64748b', marginBottom: '1.5rem', lineHeight: 1.6 }}>
-            Your wholesale order request has been received by <strong>{data.shop.shopDomain}</strong> and is being
-            processed directly in Shopify.
+      <div className="buyer-success-container">
+        <div className="success-card">
+          <div className="success-icon">✓</div>
+          <h2>Wholesale Order Submitted!</h2>
+          <p className="success-reference">
+            Reference: <strong>{submittedOrder.reference}</strong>
           </p>
-          <div
-            style={{
-              background: '#f8fafc',
-              borderRadius: '8px',
-              padding: '1rem',
-              marginBottom: '2rem',
-              textAlign: 'left',
-              fontSize: '0.9rem',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <span style={{ color: '#64748b' }}>Reference ID:</span>
-              <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{submittedOrder.reference}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: '#64748b' }}>Order Subtotal:</span>
-              <span style={{ fontWeight: 600 }}>
-                {formatPrice(submittedOrder.subtotal, data.shop.currency || 'USD')}
-              </span>
-            </div>
-          </div>
+          <p className="success-text">
+            Thank you for your order. A Shopify draft invoice will be sent to your email with payment and shipping terms.
+          </p>
           <button
             type="button"
             className="btn-primary"
             onClick={() => {
-              clearBuyerIdempotencyKey(publicToken);
               setSubmittedOrder(null);
               setQuantities({});
             }}
@@ -416,97 +434,163 @@ export const BuyerCatalogApp: React.FC = () => {
   }
 
   return (
-    <div className="portal-container">
-      {/* Brand Header */}
-      <header className="portal-header">
-        <div className="brand-info">
-          {data.catalog.logoUrl && (
-            <img src={data.catalog.logoUrl} alt={data.catalog.name} className="brand-logo" />
-          )}
-          <div>
-            <h1 className="brand-title">{data.catalog.name}</h1>
-            <p className="brand-subtitle">
-              Wholesale Order Portal • {data.shop.shopDomain}
-              {data.catalog.discountPercent > 0 && (
-                <span style={{ marginLeft: '0.5rem', color: 'var(--accent-color)', fontWeight: 600 }}>
-                  ({data.catalog.discountPercent}% Wholesale Discount Applied)
-                </span>
+    <div className="buyer-app">
+      {/* Header */}
+      <header className="buyer-header">
+        <div className="buyer-header-content">
+          <div className="buyer-brand">
+            {data.catalog.logoUrl ? (
+              <img src={data.catalog.logoUrl} alt={data.catalog.name} className="catalog-logo" />
+            ) : (
+              <div className="brand-dot" />
+            )}
+            <div>
+              <h1 className="catalog-name">{data.catalog.name}</h1>
+              <p className="catalog-subtitle">B2B Wholesale Order Portal</p>
+            </div>
+          </div>
+
+          <div className="header-actions">
+            {/* View Mode Switcher */}
+            <div className="view-mode-toggle">
+              <button
+                type="button"
+                className={`view-toggle-btn ${viewMode === 'matrix' ? 'active' : ''}`}
+                onClick={() => setViewMode('matrix')}
+                title="Visual Card Matrix"
+              >
+                ⊞ Grid
+              </button>
+              <button
+                type="button"
+                className={`view-toggle-btn ${viewMode === 'quick' ? 'active' : ''}`}
+                onClick={() => setViewMode('quick')}
+                title="Quick Order Table"
+              >
+                ☰ Quick Order
+              </button>
+            </div>
+
+            {/* CSV Bulk Upload Button */}
+            <button
+              type="button"
+              className="csv-upload-trigger-btn"
+              onClick={() => setShowCsvModal(true)}
+            >
+              📄 CSV Bulk Upload
+            </button>
+
+            {/* Cart Trigger */}
+            <button
+              type="button"
+              className="cart-trigger-btn"
+              onClick={() => setIsDrawerOpen(true)}
+              disabled={selectedLinesCount === 0}
+            >
+              🛒 Order Cart ({totalItems})
+              {selectedLinesCount > 0 && (
+                <span className="cart-total-badge">{formatPrice(subtotal, data.shop.currency)}</span>
               )}
-            </p>
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Search Bar */}
-      <div className="search-filter-bar">
-        <div className="search-input-wrapper">
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search by product title, SKU, or vendor..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-      </div>
-
-      {/* Product List */}
-      <div className="product-list">
-        {data.products.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '4rem 2rem', background: '#fff', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-            <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>📦</div>
-            <h3 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>Catalog in Preparation</h3>
-            <p style={{ color: '#64748b', maxWidth: '400px', margin: '0 auto' }}>
-              Products are currently being prepared for wholesale by {data.shop.shopDomain}. Please check back shortly.
-            </p>
+      {/* Main Content */}
+      <main className="buyer-main">
+        {reorderNotice && (
+          <div className="reorder-notice-banner">
+            ℹ️ {reorderNotice}
           </div>
-        ) : filteredProducts.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '3rem', background: '#fff', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-            <p style={{ color: '#64748b' }}>No products matching "{searchQuery}"</p>
-          </div>
-        ) : (
-          filteredProducts.map((product) => (
-            <VariantMatrix
-              key={product.id}
-              product={product}
-              quantities={quantities}
-              onQuantityChange={handleQuantityChange}
-              showSku={data.catalog.showSku}
-              showInventory={data.catalog.showInventory}
-            />
-          ))
         )}
-      </div>
 
-      {/* Sticky Order Summary Bar */}
-      {selectedLinesCount > 0 && (
-        <div className="sticky-summary-bar">
-          <div className="sticky-summary-content">
-            <div className="summary-stats">
-              <div className="stat-item">
-                <span className="stat-label">Selected</span>
-                <span className="stat-value">{selectedLinesCount} items ({totalItems} units)</span>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">Estimated Subtotal</span>
-                <span className="stat-value highlight">
-                  {formatPrice(subtotal, data.shop.currency || 'USD')}
-                </span>
-              </div>
+        {viewMode === 'matrix' ? (
+          <>
+            {/* Search Bar for Matrix */}
+            <div className="search-bar-container">
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Search catalog products, variants, or SKUs..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  className="clear-search-btn"
+                  onClick={() => setSearchQuery('')}
+                >
+                  ✕
+                </button>
+              )}
             </div>
 
+            {/* Product Cards List */}
+            <div className="products-grid">
+              {filteredProducts.length === 0 ? (
+                <div className="empty-search">
+                  <p>No products found matching "{searchQuery}"</p>
+                </div>
+              ) : (
+                filteredProducts.map((product) => (
+                  <VariantMatrix
+                    key={product.id}
+                    product={product}
+                    quantities={quantities}
+                    onQuantityChange={handleQuantityChange}
+                    showSku={data.catalog.showSku}
+                    showInventory={data.catalog.showInventory}
+                    inventoryMode={data.catalog.inventoryMode}
+                    inventoryCap={data.catalog.inventoryCap}
+                  />
+                ))
+              )}
+            </div>
+          </>
+        ) : (
+          <QuickOrderView
+            products={data.products}
+            quantities={quantities}
+            onQuantityChange={handleQuantityChange}
+            showSku={data.catalog.showSku}
+            showInventory={data.catalog.showInventory}
+            currency={data.shop.currency}
+          />
+        )}
+      </main>
+
+      {/* Sticky Bottom Order Bar for Mobile & Desktop */}
+      {selectedLinesCount > 0 && (
+        <div className="sticky-order-bar">
+          <div className="sticky-bar-content">
+            <div className="order-stats">
+              <strong>{totalItems}</strong> units ({selectedLinesCount} items) •{' '}
+              <strong className="order-subtotal">{formatPrice(subtotal, data.shop.currency)}</strong>
+            </div>
             <button
               type="button"
               className="btn-primary"
               onClick={() => setIsDrawerOpen(true)}
             >
-              Review Order ({selectedLinesCount}) →
+              Review &amp; Place Order →
             </button>
           </div>
         </div>
       )}
 
-      {/* Slide-out Order Review Drawer */}
+      {/* CSV Bulk Upload Modal */}
+      {showCsvModal && (
+        <CsvBulkUpload
+          token={routeToken}
+          isLinkRoute={routeType === 'link'}
+          linkAccessToken={linkAccessToken || undefined}
+          onApplyLines={handleApplyCsvLines}
+          onClose={() => setShowCsvModal(false)}
+        />
+      )}
+
+      {/* Review & Submit Drawer */}
       <OrderSummaryDrawer
         isOpen={isDrawerOpen}
         onClose={() => setIsDrawerOpen(false)}
@@ -514,7 +598,8 @@ export const BuyerCatalogApp: React.FC = () => {
         quantities={quantities}
         subtotal={subtotal}
         totalItems={totalItems}
-        currency={data.shop.currency || 'USD'}
+        currency={data.shop.currency}
+        buyerFormConfig={data.catalog.buyerFormConfig}
         onSubmit={handleSubmitOrder}
         isSubmitting={isSubmitting}
         errorMessage={submitError}

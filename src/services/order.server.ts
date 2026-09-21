@@ -1,7 +1,7 @@
 import { prisma } from '../db.js';
 import { Prisma } from '@prisma/client';
-import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus } from '../types/index.js';
-import { calculateDisplayPrice, toDecimal, formatMoney } from './pricing.server.js';
+import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus, PriceMode } from '../types/index.js';
+import { calculateDisplayPrice, toDecimal, formatMoney, roundDecimal } from './pricing.server.js';
 import {
   reserveSubmissionQuotaSlot,
   releaseSubmissionQuotaSlot,
@@ -16,6 +16,15 @@ import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server
 import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 import { sanitizeErrorMessage } from './security.server.js';
 import { SubmitStageTracker, recordRuntimeIncident } from './incident.server.js';
+import { validateOrderLinkAccess, recordOrderLinkSubmission, isOrderLinkExpired } from './orderlink.server.js';
+import {
+  claimReorderIntent,
+  releaseReorderIntentClaim,
+  commitReorderIntentUsed,
+  markReorderIntentReconciliationPending,
+  resetReorderIntentToAvailable,
+  ReorderIntentError,
+} from './reorder.server.js';
 import crypto from 'crypto';
 
 export class OrderSubmissionError extends Error {
@@ -188,6 +197,7 @@ export async function submitBuyerOrder(
     include: {
       shop: true,
       sources: true,
+      variantConfigs: true,
     },
   });
 
@@ -202,6 +212,37 @@ export async function submitBuyerOrder(
     lineCount: validated.lines.length,
   });
   tracker.transition('CATALOG_VALIDATED');
+
+  // 1b. Order Link validation (if order was submitted via a link token)
+  let resolvedOrderLinkId: string | null = null;
+  if (validated.orderLinkToken) {
+    const orderLink = await prisma.orderLink.findUnique({
+      where: { token: validated.orderLinkToken },
+    });
+    if (!orderLink || orderLink.catalogId !== catalog.id) {
+      tracker.transition('SUBMISSION_FAILED', 'INVALID_LINK');
+      throw new OrderSubmissionError('Order link not found or does not belong to this catalog', 403, 'INVALID_LINK');
+    }
+    const linkAccess = validateOrderLinkAccess(orderLink, validated.passcode);
+    if (!linkAccess.ok) {
+      tracker.transition('SUBMISSION_FAILED', linkAccess.reason || 'LINK_INVALID');
+      const msg = linkAccess.reason === 'PASSCODE_REQUIRED' ? 'A passcode is required to submit this order'
+        : linkAccess.reason === 'PASSCODE_INVALID' ? 'Incorrect passcode'
+        : linkAccess.reason === 'LINK_EXPIRED' ? 'This order link has expired'
+        : 'This order link is inactive';
+      throw new OrderSubmissionError(msg, 403, linkAccess.reason || 'LINK_INVALID');
+    }
+    resolvedOrderLinkId = orderLink.id;
+  }
+
+  // 1c. Build variant config map (for disabled variant and qty rule enforcement)
+  const variantConfigMap = new Map(
+    (catalog as any).variantConfigs?.map((vc: any) => [vc.shopifyVariantId, vc]) ?? []
+  );
+  const catalogMinQty: number = (catalog as any).minQty ?? 1;
+  const catalogMaxQty: number | null = (catalog as any).maxQty ?? null;
+  const catalogQtyIncrement: number = (catalog as any).qtyIncrement ?? 1;
+  const catalogCustomPrice = (catalog as any).customPriceAmount ?? null;
 
   // 2. Enforce dataVersion Boundary
   if (validated.dataVersion !== catalog.dataVersion) {
@@ -242,10 +283,33 @@ export async function submitBuyerOrder(
   const localSnapshotMap = new Map(localSnapshots.map((s) => [s.shopifyVariantId, s]));
 
   const invalidVariants: string[] = [];
+  const disabledVariants: string[] = [];
+  const qtyRuleViolations: Array<{ variantId: string; detail: string }> = [];
+
   for (const line of validated.lines) {
     const snap = localSnapshotMap.get(line.variantId);
     if (!snap || !allowedProductGids.has(snap.shopifyProductId) || snap.product.status !== 'ACTIVE') {
       invalidVariants.push(line.variantId);
+      continue;
+    }
+
+    // Server-side: reject disabled variants regardless of client
+    const vcfg: any = variantConfigMap.get(line.variantId);
+    if (vcfg && !vcfg.enabled) {
+      disabledVariants.push(line.variantId);
+      continue;
+    }
+
+    // Server-side: enforce quantity rules
+    const effectiveMin = vcfg?.minQty ?? catalogMinQty;
+    const effectiveMax = vcfg?.maxQty ?? catalogMaxQty;
+    const effectiveIncrement = vcfg?.qtyIncrement ?? catalogQtyIncrement;
+    if (line.quantity < effectiveMin) {
+      qtyRuleViolations.push({ variantId: line.variantId, detail: `Minimum quantity for ${snap.sku || line.variantId} is ${effectiveMin}` });
+    } else if (effectiveMax !== null && line.quantity > effectiveMax) {
+      qtyRuleViolations.push({ variantId: line.variantId, detail: `Maximum quantity for ${snap.sku || line.variantId} is ${effectiveMax}` });
+    } else if (effectiveIncrement > 1 && line.quantity % effectiveIncrement !== 0) {
+      qtyRuleViolations.push({ variantId: line.variantId, detail: `Quantity for ${snap.sku || line.variantId} must be a multiple of ${effectiveIncrement}` });
     }
   }
 
@@ -259,6 +323,26 @@ export async function submitBuyerOrder(
     );
   }
 
+  if (disabledVariants.length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'INVALID_LINES');
+    throw new OrderSubmissionError(
+      'One or more items are no longer available in this catalog.',
+      422,
+      'ITEMS_DISABLED',
+      { disabledVariants }
+    );
+  }
+
+  if (qtyRuleViolations.length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'QTY_RULE_VIOLATION');
+    throw new OrderSubmissionError(
+      'One or more items violate quantity rules for this catalog.',
+      422,
+      'QTY_RULE_VIOLATION',
+      { violations: qtyRuleViolations }
+    );
+  }
+
   tracker.transition('CATALOG_MEMBERSHIP_VALIDATED');
 
   const client = customClient || new ShopifyAdminClient({
@@ -266,7 +350,20 @@ export async function submitBuyerOrder(
     shopId: catalog.shopId,
   });
 
-  // 4. Idempotency State Machine & Pre-Shopify Reservation
+  // 4. Claim Reorder Intent Atomically if provided
+  if (validated.reorderIntentToken) {
+    try {
+      await claimReorderIntent(validated.reorderIntentToken, correlationId);
+    } catch (reorderErr: any) {
+      tracker.transition('SUBMISSION_FAILED', reorderErr.code || 'REORDER_ERROR');
+      if (reorderErr instanceof ReorderIntentError) {
+        throw new OrderSubmissionError(reorderErr.message, reorderErr.statusCode, reorderErr.code);
+      }
+      throw reorderErr;
+    }
+  }
+
+  // 5. Idempotency State Machine & Pre-Shopify Reservation
   const keyHash = hashIdempotencyKey(catalog.id, idempotencyKey.trim());
   let submission = await prisma.orderSubmission.findUnique({
     where: {
@@ -281,6 +378,15 @@ export async function submitBuyerOrder(
 
   if (submission) {
     if (submission.status === 'COMPLETED') {
+      if (validated.reorderIntentToken) {
+        try {
+          await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
+        } catch (commitErr: any) {
+          if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
+            await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+          }
+        }
+      }
       return {
         success: true,
         submissionId: submission.id,
@@ -303,6 +409,15 @@ export async function submitBuyerOrder(
           quotaReserved: true,
         },
       });
+      if (validated.reorderIntentToken) {
+        try {
+          await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
+        } catch (commitErr: any) {
+          if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
+            await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+          }
+        }
+      }
       return {
         success: true,
         submissionId: completedSub.id,
@@ -343,6 +458,9 @@ export async function submitBuyerOrder(
     const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
     const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
     if (!slotReserved) {
+      if (validated.reorderIntentToken) {
+        await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
+      }
       throw new OrderSubmissionError(
         'Merchant order submission limit reached for their current plan. Please contact the merchant.',
         403,
@@ -366,10 +484,18 @@ export async function submitBuyerOrder(
           quotaReserved: true,
           currency: catalog.shop.currency || 'USD',
           correlationRef: buildDraftOrderIdempotencyTag(idempotencyKey),
+          orderLinkId: resolvedOrderLinkId,
+          buyerName: validated.buyer.buyerName ?? null,
+          buyerPhone: validated.buyer.phone ?? null,
+          taxId: validated.buyer.taxId ?? null,
+          reorderIntentId: validated.reorderIntentToken ?? null,
         },
       });
     } catch (insertErr: any) {
       await releaseSubmissionQuotaSlotDirect(catalog.shopId, activeAnchor);
+      if (validated.reorderIntentToken) {
+        await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
+      }
       tracker.transition('SUBMISSION_FAILED', 'CONCURRENT_PROCESSING');
       throw new OrderSubmissionError(
         'Order submission is currently being processed by another worker',
@@ -459,6 +585,16 @@ export async function submitBuyerOrder(
           `draft_order_created:${updated.id}`
         );
 
+        if (validated.reorderIntentToken) {
+          try {
+            await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
+          } catch (commitErr: any) {
+            if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
+              await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+            }
+          }
+        }
+
         return {
           success: true,
           submissionId: updated.id,
@@ -498,6 +634,9 @@ export async function submitBuyerOrder(
       } else {
         // REQUIRES_RECONCILIATION or CREATING must NEVER automatically call draftOrderCreate!
         // Keep status REQUIRES_RECONCILIATION, keep quota slot reserved, throw RECONCILIATION_PENDING!
+        if (validated.reorderIntentToken) {
+          await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+        }
         throw new OrderSubmissionError(
           'We are still confirming the previous order attempt. Please retry shortly.',
           409,
@@ -505,6 +644,9 @@ export async function submitBuyerOrder(
         );
       }
     } catch (reconcileSearchErr: any) {
+      if (validated.reorderIntentToken) {
+        await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+      }
       if (reconcileSearchErr instanceof OrderSubmissionError) {
         throw reconcileSearchErr;
       }
@@ -561,6 +703,9 @@ export async function submitBuyerOrder(
     liveNodes = res.nodes || [];
   } catch (liveQueryErr: any) {
     await releaseSubmissionQuotaReservation(submission.id);
+    if (validated.reorderIntentToken) {
+      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Live variant verification failed' },
@@ -632,18 +777,31 @@ export async function submitBuyerOrder(
       }
     }
 
-    const liveWholesalePrice = calculateDisplayPrice(
-      liveVariant.price,
-      catalog.priceMode,
-      catalog.discountPercent
-    );
-
-    if (localSnapshot) {
-      const localWholesalePrice = calculateDisplayPrice(
-        localSnapshot.shopifyPrice,
+    // Price calculation: custom per-variant price > catalog custom price > percent discount > Shopify price
+    const vcfg: any = variantConfigMap.get(line.variantId);
+    let liveWholesalePrice: Prisma.Decimal;
+    if (vcfg?.customPrice) {
+      liveWholesalePrice = roundDecimal(vcfg.customPrice);
+    } else if (catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice) {
+      liveWholesalePrice = roundDecimal(catalogCustomPrice);
+    } else {
+      liveWholesalePrice = calculateDisplayPrice(
+        liveVariant.price,
         catalog.priceMode,
         catalog.discountPercent
       );
+    }
+
+    if (localSnapshot) {
+      const localWholesalePrice = vcfg?.customPrice
+        ? roundDecimal(vcfg.customPrice)
+        : catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice
+          ? roundDecimal(catalogCustomPrice)
+          : calculateDisplayPrice(
+              localSnapshot.shopifyPrice,
+              catalog.priceMode,
+              catalog.discountPercent
+            );
       if (!localWholesalePrice.equals(liveWholesalePrice)) {
         changedLines.push({
           variantId: line.variantId,
@@ -663,6 +821,9 @@ export async function submitBuyerOrder(
 
   if (inventoryChangedItems.length > 0) {
     await releaseSubmissionQuotaReservation(submission.id);
+    if (validated.reorderIntentToken) {
+      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Inventory changed during submit' },
@@ -676,6 +837,9 @@ export async function submitBuyerOrder(
 
   if (changedLines.length > 0) {
     await releaseSubmissionQuotaReservation(submission.id);
+    if (validated.reorderIntentToken) {
+      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Catalog data changed during submit' },
@@ -935,6 +1099,10 @@ export async function submitBuyerOrder(
       },
     });
 
+    if (validated.reorderIntentToken) {
+      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
+
     tracker.transition('SUBMISSION_FAILED', ambiguousCode);
 
     void recordRuntimeIncident({
@@ -990,6 +1158,9 @@ export async function submitBuyerOrder(
     }).join('; ');
 
     await releaseSubmissionQuotaReservation(submission.id);
+    if (validated.reorderIntentToken) {
+      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
@@ -1040,6 +1211,10 @@ export async function submitBuyerOrder(
         lastError: sanitizeErrorMessage(reasonMsg),
       },
     });
+
+    if (validated.reorderIntentToken) {
+      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
 
     tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
 
@@ -1117,6 +1292,10 @@ export async function submitBuyerOrder(
       },
     }).catch(() => {});
 
+    if (validated.reorderIntentToken) {
+      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
+
     throw new OrderSubmissionError(
       `Your draft order was created in Shopify with reference ${createdDraft.name || 'pending'}. Please refresh to view order status.`,
       502,
@@ -1140,6 +1319,22 @@ export async function submitBuyerOrder(
   ).catch((analyticsErr: any) => {
     console.warn('[Analytics:DraftOrderCreated] Non-fatal error recording analytics event:', analyticsErr?.message);
   });
+
+  // Record order link analytics if this order was submitted via a named link
+  if (resolvedOrderLinkId) {
+    void recordOrderLinkSubmission(resolvedOrderLinkId, subtotalNumber).catch(() => {});
+  }
+
+  // Mark reorder intent as used if one was provided
+  if (validated.reorderIntentToken) {
+    try {
+      await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
+    } catch (commitErr: any) {
+      console.error('[ReorderIntent:CommitUsedFailed]', commitErr?.message);
+      // Invariant: Draft Order exists in Shopify. Never leave token AVAILABLE / reclaimable.
+      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
+    }
+  }
 
   tracker.transition('SUBMISSION_COMPLETED');
 
@@ -1422,6 +1617,11 @@ export async function reconcileSubmission(
                 currencyCode
               }
             }
+            lineItems(first: 250) {
+              nodes {
+                quantity
+              }
+            }
           }
         }
       }
@@ -1448,6 +1648,11 @@ export async function reconcileSubmission(
       shop.currency ||
       'USD';
 
+    // Hydrate item/line counts from live Shopify lineItems
+    const lineNodes: Array<{ quantity: number }> = foundDraft.lineItems?.nodes || [];
+    const reconciledLineCount = lineNodes.length;
+    const reconciledItemCount = lineNodes.reduce((sum: number, n: { quantity: number }) => sum + (n.quantity || 0), 0);
+
     const updated = await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
@@ -1460,6 +1665,9 @@ export async function reconcileSubmission(
         processingStartedAt: null,
         quotaReserved: true,
         lastError: null,
+        // Fix reconciliation bug: hydrate item/line counts from Shopify data
+        ...(reconciledLineCount > 0 && { lineCount: reconciledLineCount }),
+        ...(reconciledItemCount > 0 && { itemCount: reconciledItemCount }),
       },
     });
 
@@ -1475,6 +1683,16 @@ export async function reconcileSubmission(
       },
       `draft_order_created:${updated.id}`
     );
+
+    if (submission.reorderIntentId) {
+      try {
+        await commitReorderIntentUsed(submission.reorderIntentId);
+      } catch (commitErr: any) {
+        if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
+          await markReorderIntentReconciliationPending(submission.reorderIntentId).catch(() => {});
+        }
+      }
+    }
 
     return {
       reconciled: true,

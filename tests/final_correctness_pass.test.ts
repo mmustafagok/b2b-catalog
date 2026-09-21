@@ -157,7 +157,8 @@ describe('FINAL CORRECTNESS PASS: V1 Scope Verification', () => {
 
       // 6. Verify buyer catalog reflects updated inventory
       const publicPayload = await getPublicCatalogPayload(published.publicToken);
-      const v = publicPayload!.products[0].variants[0];
+      expect(publicPayload).not.toBeNull();
+      const v = publicPayload!.products[0]!.variants[0]!;
       expect(v.effectiveAvailable).toBe(3);
       expect(v.inventoryQuantity).toBe(3);
     });
@@ -476,7 +477,7 @@ describe('FINAL CORRECTNESS PASS: V1 Scope Verification', () => {
 
       const payload = await getPublicCatalogPayload(published.publicToken);
       expect(payload).not.toBeNull();
-      const v = payload!.products[0].variants[0];
+      const v = payload!.products[0]!.variants[0]!;
 
       // Privacy guarantees
       expect(v.inventoryQuantity).toBeUndefined();

@@ -108,7 +108,7 @@ describe('Milestone 4.5: Collections, Initial Sync, Hardened Webhooks & Complian
       expect(payload).toBeDefined();
       expect(payload?.products).toHaveLength(2);
 
-      const productTitles = payload?.products.map((p) => p.title);
+      const productTitles = (payload?.products || []).map((p) => p?.title);
       expect(productTitles).toContain('Product A (In Coll A)');
       expect(productTitles).toContain('Product B (In Coll A)');
       // Critical check: Product C must NEVER appear!
@@ -142,7 +142,7 @@ describe('Milestone 4.5: Collections, Initial Sync, Hardened Webhooks & Complian
       // Should have exactly 3 products without duplicates
       expect(payload?.products).toHaveLength(3);
 
-      const productIds = payload?.products.map((p) => p.shopifyProductId);
+      const productIds = (payload?.products || []).map((p) => p?.shopifyProductId);
       expect(productIds).toContain('gid://shopify/Product/101');
       expect(productIds).toContain('gid://shopify/Product/102');
       expect(productIds).toContain('gid://shopify/Product/103');
@@ -174,7 +174,7 @@ describe('Milestone 4.5: Collections, Initial Sync, Hardened Webhooks & Complian
 
       payload = await getPublicCatalogPayload(catalogA.publicToken);
       expect(payload?.products).toHaveLength(1);
-      expect(payload?.products[0].title).toBe('Product B (In Coll A)');
+      expect(payload!.products[0]!.title).toBe('Product B (In Coll A)');
     });
   });
 
@@ -1057,7 +1057,7 @@ describe('Milestone 4.5: Collections, Initial Sync, Hardened Webhooks & Complian
         // Verify product now appears in public catalog payload and dataVersion incremented
         const updatedPayload = await getPublicCatalogPayload(catalog.publicToken);
         expect(updatedPayload?.products).toHaveLength(1);
-        expect(updatedPayload?.products[0].shopifyProductId).toBe('gid://shopify/Product/301');
+        expect(updatedPayload!.products[0]!.shopifyProductId).toBe('gid://shopify/Product/301');
         expect(updatedPayload?.dataVersion).toBeGreaterThan(initialVersion!);
       } finally {
         global.fetch = originalFetch;

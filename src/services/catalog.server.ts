@@ -4,6 +4,8 @@ import {
   UpdateCatalogInputSchema,
   CatalogStatus,
   PriceMode,
+  InventoryMode,
+  type CatalogVariantConfigInput,
 } from '../types/index.js';
 import { generateOpaqueToken } from './auth.server.js';
 import { resolveCatalogAllowedProductGids } from './sync.server.js';
@@ -20,6 +22,16 @@ export class CatalogError extends Error {
   }
 }
 
+// ─── Helper: parse buyerFormConfig ────────────────────────────────────────────
+
+function parseBuyerFormConfig(raw: unknown): string {
+  if (!raw) return '{}';
+  if (typeof raw === 'string') return raw;
+  try { return JSON.stringify(raw); } catch { return '{}'; }
+}
+
+// ─── Create Catalog ───────────────────────────────────────────────────────────
+
 export async function createCatalog(shopId: string, input: CreateCatalogInput) {
   const validated = CreateCatalogInputSchema.parse(input);
 
@@ -33,11 +45,22 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
         publicToken,
         status: CatalogStatus.DRAFT,
         priceMode: validated.priceMode || PriceMode.SHOPIFY_PRICE,
-        discountPercent: validated.priceMode === PriceMode.PERCENT_DISCOUNT ? validated.discountPercent || 0 : 0,
+        discountPercent:
+          validated.priceMode === PriceMode.PERCENT_DISCOUNT ? validated.discountPercent || 0 : 0,
+        customPriceAmount:
+          validated.priceMode === PriceMode.CUSTOM_PRICE
+            ? (validated.customPriceAmount ?? null)
+            : null,
         logoUrl: validated.logoUrl,
         accentColor: validated.accentColor || '#108043',
         showSku: validated.showSku ?? true,
         showInventory: validated.showInventory ?? false,
+        inventoryMode: validated.inventoryMode || InventoryMode.STATUS_ONLY,
+        inventoryCap: validated.inventoryCap ?? null,
+        minQty: validated.minQty ?? 1,
+        maxQty: validated.maxQty ?? null,
+        qtyIncrement: validated.qtyIncrement ?? 1,
+        buyerFormConfig: parseBuyerFormConfig(validated.buyerFormConfig),
         dataVersion: 1,
         sources: {
           create: validated.sources.map((s) => ({
@@ -48,12 +71,20 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
       },
       include: {
         sources: true,
+        variantConfigs: true,
       },
     });
+
+    // Upsert variant configs if provided
+    if (validated.variantConfigs && validated.variantConfigs.length > 0) {
+      await _upsertVariantConfigs(tx, catalog.id, validated.variantConfigs);
+    }
 
     return catalog;
   });
 }
+
+// ─── Update Catalog ───────────────────────────────────────────────────────────
 
 export async function updateCatalog(shopId: string, catalogId: string, input: UpdateCatalogInput) {
   const validated = UpdateCatalogInputSchema.parse(input);
@@ -69,9 +100,7 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
   return prisma.$transaction(async (tx) => {
     if (validated.sources) {
       // Replace sources
-      await tx.catalogSource.deleteMany({
-        where: { catalogId },
-      });
+      await tx.catalogSource.deleteMany({ where: { catalogId } });
       await tx.catalogSource.createMany({
         data: validated.sources.map((s) => ({
           catalogId,
@@ -81,29 +110,128 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
       });
     }
 
+    // Build pricing fields
+    const effectivePriceMode = validated.priceMode ?? (existing.priceMode as PriceMode);
+    const discountPercent =
+      effectivePriceMode === PriceMode.PERCENT_DISCOUNT
+        ? (validated.discountPercent ?? Number(existing.discountPercent))
+        : 0;
+    const customPriceAmount =
+      effectivePriceMode === PriceMode.CUSTOM_PRICE
+        ? (validated.customPriceAmount ?? (existing.customPriceAmount ? Number(existing.customPriceAmount) : null))
+        : null;
+
     const updated = await tx.catalog.update({
       where: { id: catalogId },
       data: {
-        name: validated.name,
-        priceMode: validated.priceMode,
-        discountPercent:
-          validated.priceMode === PriceMode.PERCENT_DISCOUNT
-            ? validated.discountPercent ?? existing.discountPercent
-            : 0,
-        logoUrl: validated.logoUrl,
-        accentColor: validated.accentColor,
-        showSku: validated.showSku,
-        showInventory: validated.showInventory,
+        ...(validated.name !== undefined && { name: validated.name }),
+        priceMode: effectivePriceMode,
+        discountPercent,
+        customPriceAmount,
+        ...(validated.logoUrl !== undefined && { logoUrl: validated.logoUrl }),
+        ...(validated.accentColor !== undefined && { accentColor: validated.accentColor }),
+        ...(validated.showSku !== undefined && { showSku: validated.showSku }),
+        ...(validated.showInventory !== undefined && { showInventory: validated.showInventory }),
+        ...(validated.inventoryMode !== undefined && { inventoryMode: validated.inventoryMode }),
+        ...(validated.inventoryCap !== undefined && { inventoryCap: validated.inventoryCap }),
+        ...(validated.minQty !== undefined && { minQty: validated.minQty }),
+        ...(validated.maxQty !== undefined && { maxQty: validated.maxQty }),
+        ...(validated.qtyIncrement !== undefined && { qtyIncrement: validated.qtyIncrement }),
+        ...(validated.buyerFormConfig !== undefined && {
+          buyerFormConfig: parseBuyerFormConfig(validated.buyerFormConfig),
+        }),
         dataVersion: { increment: 1 },
       },
       include: {
         sources: true,
+        variantConfigs: true,
       },
     });
+
+    if (validated.variantConfigs && validated.variantConfigs.length > 0) {
+      await _upsertVariantConfigs(tx, catalogId, validated.variantConfigs);
+    }
 
     return updated;
   });
 }
+
+// ─── Variant Configs ──────────────────────────────────────────────────────────
+
+/**
+ * Internal helper: bulk-upserts variant configs within a transaction.
+ */
+async function _upsertVariantConfigs(
+  tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+  catalogId: string,
+  configs: CatalogVariantConfigInput[]
+) {
+  for (const vc of configs) {
+    await tx.catalogVariantConfig.upsert({
+      where: {
+        catalogId_shopifyVariantId: {
+          catalogId,
+          shopifyVariantId: vc.shopifyVariantId,
+        },
+      },
+      update: {
+        enabled: vc.enabled ?? true,
+        customPrice: vc.customPrice ?? null,
+        minQty: vc.minQty ?? null,
+        maxQty: vc.maxQty ?? null,
+        qtyIncrement: vc.qtyIncrement ?? null,
+        position: vc.position ?? 0,
+      },
+      create: {
+        catalogId,
+        shopifyVariantId: vc.shopifyVariantId,
+        enabled: vc.enabled ?? true,
+        customPrice: vc.customPrice ?? null,
+        minQty: vc.minQty ?? null,
+        maxQty: vc.maxQty ?? null,
+        qtyIncrement: vc.qtyIncrement ?? null,
+        position: vc.position ?? 0,
+      },
+    });
+  }
+}
+
+export async function getCatalogVariantConfigs(catalogId: string, shopId: string) {
+  const catalog = await prisma.catalog.findFirst({ where: { id: catalogId, shopId } });
+  if (!catalog) {
+    throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
+  }
+  return prisma.catalogVariantConfig.findMany({
+    where: { catalogId },
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+  });
+}
+
+export async function upsertCatalogVariantConfigs(
+  catalogId: string,
+  shopId: string,
+  configs: CatalogVariantConfigInput[]
+) {
+  const catalog = await prisma.catalog.findFirst({ where: { id: catalogId, shopId } });
+  if (!catalog) {
+    throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
+  }
+
+  return prisma.$transaction(async (tx) => {
+    await _upsertVariantConfigs(tx, catalogId, configs);
+    // Bump dataVersion so active buyers re-fetch updated catalog
+    await tx.catalog.update({
+      where: { id: catalogId },
+      data: { dataVersion: { increment: 1 } },
+    });
+    return tx.catalogVariantConfig.findMany({
+      where: { catalogId },
+      orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+    });
+  });
+}
+
+// ─── Publish / Unpublish / Archive / Delete ───────────────────────────────────
 
 export async function publishCatalog(shopId: string, catalogId: string) {
   const shop = await prisma.shop.findFirst({
@@ -147,15 +275,16 @@ export async function publishCatalog(shopId: string, catalogId: string) {
 
   // Check plan variant quota limits across all active products in this catalog
   const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
-  const variantCount = allowedProductGids.size > 0
-    ? await prisma.variantSnapshot.count({
-        where: {
-          shopId,
-          shopifyProductId: { in: Array.from(allowedProductGids) },
-          product: { status: 'ACTIVE' },
-        },
-      })
-    : 0;
+  const variantCount =
+    allowedProductGids.size > 0
+      ? await prisma.variantSnapshot.count({
+          where: {
+            shopId,
+            shopifyProductId: { in: Array.from(allowedProductGids) },
+            product: { status: 'ACTIVE' },
+          },
+        })
+      : 0;
 
   if (variantCount > entitlement.limits.maxVariants) {
     throw new CatalogError(
@@ -165,14 +294,35 @@ export async function publishCatalog(shopId: string, catalogId: string) {
     );
   }
 
-  return prisma.catalog.update({
-    where: { id: catalogId },
-    data: {
-      status: CatalogStatus.PUBLISHED,
-      publishedAt: new Date(),
-      dataVersion: { increment: 1 },
-    },
-    include: { sources: true },
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.catalog.update({
+      where: { id: catalogId },
+      data: {
+        status: CatalogStatus.PUBLISHED,
+        publishedAt: new Date(),
+        dataVersion: { increment: 1 },
+      },
+      include: { sources: true },
+    });
+
+    // Ensure a default OrderLink exists for this catalog (idempotent)
+    const existingDefaultLink = await tx.orderLink.findUnique({
+      where: { token: catalog.publicToken },
+    });
+
+    if (!existingDefaultLink) {
+      await tx.orderLink.create({
+        data: {
+          catalogId,
+          shopId,
+          token: catalog.publicToken,
+          label: 'Default Link',
+          active: true,
+        },
+      });
+    }
+
+    return updated;
   });
 }
 
@@ -227,6 +377,8 @@ export async function deleteCatalog(shopId: string, catalogId: string) {
   });
 }
 
+// ─── Queries ──────────────────────────────────────────────────────────────────
+
 export async function getCatalogsByShop(shopId: string) {
   const catalogs = await prisma.catalog.findMany({
     where: { shopId },
@@ -235,6 +387,7 @@ export async function getCatalogsByShop(shopId: string) {
       _count: {
         select: {
           submissions: true,
+          orderLinks: true,
         },
       },
     },
@@ -245,20 +398,22 @@ export async function getCatalogsByShop(shopId: string) {
     catalogs.map(async (cat) => {
       const allowedGids = await resolveCatalogAllowedProductGids(shopId, cat.sources);
       const productCount = allowedGids.size;
-      const variantCount = productCount > 0
-        ? await prisma.variantSnapshot.count({
-            where: {
-              shopId,
-              shopifyProductId: { in: Array.from(allowedGids) },
-              product: { status: 'ACTIVE' },
-            },
-          })
-        : 0;
+      const variantCount =
+        productCount > 0
+          ? await prisma.variantSnapshot.count({
+              where: {
+                shopId,
+                shopifyProductId: { in: Array.from(allowedGids) },
+                product: { status: 'ACTIVE' },
+              },
+            })
+          : 0;
 
       return {
         ...cat,
         productCount,
         variantCount,
+        linkCount: cat._count.orderLinks,
       };
     })
   );
@@ -269,9 +424,11 @@ export async function getCatalogById(shopId: string, catalogId: string) {
     where: { id: catalogId, shopId },
     include: {
       sources: true,
+      variantConfigs: true,
       _count: {
         select: {
           submissions: true,
+          orderLinks: true,
         },
       },
     },
@@ -283,20 +440,22 @@ export async function getCatalogById(shopId: string, catalogId: string) {
 
   const allowedGids = await resolveCatalogAllowedProductGids(shopId, catalog.sources);
   const productCount = allowedGids.size;
-  const variantCount = productCount > 0
-    ? await prisma.variantSnapshot.count({
-        where: {
-          shopId,
-          shopifyProductId: { in: Array.from(allowedGids) },
-          product: { status: 'ACTIVE' },
-        },
-      })
-    : 0;
+  const variantCount =
+    productCount > 0
+      ? await prisma.variantSnapshot.count({
+          where: {
+            shopId,
+            shopifyProductId: { in: Array.from(allowedGids) },
+            product: { status: 'ACTIVE' },
+          },
+        })
+      : 0;
 
   return {
     ...catalog,
     productCount,
     variantCount,
+    linkCount: catalog._count.orderLinks,
   };
 }
 

@@ -33,33 +33,45 @@ model Shop {
   syncRuns                SyncRun[]
   analyticsEvents         AnalyticsEvent[]
   backgroundJobs          BackgroundJob[]
+  orderLinks              OrderLink[]
+  reorderIntents          ReorderIntent[]
 
   @@index([shopDomain])
   @@index([uninstalledAt])
 }
 
 model Catalog {
-  id              String                @id @default(uuid())
-  shopId          String
-  name            String
-  publicToken     String                @unique
-  status          String                @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
-  priceMode       String                @default("SHOPIFY_PRICE") // SHOPIFY_PRICE, PERCENT_DISCOUNT
-  discountPercent Decimal?              @default(0) @db.Decimal(5, 2)
-  logoUrl         String?
-  accentColor     String?               @default("#108043")
-  showSku         Boolean               @default(true)
-  showInventory   Boolean               @default(false)
-  dataVersion     Int                   @default(1)
-  publishedAt     DateTime?
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
+  id                String                @id @default(uuid())
+  shopId            String
+  name              String
+  publicToken       String                @unique
+  status            String                @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
+  priceMode         String                @default("SHOPIFY_PRICE") // SHOPIFY_PRICE, PERCENT_DISCOUNT, CUSTOM_PRICE
+  discountPercent   Decimal?              @default(0) @db.Decimal(5, 2)
+  customPriceAmount Decimal?              @db.Decimal(12, 2) // For CUSTOM_PRICE priceMode
+  logoUrl           String?
+  accentColor       String?               @default("#108043")
+  showSku           Boolean               @default(true)
+  showInventory     Boolean               @default(false)  // Legacy field — use inventoryMode
+  inventoryMode     String                @default("STATUS_ONLY") // STATUS_ONLY, CAPPED, EXACT, HIDDEN
+  inventoryCap      Int?                  // For CAPPED mode: display "50+" when above this threshold
+  minQty            Int                   @default(1)
+  maxQty            Int?
+  qtyIncrement      Int                   @default(1)
+  buyerFormConfig   String                @default("{}") // JSON: {showPhone, requirePhone, showTaxId, requireTaxId, showPoNumber, requirePoNumber, showNote}
+  dataVersion       Int                   @default(1)
+  publishedAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
-  shop            Shop                  @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  sources         CatalogSource[]
-  submissions     OrderSubmission[]
-  itemOverrides   CatalogItemOverride[]
-  analyticsEvents AnalyticsEvent[]
+  shop              Shop                  @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sources           CatalogSource[]
+  submissions       OrderSubmission[]
+  itemOverrides     CatalogItemOverride[]
+  variantConfigs    CatalogVariantConfig[]
+  analyticsEvents   AnalyticsEvent[]
+  orderLinks        OrderLink[]
+  reorderIntents    ReorderIntent[]
 
   @@index([shopId])
   @@index([publicToken])
@@ -93,6 +105,80 @@ model CatalogItemOverride {
 
   @@index([catalogId])
   @@index([shopifyProductId])
+}
+
+/// Per-variant catalog configuration: enable/disable individual variants,
+/// custom pricing override, and quantity rule overrides.
+model CatalogVariantConfig {
+  id               String   @id @default(uuid())
+  catalogId        String
+  shopifyVariantId String
+  enabled          Boolean  @default(true)
+  customPrice      Decimal? @db.Decimal(12, 2)
+  minQty           Int?     // Overrides catalog-level minQty if set
+  maxQty           Int?     // Overrides catalog-level maxQty if set
+  qtyIncrement     Int?     // Overrides catalog-level qtyIncrement if set
+  position         Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  catalog          Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@unique([catalogId, shopifyVariantId])
+  @@index([catalogId])
+  @@index([shopifyVariantId])
+}
+
+/// Wholesale Order Link — a named, shareable URL for a catalog with optional
+/// passcode protection, expiry, source attribution, and per-link analytics.
+model OrderLink {
+  id             String    @id @default(uuid())
+  catalogId      String
+  shopId         String
+  token          String    @unique  // 64-char hex, maps from Catalog.publicToken for default link
+  label          String    @default("Default Link")
+  active         Boolean   @default(true)
+  passcodeHash   String?   // scrypt hash of passcode, never plaintext
+  expiresAt      DateTime?
+  source         String?   // merchant label: "Instagram", "Trade Show", etc.
+  views          Int       @default(0)
+  submissions    Int       @default(0)
+  submittedValue Decimal   @default(0) @db.Decimal(14, 2)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  catalog        Catalog   @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  shop           Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([shopId])
+}
+
+/// Buyer Reorder Intent — lets a merchant send a reorder link prefilled with
+/// the buyer's previous order quantities.
+model ReorderIntent {
+  id                  String    @id @default(uuid())
+  catalogId           String
+  shopId              String
+  originSubmissionId  String?   // Source OrderSubmission.id
+  token               String    @unique  // 64-char hex
+  prefillJson         String    // JSON array: [{variantId, quantity}]
+  expiresAt           DateTime? // Default: 30 days from creation
+  claimedAt           DateTime? // Timestamp when an in-flight order claimed this intent
+  claimId             String?   // Unique correlation/claim ID (e.g. requestId or submission idempotencyKey)
+  claimExpiresAt          DateTime? // TTL for the claim (e.g. 2 minutes)
+  reconciliationPendingAt DateTime? // Set when execution is ambiguous to prevent TTL reclaim
+  usedAt                  DateTime? // Set when buyer submits using this intent
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  catalog                 Catalog   @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  shop                    Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([shopId])
+  @@index([claimId])
+  @@index([reconciliationPendingAt])
 }
 
 model CollectionSnapshot {
@@ -190,6 +276,11 @@ model OrderSubmission {
   subtotalAmount      Decimal   @default(0) @db.Decimal(12, 2)
   currency            String    @default("USD")
   lastError           String?
+  orderLinkId         String?   // FK to OrderLink (nullable for legacy submissions)
+  buyerName           String?
+  buyerPhone          String?
+  taxId               String?
+  reorderIntentId     String?   // If submitted via a ReorderIntent
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @default(now()) @updatedAt
 
@@ -203,6 +294,7 @@ model OrderSubmission {
   @@index([status])
   @@index([shopId, status])
   @@index([shopId, createdAt])
+  @@index([orderLinkId])
 }
 
 model SyncRun {

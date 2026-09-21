@@ -337,7 +337,7 @@ describe('Part A & Part B Hardening Regression Suite', () => {
       const payload = await getPublicCatalogPayload(published.publicToken);
       expect(payload).not.toBeNull();
 
-      const variants = payload!.products[0].variants;
+      const variants = payload!.products[0]!.variants;
 
       // 1. Tracked variant with DENY policy (showInventory = true exposes effectiveAvailable)
       const v1 = variants.find((v) => v.shopifyVariantId === trackedVariant);
@@ -368,7 +368,7 @@ describe('Part A & Part B Hardening Regression Suite', () => {
       });
       const hiddenPublished = await publishCatalog(shopA.id, hiddenCat.id);
       const hiddenPayload = await getPublicCatalogPayload(hiddenPublished.publicToken);
-      const hiddenV1 = hiddenPayload!.products[0].variants.find((v) => v.shopifyVariantId === trackedVariant);
+      const hiddenV1 = hiddenPayload!.products[0]!.variants.find((v) => v.shopifyVariantId === trackedVariant);
       expect(hiddenV1?.effectiveAvailable).toBeUndefined();
       expect(hiddenV1?.inventoryQuantity).toBeUndefined();
       expect(hiddenV1?.availableForSale).toBe(true);

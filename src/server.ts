@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { prisma } from './db.js';
 import {
   getPublicCatalogPayload,
+  getPublicCatalogPayloadByLinkToken,
   syncProductSnapshot,
   deleteProductSnapshot,
   syncSingleCollectionFromShopify,
@@ -42,8 +43,31 @@ import {
   getCatalogsByShop,
   getCatalogById,
   getPublishedCatalogByToken,
+  getCatalogVariantConfigs,
+  upsertCatalogVariantConfigs,
   CatalogError,
 } from './services/catalog.server.js';
+import {
+  createOrderLink,
+  getOrderLinksForCatalog,
+  getOrderLinkById,
+  updateOrderLink,
+  deleteOrderLink,
+  recordOrderLinkView,
+  validateOrderLinkAccess,
+  generateQrCodeDataUrl,
+  getOrderLinkByToken,
+  generateOrderLinkAccessToken,
+  verifyPasscode,
+  isOrderLinkExpired,
+} from './services/orderlink.server.js';
+import {
+  createReorderIntent,
+  getReorderIntentPayload,
+} from './services/reorder.server.js';
+import {
+  parseCsvBulkOrder,
+} from './services/bulkorder.server.js';
 import {
   recordAnalyticsEvent,
   ANALYTICS_EVENTS,
@@ -408,6 +432,337 @@ app.post('/api/public/catalog/:publicToken/submit', publicSubmitLimiter, async (
       message: sanitizeErrorMessage(error),
       requestId,
     });
+  }
+});
+
+// 4. Order Link Buyer Portal API
+
+// 4a. Unlock Passcode-Protected Order Link (POST body only, returns scoped access credential)
+app.post('/api/public/link/:linkToken/unlock', publicValidateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { linkToken } = req.params;
+    const { passcode } = req.body || {};
+
+    if (!passcode || typeof passcode !== 'string' || !passcode.trim()) {
+      return res.status(400).json({ error: 'Passcode is required', code: 'PASSCODE_REQUIRED' });
+    }
+
+    const link = await getOrderLinkByToken(linkToken);
+    if (!link) {
+      return res.status(404).json({ error: 'Order link not found or unavailable', code: 'NOT_FOUND' });
+    }
+
+    if (!link.active) {
+      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE' });
+    }
+
+    if (isOrderLinkExpired(link)) {
+      return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED' });
+    }
+
+    if (!link.passcodeHash) {
+      const linkAccessToken = generateOrderLinkAccessToken(link);
+      return res.status(200).json({ success: true, linkAccessToken });
+    }
+
+    const isValid = verifyPasscode(passcode.trim(), link.passcodeHash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid passcode', code: 'PASSCODE_INVALID' });
+    }
+
+    const linkAccessToken = generateOrderLinkAccessToken(link);
+    return res.status(200).json({ success: true, linkAccessToken });
+  } catch (error: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+  }
+});
+
+// 4b. Fetch Catalog by Order Link Token
+app.get('/api/public/link/:linkToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
+  try {
+    const { linkToken } = req.params;
+    // Passcodes in query string or URL are strictly ignored / rejected.
+    // Scoped access credential is accepted via X-Link-Access-Token header or cookie.
+    const linkAccessToken = (
+      req.get('X-Link-Access-Token') ||
+      req.get('x-link-access-token') ||
+      (req.cookies?.linkAccessToken as string) ||
+      undefined
+    )?.trim();
+
+    const link = await getOrderLinkByToken(linkToken);
+    if (!link) {
+      return res.status(404).json({ error: 'Order link not found or unavailable' });
+    }
+
+    if (!link.active) {
+      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE' });
+    }
+
+    if (isOrderLinkExpired(link)) {
+      return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED' });
+    }
+
+    const access = validateOrderLinkAccess(link, linkAccessToken);
+    if (!access.ok) {
+      if (
+        access.reason === 'PASSCODE_REQUIRED' ||
+        access.reason === 'INVALID_ACCESS_TOKEN' ||
+        access.reason === 'ACCESS_TOKEN_EXPIRED' ||
+        access.reason === 'ACCESS_TOKEN_SCOPE_MISMATCH'
+      ) {
+        return res.status(200).json({
+          requiresPasscode: true,
+          orderLink: {
+            id: link.id,
+            token: link.token,
+            label: link.label,
+            requiresPasscode: true,
+          },
+          catalog: {
+            name: link.catalog.name,
+          },
+        });
+      }
+      if (access.reason === 'LINK_EXPIRED') {
+        return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED' });
+      }
+      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE' });
+    }
+
+    const payload = await getPublicCatalogPayloadByLinkToken(linkToken);
+    if (!payload) {
+      return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable' });
+    }
+
+    // Session-based view deduplication (privacy-safe anonymous session window)
+    const sessionIdentifier = (
+      req.get('X-Session-ID') ||
+      req.cookies?.cf_b2b_session ||
+      (req.ip ? crypto.createHash('sha256').update(req.ip + (req.get('user-agent') || '')).digest('hex').slice(0, 32) : undefined)
+    );
+    void recordOrderLinkView(link.id, sessionIdentifier);
+    if (payload.shop && payload.shop.id) {
+      void recordAnalyticsEvent(payload.shop.id, ANALYTICS_EVENTS.CATALOG_VIEWED, payload.catalog.id);
+    }
+
+    return res.status(200).json(payload);
+  } catch (error: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+  }
+});
+
+// 4c. Validate Buyer Lines for Order Link
+app.post('/api/public/link/:linkToken/validate', publicValidateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { linkToken } = req.params;
+    const linkAccessToken = (
+      req.get('X-Link-Access-Token') ||
+      req.get('x-link-access-token') ||
+      (req.body?.linkAccessToken as string) ||
+      undefined
+    )?.trim();
+
+    const link = await getOrderLinkByToken(linkToken);
+    if (!link) {
+      return res.status(404).json({ error: 'Order link not found' });
+    }
+
+    const access = validateOrderLinkAccess(link, linkAccessToken);
+    if (!access.ok) {
+      return res.status(401).json({ error: 'Access denied to order link', reason: access.reason });
+    }
+
+    const result = await validateBuyerOrderLines(link.catalog.publicToken, req.body);
+    return res.status(200).json(result);
+  } catch (error: any) {
+    return res.status(400).json({ error: sanitizeErrorMessage(error) });
+  }
+});
+
+// 4d. Submit Buyer Order via Order Link
+app.post('/api/public/link/:linkToken/submit', publicSubmitLimiter, async (req: Request, res: Response) => {
+  const requestId = (req.get('X-Request-ID') || req.get('x-request-id') || crypto.randomUUID()).trim();
+  res.setHeader('X-Request-ID', requestId);
+
+  try {
+    const { linkToken } = req.params;
+    const idempotencyKey = (req.get('Idempotency-Key') || req.get('idempotency-key') || '').trim();
+
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        error: 'Missing required Idempotency-Key header',
+        code: 'VALIDATION_FAILED',
+        message: 'Missing required Idempotency-Key header',
+        requestId,
+      });
+    }
+
+    const link = await getOrderLinkByToken(linkToken);
+    if (!link) {
+      return res.status(404).json({
+        error: 'Order link not found',
+        code: 'NOT_FOUND',
+        message: 'Order link not found',
+        requestId,
+      });
+    }
+
+    const linkAccessToken = (
+      req.get('X-Link-Access-Token') ||
+      req.get('x-link-access-token') ||
+      (req.body?.linkAccessToken as string) ||
+      undefined
+    )?.trim();
+
+    const access = validateOrderLinkAccess(link, linkAccessToken);
+    if (!access.ok) {
+      return res.status(401).json({
+        error: 'Order link access denied',
+        code: access.reason || 'UNAUTHORIZED',
+        message: 'Order link access denied',
+        requestId,
+      });
+    }
+
+    const bodyWithLink = {
+      ...req.body,
+      orderLinkToken: linkToken,
+    };
+
+    const result = await submitBuyerOrder(link.catalog.publicToken, idempotencyKey, bodyWithLink, undefined, requestId);
+    return res.status(201).json({ ...result, requestId });
+  } catch (error: any) {
+    if (error?.name === 'ZodError' || error instanceof z.ZodError) {
+      const issueMsg = error.issues?.map((i: any) => i.message).join(', ') || 'Validation error';
+      return res.status(400).json({
+        error: issueMsg,
+        code: 'VALIDATION_FAILED',
+        message: issueMsg,
+        details: error.issues,
+        requestId,
+      });
+    }
+
+    if (error instanceof InventoryChangedError) {
+      return res.status(409).json({
+        error: {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+        },
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        requestId,
+      });
+    }
+
+    if (error instanceof CatalogDataChangedError) {
+      return res.status(409).json({
+        error: {
+          code: error.code,
+          message: error.message,
+          details: error.changedLines,
+        },
+        code: error.code,
+        message: error.message,
+        changedLines: error.changedLines,
+        details: error.changedLines,
+        requestId,
+      });
+    }
+
+    if (error instanceof OrderSubmissionError) {
+      const statusCode = error.code === 'QUOTA_EXCEEDED' ? 403 : error.statusCode || 400;
+      return res.status(statusCode).json({
+        error: {
+          code: error.code || 'VALIDATION_FAILED',
+          message: error.message,
+          details: error.details,
+        },
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        requestId,
+      });
+    }
+
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: sanitizeErrorMessage(error),
+      },
+      code: 'INTERNAL_ERROR',
+      message: sanitizeErrorMessage(error),
+      requestId,
+    });
+  }
+});
+
+// 5. Reorder Intent API
+app.get('/api/public/reorder/:intentToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
+  try {
+    const { intentToken } = req.params;
+    const payload = await getReorderIntentPayload(intentToken);
+    return res.status(200).json(payload);
+  } catch (error: any) {
+    const statusCode = error.statusCode || 400;
+    return res.status(statusCode).json({ error: error.message || 'Reorder lookup failed', code: error.code });
+  }
+});
+
+// 6. CSV Bulk Order Validation API
+app.post('/api/public/catalog/:publicToken/bulk-validate', publicValidateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { publicToken } = req.params;
+    const { csvText } = req.body;
+
+    if (!csvText || typeof csvText !== 'string') {
+      return res.status(400).json({ error: 'Missing csvText in request body' });
+    }
+
+    const catalog = await getPublishedCatalogByToken(publicToken);
+    if (!catalog) {
+      return res.status(404).json({ error: 'Catalog not found or unavailable' });
+    }
+
+    const result = await parseCsvBulkOrder(catalog.shopId, catalog.id, csvText);
+    return res.status(200).json(result);
+  } catch (error: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+  }
+});
+
+app.post('/api/public/link/:linkToken/bulk-validate', publicValidateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { linkToken } = req.params;
+    const { csvText } = req.body;
+    const linkAccessToken = (
+      req.get('X-Link-Access-Token') ||
+      req.get('x-link-access-token') ||
+      (req.body?.linkAccessToken as string) ||
+      undefined
+    )?.trim();
+
+    if (!csvText || typeof csvText !== 'string') {
+      return res.status(400).json({ error: 'Missing csvText in request body' });
+    }
+
+    const link = await getOrderLinkByToken(linkToken);
+    if (!link) {
+      return res.status(404).json({ error: 'Order link not found' });
+    }
+
+    const access = validateOrderLinkAccess(link, linkAccessToken);
+    if (!access.ok) {
+      return res.status(401).json({ error: 'Access denied to order link', reason: access.reason });
+    }
+
+    const result = await parseCsvBulkOrder(link.shopId, link.catalogId, csvText);
+    return res.status(200).json(result);
+  } catch (error: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(error) });
   }
 });
 
@@ -1112,6 +1467,99 @@ app.post('/api/admin/submissions/:id/reconcile', adminAuthMiddleware, async (req
   }
 });
 
+// Create Reorder Link from Submission
+app.post('/api/admin/submissions/:id/reorder-link', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const { expiresInDays } = req.body || {};
+    const intent = await createReorderIntent(req.params.id, req.shop.id, expiresInDays);
+    const host = req.get('host') || 'localhost:8080';
+    const protocol = req.protocol || 'https';
+    const reorderUrl = `${protocol}://${host}/reorder/${intent.token}`;
+    return res.status(201).json({ ...intent, reorderUrl });
+  } catch (err: any) {
+    const statusCode = err.statusCode || 400;
+    return res.status(statusCode).json({ error: err.message, code: err.code });
+  }
+});
+
+// Variant Configs (M10)
+app.get('/api/admin/catalogs/:id/variant-configs', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const configs = await getCatalogVariantConfigs(req.params.id, req.shop.id);
+    return res.status(200).json({ configs });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.put('/api/admin/catalogs/:id/variant-configs', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const configs = await upsertCatalogVariantConfigs(req.params.id, req.shop.id, req.body?.configs || []);
+    return res.status(200).json({ configs });
+  } catch (err: any) {
+    return res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Order Links CRUD & QR (M10)
+app.get('/api/admin/catalogs/:id/links', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const links = await getOrderLinksForCatalog(req.params.id, req.shop.id);
+    return res.status(200).json({ links });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.post('/api/admin/catalogs/:id/links', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const link = await createOrderLink(req.params.id, req.shop.id, req.body);
+    return res.status(201).json({ link });
+  } catch (err: any) {
+    return res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.get('/api/admin/catalogs/:id/links/:linkId', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const link = await getOrderLinkById(req.params.linkId, req.shop.id);
+    return res.status(200).json({ link });
+  } catch (err: any) {
+    return res.status(404).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.put('/api/admin/catalogs/:id/links/:linkId', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const link = await updateOrderLink(req.params.linkId, req.shop.id, req.body);
+    return res.status(200).json({ link });
+  } catch (err: any) {
+    return res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.delete('/api/admin/catalogs/:id/links/:linkId', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    await deleteOrderLink(req.params.linkId, req.shop.id);
+    return res.status(200).json({ success: true });
+  } catch (err: any) {
+    return res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.get('/api/admin/catalogs/:id/links/:linkId/qr', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const link = await getOrderLinkById(req.params.linkId, req.shop.id);
+    const host = req.get('host') || 'localhost:8080';
+    const protocol = req.protocol || 'https';
+    const buyerUrl = `${protocol}://${host}/l/${link.token}`;
+    const qrDataUrl = await generateQrCodeDataUrl(buyerUrl);
+    return res.status(200).json({ qrDataUrl, buyerUrl });
+  } catch (err: any) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
 // Billing & Quotas (M8)
 app.get('/api/admin/billing', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
@@ -1369,10 +1817,10 @@ if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
   }
 }
 
-// Serve Buyer portal SPA for /c/:publicToken (MUST NOT include or initialize Shopify App Bridge)
-app.get('/c/:publicToken', (req: Request, res: Response) => {
-  const { publicToken } = req.params;
-  if (!isValidPublicToken(publicToken)) {
+// Serve Buyer portal SPA for /c/:publicToken, /l/:linkToken, /reorder/:intentToken (MUST NOT include or initialize Shopify App Bridge)
+app.get(['/c/:publicToken', '/l/:linkToken', '/reorder/:intentToken'], (req: Request, res: Response) => {
+  const { publicToken, linkToken, intentToken } = req.params;
+  if (publicToken && !isValidPublicToken(publicToken)) {
     return res.status(400).send('Invalid catalog URL format');
   }
 

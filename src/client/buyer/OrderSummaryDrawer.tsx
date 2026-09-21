@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ProductItem } from './VariantMatrix.js';
+import { BuyerFormConfig } from '../../types/index.js';
 
 interface OrderSummaryDrawerProps {
   isOpen: boolean;
@@ -9,9 +10,13 @@ interface OrderSummaryDrawerProps {
   subtotal: number;
   totalItems: number;
   currency?: string;
+  buyerFormConfig?: BuyerFormConfig;
   onSubmit: (buyerInfo: {
     businessName: string;
+    buyerName?: string;
     email: string;
+    phone?: string;
+    taxId?: string;
     poNumber?: string;
     note?: string;
   }) => Promise<void>;
@@ -35,12 +40,16 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
   subtotal,
   totalItems,
   currency = 'USD',
+  buyerFormConfig = {},
   onSubmit,
   isSubmitting,
   errorMessage,
 }) => {
   const [businessName, setBusinessName] = useState('');
+  const [buyerName, setBuyerName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [taxId, setTaxId] = useState('');
   const [poNumber, setPoNumber] = useState('');
   const [note, setNote] = useState('');
   const [clientError, setClientError] = useState<string | null>(null);
@@ -87,6 +96,21 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
       return;
     }
 
+    if (buyerFormConfig.requirePhone && !phone.trim()) {
+      setClientError('Phone number is required by supplier.');
+      return;
+    }
+
+    if (buyerFormConfig.requireTaxId && !taxId.trim()) {
+      setClientError('Tax ID / VAT registration number is required.');
+      return;
+    }
+
+    if (buyerFormConfig.requirePoNumber && !poNumber.trim()) {
+      setClientError('Purchase Order (PO) number is required.');
+      return;
+    }
+
     // Client-side availability and quantity validation
     for (const product of products) {
       for (const variant of product.variants) {
@@ -104,17 +128,37 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             setClientError(`"${product.title} / ${variant.title}" is currently out of stock.`);
             return;
           }
+          if (variant.minQty && qty < variant.minQty) {
+            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} is below minimum of ${variant.minQty}.`);
+            return;
+          }
+          if (variant.maxQty && qty > variant.maxQty) {
+            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} exceeds maximum of ${variant.maxQty}.`);
+            return;
+          }
+          if (variant.qtyIncrement && variant.qtyIncrement > 1 && qty % variant.qtyIncrement !== 0) {
+            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} must be a multiple of ${variant.qtyIncrement}.`);
+            return;
+          }
         }
       }
     }
 
     await onSubmit({
       businessName: businessName.trim(),
+      buyerName: buyerName.trim() || undefined,
       email: email.trim(),
+      phone: phone.trim() || undefined,
+      taxId: taxId.trim() || undefined,
       poNumber: poNumber.trim() || undefined,
       note: note.trim() || undefined,
     });
   };
+
+  const showPhoneField = buyerFormConfig.showPhone !== false;
+  const showTaxIdField = buyerFormConfig.showTaxId !== false;
+  const showPoField = buyerFormConfig.showPoNumber !== false;
+  const showNoteField = buyerFormConfig.showNote !== false;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -162,6 +206,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
           <div className="drawer-divider" />
 
           <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.75rem' }}>Buyer Details</h3>
+          
           <div className="form-group">
             <label className="form-label" htmlFor="businessName">
               Business / Company Name *
@@ -174,6 +219,20 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
               placeholder="e.g. Acme Supplies Ltd."
               value={businessName}
               onChange={(e) => setBusinessName(e.target.value)}
+            />
+          </div>
+
+          <div className="form-group">
+            <label className="form-label" htmlFor="buyerContactName">
+              Contact Name (Optional)
+            </label>
+            <input
+              id="buyerContactName"
+              className="form-input"
+              type="text"
+              placeholder="e.g. Jane Doe"
+              value={buyerName}
+              onChange={(e) => setBuyerName(e.target.value)}
             />
           </div>
 
@@ -192,33 +251,72 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             />
           </div>
 
-          <div className="form-group">
-            <label className="form-label" htmlFor="poNumber">
-              Purchase Order (PO) Number (Optional)
-            </label>
-            <input
-              id="poNumber"
-              className="form-input"
-              type="text"
-              placeholder="e.g. PO-2026-883"
-              value={poNumber}
-              onChange={(e) => setPoNumber(e.target.value)}
-            />
-          </div>
+          {showPhoneField && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="buyerPhone">
+                Phone Number {buyerFormConfig.requirePhone ? '*' : '(Optional)'}
+              </label>
+              <input
+                id="buyerPhone"
+                className="form-input"
+                type="tel"
+                required={buyerFormConfig.requirePhone}
+                placeholder="+1 (555) 000-0000"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            </div>
+          )}
 
-          <div className="form-group">
-            <label className="form-label" htmlFor="orderNotes">
-              Special Instructions / Notes (Optional)
-            </label>
-            <textarea
-              id="orderNotes"
-              className="form-input"
-              rows={3}
-              placeholder="Add shipping requirements, dock hours, or references..."
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
+          {showTaxIdField && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="taxId">
+                Tax ID / VAT Registration {buyerFormConfig.requireTaxId ? '*' : '(Optional)'}
+              </label>
+              <input
+                id="taxId"
+                className="form-input"
+                type="text"
+                required={buyerFormConfig.requireTaxId}
+                placeholder="e.g. US-123456789 or GB999999973"
+                value={taxId}
+                onChange={(e) => setTaxId(e.target.value)}
+              />
+            </div>
+          )}
+
+          {showPoField && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="poNumber">
+                Purchase Order (PO) Number {buyerFormConfig.requirePoNumber ? '*' : '(Optional)'}
+              </label>
+              <input
+                id="poNumber"
+                className="form-input"
+                type="text"
+                required={buyerFormConfig.requirePoNumber}
+                placeholder="e.g. PO-2026-883"
+                value={poNumber}
+                onChange={(e) => setPoNumber(e.target.value)}
+              />
+            </div>
+          )}
+
+          {showNoteField && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="orderNotes">
+                Special Instructions / Notes (Optional)
+              </label>
+              <textarea
+                id="orderNotes"
+                className="form-input"
+                rows={3}
+                placeholder="Add shipping requirements, dock hours, or references..."
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+            </div>
+          )}
 
           {(clientError || errorMessage) && (
             <div
