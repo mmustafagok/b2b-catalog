@@ -122,8 +122,8 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit}>
-          <div className="cf-modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+          <div className="cf-modal-body" style={{ maxHeight: '72vh', overflowY: 'auto', overflowX: 'hidden' }}>
             {error && <div className="cf-alert cf-alert-danger" style={{ marginBottom: '1rem' }}>{error}</div>}
 
             {/* General */}
@@ -209,7 +209,8 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
                     step="0.01"
                     min="0"
                     placeholder="e.g. 25.00"
-                    className="cf-input cf-input-sm"
+                    className="cf-input"
+                    style={{ maxWidth: '140px' }}
                     value={customPriceAmount}
                     onChange={(e) => setCustomPriceAmount(e.target.value)}
                   />
@@ -219,8 +220,9 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
 
             {/* Inventory Privacy & Display */}
             <div className="cf-form-group">
-              <label className="cf-label">Inventory Display Mode</label>
+              <label className="cf-label" htmlFor="edit-inv-mode">Inventory Display Mode</label>
               <select
+                id="edit-inv-mode"
                 className="cf-select"
                 value={inventoryMode}
                 onChange={(e) => setInventoryMode(e.target.value as any)}
@@ -233,7 +235,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
 
               {inventoryMode === 'CAPPED' && (
                 <div style={{ marginTop: '0.5rem' }}>
-                  <label className="cf-label" htmlFor="edit-cap">Threshold Cap</label>
+                  <label className="cf-label" htmlFor="edit-cap" style={{ fontSize: '0.8rem' }}>Threshold Cap</label>
                   <input
                     id="edit-cap"
                     type="number"
@@ -249,7 +251,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
             {/* Quantity Rules */}
             <div className="cf-form-group">
               <label className="cf-label">Default Quantity Rules</label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.75rem' }}>
                 <div>
                   <label style={{ fontSize: '0.8rem', color: '#64748b' }}>Min Quantity</label>
                   <input
@@ -287,7 +289,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
             {/* Buyer Form Fields */}
             <div className="cf-form-group">
               <label className="cf-label">Buyer Checkout Form Fields</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: '#f8fafc', padding: '0.75rem', borderRadius: '6px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: '#f8fafc', padding: '0.75rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
                   <input type="checkbox" checked={showPhone} onChange={(e) => setShowPhone(e.target.checked)} />
                   Show Phone Number Field

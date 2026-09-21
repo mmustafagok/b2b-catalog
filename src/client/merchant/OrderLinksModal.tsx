@@ -39,7 +39,7 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
   const [source, setSource] = useState('');
 
   // QR Code preview modal
-  const [qrModalData, setQrModalData] = useState<{ qrDataUrl: string; buyerUrl: string; label: string } | null>(null);
+  const [qrModalData, setQrModalData] = useState<{ qrDataUrl: string; buyerUrl: string; label: string; hasPasscode: boolean } | null>(null);
 
   const fetchLinks = async () => {
     try {
@@ -110,10 +110,20 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
     }
   };
 
+  const getBuyerUrl = (token: string) => {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    return `${origin}/l/${token}`;
+  };
+
   const handleCopyLink = (token: string) => {
-    const url = `${window.location.origin}/l/${token}`;
+    const url = getBuyerUrl(token);
     navigator.clipboard.writeText(url);
     onToast('Order link copied to clipboard!');
+  };
+
+  const handleOpenLink = (token: string) => {
+    const url = getBuyerUrl(token);
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   const handleShowQr = async (link: OrderLink) => {
@@ -121,7 +131,12 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
       const res = await authenticatedFetch(`/api/admin/catalogs/${catalog.id}/links/${link.id}/qr`);
       if (res.ok) {
         const data = await res.json();
-        setQrModalData({ qrDataUrl: data.qrDataUrl, buyerUrl: data.buyerUrl, label: link.label });
+        setQrModalData({
+          qrDataUrl: data.qrDataUrl,
+          buyerUrl: data.buyerUrl || getBuyerUrl(link.token),
+          label: link.label,
+          hasPasscode: !!link.passcodeHash,
+        });
       }
     } catch (err: any) {
       onToast(`Error fetching QR code: ${err.message}`);
@@ -130,12 +145,12 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
 
   return (
     <div className="cf-modal-backdrop" onClick={onClose}>
-      <div className="cf-modal cf-modal-lg" onClick={(e) => e.stopPropagation()}>
+      <div className="cf-modal cf-modal-xl" onClick={(e) => e.stopPropagation()}>
         <div className="cf-modal-header">
           <div>
             <h3>Wholesale Order Links: {catalog.name}</h3>
             <p style={{ fontSize: '0.825rem', color: '#64748b' }}>
-              Create targeted links with optional passcodes, expiration dates, and conversion tracking.
+              Create targeted buyer URLs with optional passcodes, expiration dates, and conversion tracking.
             </p>
           </div>
           <button type="button" className="cf-modal-close" onClick={onClose}>
@@ -143,7 +158,7 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
           </button>
         </div>
 
-        <div className="cf-modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+        <div className="cf-modal-body" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
             <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Active Links ({links.length})</span>
             <button
@@ -157,8 +172,8 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
 
           {/* Create Link Form */}
           {showCreateForm && (
-            <form onSubmit={handleCreateLink} style={{ background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1.25rem' }}>
-              <h4 style={{ fontSize: '0.9rem', marginBottom: '0.75rem', fontWeight: 600 }}>Create New Order Link</h4>
+            <form onSubmit={handleCreateLink} style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1.25rem' }}>
+              <h4 style={{ fontSize: '0.925rem', marginBottom: '0.75rem', fontWeight: 600 }}>Create New Order Link</h4>
               
               <div className="cf-form-group">
                 <label className="cf-label" htmlFor="link-label">Link Label / Buyer Tag *</label>
@@ -173,7 +188,7 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                 />
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
                 <div className="cf-form-group">
                   <label className="cf-label" htmlFor="link-passcode">Access Passcode (Optional)</label>
                   <input
@@ -223,31 +238,38 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
 
           {/* Links List Table */}
           {loading ? (
-            <p style={{ textAlign: 'center', padding: '1rem', color: '#64748b' }}>Loading links...</p>
+            <p style={{ textAlign: 'center', padding: '1.5rem', color: '#64748b' }}>Loading links...</p>
           ) : links.length === 0 ? (
-            <p style={{ textAlign: 'center', padding: '1.5rem', color: '#64748b' }}>No custom links created yet.</p>
+            <p style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>No custom links created yet. Click "+ New Order Link" to create one.</p>
           ) : (
             <div className="cf-table-container">
               <table className="cf-table" style={{ fontSize: '0.85rem' }}>
                 <thead>
                   <tr>
                     <th>Label / Source</th>
+                    <th>Buyer URL</th>
                     <th>Security</th>
                     <th>Views</th>
                     <th>Orders</th>
                     <th>GMV</th>
                     <th>Status</th>
-                    <th>Actions</th>
+                    <th style={{ minWidth: '240px' }}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {links.map((link) => {
                     const isExpired = link.expiresAt && new Date(link.expiresAt) < new Date();
+                    const buyerUrl = getBuyerUrl(link.token);
                     return (
                       <tr key={link.id}>
                         <td>
                           <strong>{link.label}</strong>
                           {link.source && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>Source: {link.source}</div>}
+                        </td>
+                        <td>
+                          <code style={{ fontSize: '0.75rem', background: '#f1f5f9', padding: '0.2rem 0.4rem', borderRadius: '4px' }}>
+                            /l/{link.token.slice(0, 10)}...
+                          </code>
                         </td>
                         <td>
                           {link.passcodeHash ? (
@@ -270,20 +292,28 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                           </span>
                         </td>
                         <td>
-                          <div style={{ display: 'flex', gap: '0.3rem' }}>
+                          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                             <button
                               type="button"
                               className="cf-btn cf-btn-sm cf-btn-secondary"
                               onClick={() => handleCopyLink(link.token)}
-                              title="Copy buyer link"
+                              title="Copy buyer link to clipboard"
                             >
-                              📋
+                              📋 Copy Link
+                            </button>
+                            <button
+                              type="button"
+                              className="cf-btn cf-btn-sm cf-btn-secondary"
+                              onClick={() => handleOpenLink(link.token)}
+                              title="Open buyer portal in new tab"
+                            >
+                              🔗 Open
                             </button>
                             <button
                               type="button"
                               className="cf-btn cf-btn-sm cf-btn-secondary"
                               onClick={() => handleShowQr(link)}
-                              title="Show QR code"
+                              title="Show and download QR code"
                             >
                               📱 QR
                             </button>
@@ -291,8 +321,9 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                               type="button"
                               className="cf-btn cf-btn-sm cf-btn-outline"
                               onClick={() => handleToggleActive(link)}
+                              title={link.active ? 'Deactivate link' : 'Activate link'}
                             >
-                              {link.active ? 'Disable' : 'Enable'}
+                              {link.active ? 'Deactivate' : 'Activate'}
                             </button>
                           </div>
                         </td>
@@ -315,13 +346,38 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
       {/* QR Code Popup */}
       {qrModalData && (
         <div className="cf-modal-backdrop" style={{ zIndex: 1100 }} onClick={() => setQrModalData(null)}>
-          <div className="cf-modal" style={{ maxWidth: '380px', textAlign: 'center', padding: '1.5rem' }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>{qrModalData.label}</h3>
+          <div className="cf-modal" style={{ maxWidth: '420px', textAlign: 'center', padding: '1.5rem' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 style={{ fontSize: '1.15rem', margin: 0 }}>QR Code: {qrModalData.label}</h3>
+              <button type="button" className="cf-modal-close" onClick={() => setQrModalData(null)}>
+                ✕
+              </button>
+            </div>
             <p style={{ fontSize: '0.825rem', color: '#64748b', marginBottom: '1rem' }}>
-              Scan with camera to open wholesale catalog
+              Scan with camera or mobile device to open wholesale catalog
             </p>
-            <img src={qrModalData.qrDataUrl} alt="QR Code" style={{ width: '220px', height: '220px', margin: '0 auto', display: 'block', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
+            <div style={{ background: '#fff', padding: '1rem', borderRadius: '10px', display: 'inline-block', border: '1px solid #e2e8f0', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+              <img src={qrModalData.qrDataUrl} alt="Order Link QR Code" style={{ width: '220px', height: '220px', display: 'block' }} />
+            </div>
+            <div style={{ marginTop: '1rem', background: '#f8fafc', padding: '0.6rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', wordBreak: 'break-all', color: '#334155' }}>
+              <strong>URL:</strong> {qrModalData.buyerUrl}
+            </div>
+            {qrModalData.hasPasscode && (
+              <p style={{ fontSize: '0.75rem', color: '#b45309', marginTop: '0.5rem' }}>
+                🔒 Passcode protected — buyers will be prompted for passcode upon opening.
+              </p>
+            )}
             <div style={{ marginTop: '1.25rem', display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
+              <button
+                type="button"
+                className="cf-btn cf-btn-secondary cf-btn-sm"
+                onClick={() => {
+                  navigator.clipboard.writeText(qrModalData.buyerUrl);
+                  onToast('URL copied to clipboard!');
+                }}
+              >
+                📋 Copy URL
+              </button>
               <a
                 href={qrModalData.qrDataUrl}
                 download={`qr-${qrModalData.label.toLowerCase().replace(/\s+/g, '-')}.png`}

@@ -181,11 +181,22 @@ export const MerchantAppShell: React.FC = () => {
   const [searchLoading, setSearchLoading] = useState<boolean>(false);
   const [selectedSources, setSelectedSources] = useState<Array<{ type: 'COLLECTION' | 'PRODUCT'; id: string; title: string }>>([]);
 
-  // Step 2 — pricing
-  const [newPriceMode, setNewPriceMode] = useState<'SHOPIFY_PRICE' | 'PERCENT_DISCOUNT'>('SHOPIFY_PRICE');
+  // Step 2 & 3 — configuration state (parity with Edit Catalog)
+  const [newPriceMode, setNewPriceMode] = useState<'SHOPIFY_PRICE' | 'PERCENT_DISCOUNT' | 'CUSTOM_PRICE'>('SHOPIFY_PRICE');
   const [newDiscount, setNewDiscount] = useState<number>(10);
-
-  // Step 3 — details
+  const [newCustomPriceAmount, setNewCustomPriceAmount] = useState<string>('');
+  const [newInventoryMode, setNewInventoryMode] = useState<'STATUS_ONLY' | 'CAPPED' | 'EXACT' | 'HIDDEN'>('STATUS_ONLY');
+  const [newInventoryCap, setNewInventoryCap] = useState<string>('50');
+  const [newMinQty, setNewMinQty] = useState<number>(1);
+  const [newMaxQty, setNewMaxQty] = useState<string>('');
+  const [newQtyIncrement, setNewQtyIncrement] = useState<number>(1);
+  const [newShowPhone, setNewShowPhone] = useState<boolean>(false);
+  const [newRequirePhone, setNewRequirePhone] = useState<boolean>(false);
+  const [newShowTaxId, setNewShowTaxId] = useState<boolean>(false);
+  const [newRequireTaxId, setNewRequireTaxId] = useState<boolean>(false);
+  const [newShowPoNumber, setNewShowPoNumber] = useState<boolean>(true);
+  const [newRequirePoNumber, setNewRequirePoNumber] = useState<boolean>(false);
+  const [newShowNote, setNewShowNote] = useState<boolean>(true);
   const [newCatalogName, setNewCatalogName] = useState<string>('');
   const [newAccentColor, setNewAccentColor] = useState<string>('#108043');
   const [newPublish, setNewPublish] = useState<boolean>(false);
@@ -422,6 +433,19 @@ export const MerchantAppShell: React.FC = () => {
     setSelectedSources([]);
     setNewPriceMode('SHOPIFY_PRICE');
     setNewDiscount(10);
+    setNewCustomPriceAmount('');
+    setNewInventoryMode('STATUS_ONLY');
+    setNewInventoryCap('50');
+    setNewMinQty(1);
+    setNewMaxQty('');
+    setNewQtyIncrement(1);
+    setNewShowPhone(false);
+    setNewRequirePhone(false);
+    setNewShowTaxId(false);
+    setNewRequireTaxId(false);
+    setNewShowPoNumber(true);
+    setNewRequirePoNumber(false);
+    setNewShowNote(true);
     setNewCatalogName('');
     setNewAccentColor('#108043');
     setNewPublish(false);
@@ -500,9 +524,23 @@ export const MerchantAppShell: React.FC = () => {
         name: newCatalogName.trim(),
         priceMode: newPriceMode,
         discountPercent: newPriceMode === 'PERCENT_DISCOUNT' ? Number(newDiscount) : 0,
+        customPriceAmount: newPriceMode === 'CUSTOM_PRICE' ? (parseFloat(newCustomPriceAmount) || null) : null,
         accentColor: newAccentColor,
         showSku: true,
-        showInventory: false,
+        inventoryMode: newInventoryMode,
+        inventoryCap: newInventoryMode === 'CAPPED' ? (parseInt(newInventoryCap, 10) || 50) : null,
+        minQty: Math.max(1, newMinQty),
+        maxQty: newMaxQty ? parseInt(newMaxQty, 10) : null,
+        qtyIncrement: Math.max(1, newQtyIncrement),
+        buyerFormConfig: {
+          showPhone: newShowPhone,
+          requirePhone: newRequirePhone,
+          showTaxId: newShowTaxId,
+          requireTaxId: newRequireTaxId,
+          showPoNumber: newShowPoNumber,
+          requirePoNumber: newRequirePoNumber,
+          showNote: newShowNote,
+        },
         sources: selectedSources.map((s) => ({ type: s.type, shopifyGid: s.id })),
       };
       const res = await authenticatedFetch('/api/admin/catalogs', {

@@ -60,6 +60,7 @@ export const BuyerCatalogApp: React.FC = () => {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
   const [viewMode, setViewMode] = useState<'matrix' | 'quick'>('matrix');
   const [showCsvModal, setShowCsvModal] = useState(false);
 
@@ -322,6 +323,7 @@ export const BuyerCatalogApp: React.FC = () => {
 
       const payload = {
         buyer: buyerInfo,
+        lines: items,
         items,
         dataVersion: data.dataVersion,
         orderLinkToken: routeType === 'link' ? routeToken : undefined,
@@ -350,6 +352,11 @@ export const BuyerCatalogApp: React.FC = () => {
       const json = await res.json();
 
       if (!res.ok) {
+        if (json.fields) {
+          setFieldErrors(json.fields);
+        } else if (json.error?.fields) {
+          setFieldErrors(json.error.fields);
+        }
         if (res.status === 409) {
           throw new Error(
             json.error?.message || json.message || 'Product catalog or inventory changed. Please refresh and review.'
@@ -603,6 +610,7 @@ export const BuyerCatalogApp: React.FC = () => {
         onSubmit={handleSubmitOrder}
         isSubmitting={isSubmitting}
         errorMessage={submitError}
+        fieldErrors={fieldErrors}
       />
     </div>
   );

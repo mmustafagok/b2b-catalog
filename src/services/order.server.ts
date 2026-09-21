@@ -16,7 +16,7 @@ import { ShopifyAdminClient, ShopifyGraphQLError } from './shopify-client.server
 import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 import { sanitizeErrorMessage } from './security.server.js';
 import { SubmitStageTracker, recordRuntimeIncident } from './incident.server.js';
-import { validateOrderLinkAccess, recordOrderLinkSubmission, isOrderLinkExpired } from './orderlink.server.js';
+import { validateOrderLinkAccess, recordOrderLinkSubmission, isOrderLinkExpired, verifyPasscode } from './orderlink.server.js';
 import {
   claimReorderIntent,
   releaseReorderIntentClaim,
@@ -223,7 +223,12 @@ export async function submitBuyerOrder(
       tracker.transition('SUBMISSION_FAILED', 'INVALID_LINK');
       throw new OrderSubmissionError('Order link not found or does not belong to this catalog', 403, 'INVALID_LINK');
     }
-    const linkAccess = validateOrderLinkAccess(orderLink, validated.passcode);
+    let linkAccess = validateOrderLinkAccess(orderLink, validated.linkAccessToken);
+    if (!linkAccess.ok && validated.passcode && orderLink.passcodeHash) {
+      if (verifyPasscode(validated.passcode, orderLink.passcodeHash)) {
+        linkAccess = { ok: true };
+      }
+    }
     if (!linkAccess.ok) {
       tracker.transition('SUBMISSION_FAILED', linkAccess.reason || 'LINK_INVALID');
       const msg = linkAccess.reason === 'PASSCODE_REQUIRED' ? 'A passcode is required to submit this order'
@@ -235,7 +240,46 @@ export async function submitBuyerOrder(
     resolvedOrderLinkId = orderLink.id;
   }
 
-  // 1c. Build variant config map (for disabled variant and qty rule enforcement)
+  // 1c. Buyer form configuration validation (server-side enforcement of merchant-configured required fields)
+  let buyerFormConfig: Record<string, any> = {};
+  if (catalog.buyerFormConfig) {
+    try {
+      buyerFormConfig = typeof catalog.buyerFormConfig === 'string'
+        ? JSON.parse(catalog.buyerFormConfig)
+        : catalog.buyerFormConfig;
+    } catch {
+      buyerFormConfig = {};
+    }
+  }
+
+  const formFieldsMissing: Record<string, string> = {};
+  if (buyerFormConfig.showBuyerName && buyerFormConfig.requireBuyerName && !validated.buyer.buyerName) {
+    formFieldsMissing.buyerName = 'Contact name is required';
+  }
+  if (buyerFormConfig.showPhone && buyerFormConfig.requirePhone && !validated.buyer.phone) {
+    formFieldsMissing.phone = 'Phone number is required';
+  }
+  if (buyerFormConfig.showTaxId && buyerFormConfig.requireTaxId && !validated.buyer.taxId) {
+    formFieldsMissing.taxId = 'Tax ID / VAT ID is required';
+  }
+  if (buyerFormConfig.showPoNumber && buyerFormConfig.requirePoNumber && !validated.buyer.poNumber) {
+    formFieldsMissing.poNumber = 'Purchase Order (PO) number is required';
+  }
+  if (buyerFormConfig.showNote && buyerFormConfig.requireNote && !validated.buyer.note) {
+    formFieldsMissing.note = 'Order note is required';
+  }
+
+  if (Object.keys(formFieldsMissing).length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'BUYER_FORM_VALIDATION_FAILED');
+    throw new OrderSubmissionError(
+      'Please fill in all required buyer fields.',
+      422,
+      'BUYER_FORM_VALIDATION_FAILED',
+      { fields: formFieldsMissing }
+    );
+  }
+
+  // 1d. Build variant config map (for disabled variant and qty rule enforcement)
   const variantConfigMap = new Map(
     (catalog as any).variantConfigs?.map((vc: any) => [vc.shopifyVariantId, vc]) ?? []
   );

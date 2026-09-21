@@ -362,10 +362,16 @@ app.post('/api/public/catalog/:publicToken/submit', publicSubmitLimiter, async (
   } catch (error: any) {
     if (error?.name === 'ZodError' || error instanceof z.ZodError) {
       const issueMsg = error.issues?.map((i: any) => i.message).join(', ') || 'Validation error';
+      const fields: Record<string, string> = {};
+      for (const issue of error.issues || []) {
+        const fieldKey = issue.path[issue.path.length - 1];
+        if (fieldKey) fields[String(fieldKey)] = issue.message;
+      }
       return res.status(400).json({
         error: issueMsg,
-        code: 'VALIDATION_FAILED',
+        code: 'BUYER_FORM_VALIDATION_FAILED',
         message: issueMsg,
+        fields: Object.keys(fields).length > 0 ? fields : undefined,
         details: error.issues,
         requestId,
       });
@@ -406,10 +412,12 @@ app.post('/api/public/catalog/:publicToken/submit', publicSubmitLimiter, async (
         error: {
           code: error.code || 'VALIDATION_FAILED',
           message: error.message,
+          fields: error.details?.fields,
           details: error.details,
         },
-        code: error.code,
+        code: error.code || 'VALIDATION_FAILED',
         message: error.message,
+        fields: error.details?.fields,
         details: error.details,
         requestId,
       });
@@ -635,10 +643,16 @@ app.post('/api/public/link/:linkToken/submit', publicSubmitLimiter, async (req: 
   } catch (error: any) {
     if (error?.name === 'ZodError' || error instanceof z.ZodError) {
       const issueMsg = error.issues?.map((i: any) => i.message).join(', ') || 'Validation error';
+      const fields: Record<string, string> = {};
+      for (const issue of error.issues || []) {
+        const fieldKey = issue.path[issue.path.length - 1];
+        if (fieldKey) fields[String(fieldKey)] = issue.message;
+      }
       return res.status(400).json({
         error: issueMsg,
-        code: 'VALIDATION_FAILED',
+        code: 'BUYER_FORM_VALIDATION_FAILED',
         message: issueMsg,
+        fields: Object.keys(fields).length > 0 ? fields : undefined,
         details: error.issues,
         requestId,
       });
@@ -679,10 +693,12 @@ app.post('/api/public/link/:linkToken/submit', publicSubmitLimiter, async (req: 
         error: {
           code: error.code || 'VALIDATION_FAILED',
           message: error.message,
+          fields: error.details?.fields,
           details: error.details,
         },
-        code: error.code,
+        code: error.code || 'VALIDATION_FAILED',
         message: error.message,
+        fields: error.details?.fields,
         details: error.details,
         requestId,
       });

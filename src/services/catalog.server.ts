@@ -36,6 +36,9 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
   const validated = CreateCatalogInputSchema.parse(input);
 
   const publicToken = generateOpaqueToken();
+  const inventoryMode = validated.inventoryMode || InventoryMode.STATUS_ONLY;
+  const inventoryCap = inventoryMode === InventoryMode.CAPPED ? (validated.inventoryCap ?? null) : null;
+  const showInventory = inventoryMode === InventoryMode.EXACT || (validated.showInventory && inventoryMode !== InventoryMode.HIDDEN);
 
   return prisma.$transaction(async (tx) => {
     const catalog = await tx.catalog.create({
@@ -51,12 +54,12 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
           validated.priceMode === PriceMode.CUSTOM_PRICE
             ? (validated.customPriceAmount ?? null)
             : null,
-        logoUrl: validated.logoUrl,
+        logoUrl: validated.logoUrl ?? null,
         accentColor: validated.accentColor || '#108043',
         showSku: validated.showSku ?? true,
-        showInventory: validated.showInventory ?? false,
-        inventoryMode: validated.inventoryMode || InventoryMode.STATUS_ONLY,
-        inventoryCap: validated.inventoryCap ?? null,
+        showInventory,
+        inventoryMode,
+        inventoryCap,
         minQty: validated.minQty ?? 1,
         maxQty: validated.maxQty ?? null,
         qtyIncrement: validated.qtyIncrement ?? 1,
@@ -121,6 +124,14 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
         ? (validated.customPriceAmount ?? (existing.customPriceAmount ? Number(existing.customPriceAmount) : null))
         : null;
 
+    // Handle inventoryMode & inventoryCap consistency
+    const effectiveInventoryMode = validated.inventoryMode ?? (existing.inventoryMode as InventoryMode) ?? InventoryMode.STATUS_ONLY;
+    let effectiveInventoryCap: number | null = null;
+    if (effectiveInventoryMode === InventoryMode.CAPPED) {
+      effectiveInventoryCap = validated.inventoryCap !== undefined ? validated.inventoryCap : (existing.inventoryCap ?? 50);
+    }
+    const effectiveShowInventory = effectiveInventoryMode === InventoryMode.EXACT || (validated.showInventory ?? existing.showInventory);
+
     const updated = await tx.catalog.update({
       where: { id: catalogId },
       data: {
@@ -131,9 +142,9 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
         ...(validated.logoUrl !== undefined && { logoUrl: validated.logoUrl }),
         ...(validated.accentColor !== undefined && { accentColor: validated.accentColor }),
         ...(validated.showSku !== undefined && { showSku: validated.showSku }),
-        ...(validated.showInventory !== undefined && { showInventory: validated.showInventory }),
-        ...(validated.inventoryMode !== undefined && { inventoryMode: validated.inventoryMode }),
-        ...(validated.inventoryCap !== undefined && { inventoryCap: validated.inventoryCap }),
+        showInventory: effectiveShowInventory,
+        inventoryMode: effectiveInventoryMode,
+        inventoryCap: effectiveInventoryCap,
         ...(validated.minQty !== undefined && { minQty: validated.minQty }),
         ...(validated.maxQty !== undefined && { maxQty: validated.maxQty }),
         ...(validated.qtyIncrement !== undefined && { qtyIncrement: validated.qtyIncrement }),
@@ -197,13 +208,61 @@ async function _upsertVariantConfigs(
 }
 
 export async function getCatalogVariantConfigs(catalogId: string, shopId: string) {
-  const catalog = await prisma.catalog.findFirst({ where: { id: catalogId, shopId } });
+  const catalog = await prisma.catalog.findFirst({
+    where: { id: catalogId, shopId },
+    include: { sources: true },
+  });
   if (!catalog) {
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
   }
-  return prisma.catalogVariantConfig.findMany({
+
+  // 1. Resolve allowed products for this catalog
+  const allowedProductGids = await resolveCatalogAllowedProductGids(shopId, catalog.sources);
+  const allowedProductGidArray = Array.from(allowedProductGids);
+
+  // 2. Fetch all variant snapshots for allowed products
+  const variants = allowedProductGidArray.length > 0
+    ? await prisma.variantSnapshot.findMany({
+        where: {
+          shopId,
+          shopifyProductId: { in: allowedProductGidArray },
+        },
+        include: {
+          product: {
+            select: { title: true, imageUrl: true },
+          },
+        },
+        orderBy: [
+          { product: { title: 'asc' } },
+          { title: 'asc' },
+        ],
+      })
+    : [];
+
+  // 3. Fetch existing overrides
+  const existingConfigs = await prisma.catalogVariantConfig.findMany({
     where: { catalogId },
-    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+  });
+  const configMap = new Map(existingConfigs.map((c) => [c.shopifyVariantId, c]));
+
+  // 4. Overlay: every variant is returned with defaults + overrides
+  return variants.map((v, index) => {
+    const override = configMap.get(v.shopifyVariantId);
+    return {
+      shopifyVariantId: v.shopifyVariantId,
+      shopifyProductId: v.shopifyProductId,
+      productTitle: v.product.title,
+      variantTitle: v.title,
+      sku: v.sku,
+      basePrice: Number(v.shopifyPrice),
+      imageUrl: v.imageUrl || v.product.imageUrl || null,
+      enabled: override ? override.enabled : true,
+      customPrice: override?.customPrice ? Number(override.customPrice) : null,
+      minQty: override?.minQty ?? catalog.minQty ?? null,
+      maxQty: override?.maxQty ?? catalog.maxQty ?? null,
+      qtyIncrement: override?.qtyIncrement ?? catalog.qtyIncrement ?? null,
+      position: override?.position ?? index,
+    };
   });
 }
 

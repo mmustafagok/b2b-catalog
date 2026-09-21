@@ -132,7 +132,7 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
               type="text"
               placeholder="Filter by product, variant, SKU..."
               className="cf-input"
-              style={{ maxWidth: '350px' }}
+              style={{ width: '100%', maxWidth: '360px' }}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />

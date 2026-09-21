@@ -11,6 +11,7 @@ interface OrderSummaryDrawerProps {
   totalItems: number;
   currency?: string;
   buyerFormConfig?: BuyerFormConfig;
+  fieldErrors?: Record<string, string> | null;
   onSubmit: (buyerInfo: {
     businessName: string;
     buyerName?: string;
@@ -41,6 +42,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
   totalItems,
   currency = 'USD',
   buyerFormConfig = {},
+  fieldErrors = null,
   onSubmit,
   isSubmitting,
   errorMessage,
@@ -96,18 +98,28 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
       return;
     }
 
-    if (buyerFormConfig.requirePhone && !phone.trim()) {
+    if (buyerFormConfig.showBuyerName && buyerFormConfig.requireBuyerName && !buyerName.trim()) {
+      setClientError('Contact name is required by supplier.');
+      return;
+    }
+
+    if (buyerFormConfig.showPhone && buyerFormConfig.requirePhone && !phone.trim()) {
       setClientError('Phone number is required by supplier.');
       return;
     }
 
-    if (buyerFormConfig.requireTaxId && !taxId.trim()) {
+    if (buyerFormConfig.showTaxId && buyerFormConfig.requireTaxId && !taxId.trim()) {
       setClientError('Tax ID / VAT registration number is required.');
       return;
     }
 
-    if (buyerFormConfig.requirePoNumber && !poNumber.trim()) {
+    if (buyerFormConfig.showPoNumber !== false && buyerFormConfig.requirePoNumber && !poNumber.trim()) {
       setClientError('Purchase Order (PO) number is required.');
+      return;
+    }
+
+    if (buyerFormConfig.showNote !== false && buyerFormConfig.requireNote && !note.trim()) {
+      setClientError('Order note is required by supplier.');
       return;
     }
 
@@ -155,8 +167,9 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
     });
   };
 
-  const showPhoneField = buyerFormConfig.showPhone !== false;
-  const showTaxIdField = buyerFormConfig.showTaxId !== false;
+  const showContactNameField = !!buyerFormConfig.showBuyerName;
+  const showPhoneField = !!buyerFormConfig.showPhone;
+  const showTaxIdField = !!buyerFormConfig.showTaxId;
   const showPoField = buyerFormConfig.showPoNumber !== false;
   const showNoteField = buyerFormConfig.showNote !== false;
 
@@ -220,21 +233,34 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
               value={businessName}
               onChange={(e) => setBusinessName(e.target.value)}
             />
+            {fieldErrors?.businessName && (
+              <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                {fieldErrors.businessName}
+              </div>
+            )}
           </div>
 
-          <div className="form-group">
-            <label className="form-label" htmlFor="buyerContactName">
-              Contact Name (Optional)
-            </label>
-            <input
-              id="buyerContactName"
-              className="form-input"
-              type="text"
-              placeholder="e.g. Jane Doe"
-              value={buyerName}
-              onChange={(e) => setBuyerName(e.target.value)}
-            />
-          </div>
+          {showContactNameField && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="buyerContactName">
+                Contact Name {buyerFormConfig.requireBuyerName ? '*' : '(Optional)'}
+              </label>
+              <input
+                id="buyerContactName"
+                className="form-input"
+                type="text"
+                required={buyerFormConfig.requireBuyerName}
+                placeholder="e.g. Jane Doe"
+                value={buyerName}
+                onChange={(e) => setBuyerName(e.target.value)}
+              />
+              {fieldErrors?.buyerName && (
+                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                  {fieldErrors.buyerName}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="form-group">
             <label className="form-label" htmlFor="buyerEmail">
@@ -249,6 +275,11 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
+            {fieldErrors?.email && (
+              <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                {fieldErrors.email}
+              </div>
+            )}
           </div>
 
           {showPhoneField && (
@@ -265,6 +296,11 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
               />
+              {fieldErrors?.phone && (
+                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                  {fieldErrors.phone}
+                </div>
+              )}
             </div>
           )}
 
@@ -282,6 +318,11 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                 value={taxId}
                 onChange={(e) => setTaxId(e.target.value)}
               />
+              {fieldErrors?.taxId && (
+                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                  {fieldErrors.taxId}
+                </div>
+              )}
             </div>
           )}
 
@@ -299,22 +340,33 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                 value={poNumber}
                 onChange={(e) => setPoNumber(e.target.value)}
               />
+              {fieldErrors?.poNumber && (
+                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                  {fieldErrors.poNumber}
+                </div>
+              )}
             </div>
           )}
 
           {showNoteField && (
             <div className="form-group">
               <label className="form-label" htmlFor="orderNotes">
-                Special Instructions / Notes (Optional)
+                Special Instructions / Notes {buyerFormConfig.requireNote ? '*' : '(Optional)'}
               </label>
               <textarea
                 id="orderNotes"
                 className="form-input"
                 rows={3}
+                required={buyerFormConfig.requireNote}
                 placeholder="Add shipping requirements, dock hours, or references..."
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
               />
+              {fieldErrors?.note && (
+                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                  {fieldErrors.note}
+                </div>
+              )}
             </div>
           )}
 
