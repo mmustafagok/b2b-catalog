@@ -9,8 +9,9 @@ import {
   upsertCatalogVariantConfigs,
 } from '../src/services/catalog.server.js';
 import { getPublicCatalogPayload, syncProductSnapshot } from '../src/services/sync.server.js';
+import { validateBuyerOrderLines } from '../src/services/validation.server.js';
 import { renderStockBadge } from '../src/client/buyer/VariantMatrix.js';
-import { CatalogSourceType, PriceMode, resolveEffectiveQuantityRules, isValidQuantityStep } from '../src/types/index.js';
+import { CatalogSourceType, PriceMode, resolveEffectiveQuantityRules, isValidQuantityStep, resolveVariantInventory } from '../src/types/index.js';
 
 describe('Inventory Display Mode & Quantity Rule Inheritance Suite', () => {
   let shop: { id: string; shopDomain: string };
@@ -394,5 +395,73 @@ describe('Inventory Display Mode & Quantity Rule Inheritance Suite', () => {
     expect(isValidQuantityStep(18, min6, step6)).toBe(true);
     expect(isValidQuantityStep(24, min6, step6)).toBe(true);
     expect(isValidQuantityStep(7, min6, step6)).toBe(false);
+  });
+
+  it('17. Browse and Quick Order use same effective rules', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Parity Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 5,
+      maxQty: 50,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    const payload = await getPublicCatalogPayload(catalog.publicToken);
+    const variant = payload?.products[0]?.variants.find((v) => v.shopifyVariantId === varGidInStock);
+
+    expect(variant?.minQty).toBe(5);
+    expect(variant?.maxQty).toBe(50);
+    expect(variant?.qtyIncrement).toBe(5);
+  });
+
+  it('18. Server submit validation uses same effective rules', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Validation Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 5,
+      maxQty: 50,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    // Submit line below minQty
+    const resMin = await validateBuyerOrderLines(catalog.publicToken, {
+      dataVersion: catalog.dataVersion,
+      lines: [{ variantId: varGidInStock, quantity: 2 }],
+    });
+    expect(resMin.changedLines.some((l) => l.reason === 'QTY_RULE')).toBe(true);
+  });
+
+  it('19. Min 5 Step 3 validates 5, 8, 11', async () => {
+    const min5 = 5;
+    const step3 = 3;
+
+    expect(isValidQuantityStep(5, min5, step3)).toBe(true);
+    expect(isValidQuantityStep(8, min5, step3)).toBe(true);
+    expect(isValidQuantityStep(11, min5, step3)).toBe(true);
+
+    expect(isValidQuantityStep(6, min5, step3)).toBe(false);
+    expect(isValidQuantityStep(7, min5, step3)).toBe(false);
+    expect(isValidQuantityStep(9, min5, step3)).toBe(false);
+    expect(isValidQuantityStep(10, min5, step3)).toBe(false);
+  });
+
+  it('20. Invalid step quantities rejected', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Step Reject Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 6,
+      maxQty: 48,
+      qtyIncrement: 6,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    // Invalid step (e.g. 7 for Min 6 Step 6)
+    expect(isValidQuantityStep(7, 6, 6, 48)).toBe(false);
+    expect(isValidQuantityStep(12, 6, 6, 48)).toBe(true);
   });
 });

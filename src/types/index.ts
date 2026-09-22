@@ -105,6 +105,137 @@ export function isValidQuantityStep(quantity: number, min: number, step: number,
   return (quantity - min) % step === 0;
 }
 
+// ─── Central Variant Inventory Resolver ────────────────────────────────────────
+
+export type InventoryDisplayState = 'IN_STOCK' | 'OUT_OF_STOCK' | 'EXACT' | 'CAPPED' | 'UNTRACKED' | 'HIDDEN';
+
+export interface ResolvedVariantInventory {
+  tracked: boolean;
+  quantity: number | null;
+  sellable: boolean;
+  displayState: InventoryDisplayState;
+  displayText: string | null;
+  isCappedOverThreshold?: boolean;
+}
+
+export function resolveVariantInventory(
+  variant: {
+    inventoryTracked?: boolean | null;
+    inventoryPolicy?: string | null;
+    inventoryQuantity?: number | null;
+    effectiveAvailable?: number | null;
+    availableForSale?: boolean | null;
+    isCappedOverThreshold?: boolean | null;
+  },
+  inventoryMode: string = 'STATUS_ONLY',
+  inventoryCap: number | null = 50
+): ResolvedVariantInventory {
+  const tracked = variant.inventoryTracked !== false;
+  const policy = (variant.inventoryPolicy || 'DENY').toUpperCase();
+  const rawQty = variant.inventoryQuantity ?? variant.effectiveAvailable ?? null;
+
+  const isUntracked = !tracked || policy === 'CONTINUE';
+
+  let sellable = Boolean(variant.availableForSale ?? true);
+  let effectiveQty: number | null = null;
+
+  if (isUntracked) {
+    effectiveQty = null;
+    sellable = true;
+  } else {
+    effectiveQty = Math.max(0, rawQty ?? 0);
+    sellable = sellable && effectiveQty > 0;
+  }
+
+  const isOutOfStock = !sellable;
+
+  if (inventoryMode === 'HIDDEN') {
+    return {
+      tracked: !isUntracked,
+      quantity: effectiveQty,
+      sellable,
+      displayState: 'HIDDEN',
+      displayText: null,
+      isCappedOverThreshold: false,
+    };
+  }
+
+  if (isOutOfStock) {
+    return {
+      tracked: !isUntracked,
+      quantity: effectiveQty,
+      sellable: false,
+      displayState: 'OUT_OF_STOCK',
+      displayText: 'Out of stock',
+      isCappedOverThreshold: false,
+    };
+  }
+
+  if (inventoryMode === 'STATUS_ONLY') {
+    return {
+      tracked: !isUntracked,
+      quantity: effectiveQty,
+      sellable: true,
+      displayState: 'IN_STOCK',
+      displayText: 'In stock',
+      isCappedOverThreshold: false,
+    };
+  }
+
+  if (inventoryMode === 'EXACT') {
+    if (effectiveQty !== null) {
+      return {
+        tracked: true,
+        quantity: effectiveQty,
+        sellable: true,
+        displayState: 'EXACT',
+        displayText: `${effectiveQty} available`,
+        isCappedOverThreshold: false,
+      };
+    }
+    return {
+      tracked: false,
+      quantity: null,
+      sellable: true,
+      displayState: 'UNTRACKED',
+      displayText: 'In stock',
+      isCappedOverThreshold: false,
+    };
+  }
+
+  if (inventoryMode === 'CAPPED') {
+    const cap = inventoryCap ?? 50;
+    if (effectiveQty !== null) {
+      const overCap = Boolean(variant.isCappedOverThreshold || effectiveQty >= cap);
+      return {
+        tracked: true,
+        quantity: Math.min(effectiveQty, cap),
+        sellable: true,
+        displayState: overCap ? 'CAPPED' : 'EXACT',
+        displayText: overCap ? `${cap}+ available` : `${effectiveQty} available`,
+        isCappedOverThreshold: overCap,
+      };
+    }
+    return {
+      tracked: false,
+      quantity: null,
+      sellable: true,
+      displayState: 'UNTRACKED',
+      displayText: `${cap}+ available`,
+      isCappedOverThreshold: true,
+    };
+  }
+
+  return {
+    tracked: !isUntracked,
+    quantity: effectiveQty,
+    sellable: true,
+    displayState: 'IN_STOCK',
+    displayText: 'In stock',
+    isCappedOverThreshold: false,
+  };
+}
+
 // ─── Buyer form config ────────────────────────────────────────────────────────
 
 export const BuyerFormConfigSchema = z.object({

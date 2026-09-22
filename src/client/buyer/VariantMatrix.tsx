@@ -1,4 +1,5 @@
 import React from 'react';
+import { resolveVariantInventory } from '../../types/index.js';
 
 export interface VariantItem {
   id: string;
@@ -26,78 +27,22 @@ export function renderStockBadge(
     availableForSale: boolean;
     effectiveAvailable?: number | null;
     isCappedOverThreshold?: boolean;
+    inventoryTracked?: boolean;
+    inventoryPolicy?: string;
+    inventoryQuantity?: number | null;
   },
   inventoryMode: string = 'STATUS_ONLY',
   inventoryCap?: number | null
 ) {
-  if (inventoryMode === 'HIDDEN') {
+  const resolved = resolveVariantInventory(variant, inventoryMode, inventoryCap);
+  if (resolved.displayState === 'HIDDEN' || !resolved.displayText) {
     return null;
   }
 
-  const isOutOfStock =
-    !variant.availableForSale ||
-    (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable <= 0);
-
-  if (isOutOfStock) {
-    return (
-      <span className="stock-tag out-of-stock">
-        Out of stock
-      </span>
-    );
-  }
-
-  if (inventoryMode === 'STATUS_ONLY') {
-    return (
-      <span className="stock-tag in-stock">
-        In stock
-      </span>
-    );
-  }
-
-  if (inventoryMode === 'EXACT') {
-    if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined) {
-      return (
-        <span className="stock-tag in-stock">
-          {`${variant.effectiveAvailable} available`}
-        </span>
-      );
-    }
-    return (
-      <span className="stock-tag in-stock">
-        In stock
-      </span>
-    );
-  }
-
-  if (inventoryMode === 'CAPPED') {
-    const cap = inventoryCap ?? 50;
-    if (
-      variant.isCappedOverThreshold ||
-      (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable >= cap)
-    ) {
-      return (
-        <span className="stock-tag in-stock">
-          {`${cap}+ available`}
-        </span>
-      );
-    }
-    if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined) {
-      return (
-        <span className="stock-tag in-stock">
-          {`${variant.effectiveAvailable} available`}
-        </span>
-      );
-    }
-    return (
-      <span className="stock-tag in-stock">
-        {`${cap}+ available`}
-      </span>
-    );
-  }
-
+  const className = resolved.displayState === 'OUT_OF_STOCK' ? 'stock-tag out-of-stock' : 'stock-tag in-stock';
   return (
-    <span className="stock-tag in-stock">
-      In stock
+    <span className={className}>
+      {resolved.displayText}
     </span>
   );
 }
