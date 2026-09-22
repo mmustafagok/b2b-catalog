@@ -166,10 +166,20 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
             ) : (
               filteredRows.map((row) => {
                 const currentQty = quantities[row.variantId] || 0;
-                const isOutOfStock = !row.availableForSale || row.effectiveAvailable === 0;
+                const isOutOfStock =
+                  !row.availableForSale ||
+                  (row.effectiveAvailable !== null && row.effectiveAvailable !== undefined && row.effectiveAvailable <= 0);
                 const min = row.minQty || 1;
-                const max = row.maxQty || (row.effectiveAvailable !== null && row.effectiveAvailable !== undefined ? row.effectiveAvailable : null);
                 const step = row.qtyIncrement || 1;
+
+                let max: number | null = null;
+                if (row.maxQty != null && row.effectiveAvailable != null) {
+                  max = Math.min(row.maxQty, row.effectiveAvailable);
+                } else if (row.maxQty != null) {
+                  max = row.maxQty;
+                } else if (row.effectiveAvailable != null) {
+                  max = row.effectiveAvailable;
+                }
                 const lineTotal = currentQty * row.displayPrice;
 
                 return (

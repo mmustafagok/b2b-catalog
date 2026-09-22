@@ -34,49 +34,69 @@ export function renderStockBadge(
     return null;
   }
 
-  const isOutOfStock = !variant.availableForSale || variant.effectiveAvailable === 0;
+  const isOutOfStock =
+    !variant.availableForSale ||
+    (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable <= 0);
+
   if (isOutOfStock) {
     return (
-      <span className="stock-tag out-of-stock" style={{ color: '#dc2626', fontWeight: 600 }}>
+      <span className="stock-tag out-of-stock">
         Out of stock
       </span>
     );
   }
 
-  if (variant.effectiveAvailable === null || variant.effectiveAvailable === undefined) {
+  if (inventoryMode === 'STATUS_ONLY') {
     return (
-      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+      <span className="stock-tag in-stock">
         In stock
       </span>
     );
   }
 
   if (inventoryMode === 'EXACT') {
+    if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined) {
+      return (
+        <span className="stock-tag in-stock">
+          {`${variant.effectiveAvailable} available`}
+        </span>
+      );
+    }
     return (
-      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-        {variant.effectiveAvailable} in stock
+      <span className="stock-tag in-stock">
+        In stock
       </span>
     );
   }
 
   if (inventoryMode === 'CAPPED') {
-    if (variant.isCappedOverThreshold || (inventoryCap && variant.effectiveAvailable >= inventoryCap)) {
+    const cap = inventoryCap ?? 50;
+    if (
+      variant.isCappedOverThreshold ||
+      (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable >= cap)
+    ) {
       return (
-        <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-          {inventoryCap || variant.effectiveAvailable}+ available
+        <span className="stock-tag in-stock">
+          {`${cap}+ available`}
+        </span>
+      );
+    }
+    if (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined) {
+      return (
+        <span className="stock-tag in-stock">
+          {`${variant.effectiveAvailable} available`}
         </span>
       );
     }
     return (
-      <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
-        {variant.effectiveAvailable} available
+      <span className="stock-tag in-stock">
+        {`${cap}+ available`}
       </span>
     );
   }
 
-  // Default STATUS_ONLY
   return (
-    <span className="stock-tag in-stock" style={{ color: '#16a34a', fontWeight: 600 }}>
+    <span className="stock-tag in-stock">
       In stock
     </span>
   );
@@ -173,10 +193,20 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
           {product.variants.map((variant) => {
             const currentQty = quantities[variant.shopifyVariantId] || 0;
             const hasDiscount = variant.displayPrice < variant.basePrice;
-            const isOutOfStock = !variant.availableForSale || variant.effectiveAvailable === 0;
+            const isOutOfStock =
+              !variant.availableForSale ||
+              (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable <= 0);
             const min = variant.minQty || 1;
             const step = variant.qtyIncrement || 1;
-            const maxLimit = variant.maxQty || (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined ? variant.effectiveAvailable : null);
+
+            let maxLimit: number | null = null;
+            if (variant.maxQty != null && variant.effectiveAvailable != null) {
+              maxLimit = Math.min(variant.maxQty, variant.effectiveAvailable);
+            } else if (variant.maxQty != null) {
+              maxLimit = variant.maxQty;
+            } else if (variant.effectiveAvailable != null) {
+              maxLimit = variant.effectiveAvailable;
+            }
 
             return (
               <tr key={variant.shopifyVariantId} role="row">

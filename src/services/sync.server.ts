@@ -1468,11 +1468,12 @@ async function _buildCatalogPayload(
       if (inventoryMode === 'EXACT' || (catalog.showInventory && inventoryMode !== 'HIDDEN' && inventoryMode !== 'CAPPED' && inventoryMode !== 'STATUS_ONLY')) {
         exposedQty = v.inventoryQuantity;
         exposedEffective = effectiveAvailable;
-      } else if (inventoryMode === 'CAPPED' && inventoryCap !== null) {
+      } else if (inventoryMode === 'CAPPED') {
+        const cap = inventoryCap ?? 50;
         if (effectiveAvailable !== null) {
-          if (effectiveAvailable >= inventoryCap) {
-            exposedQty = inventoryCap;
-            exposedEffective = inventoryCap;
+          if (effectiveAvailable >= cap) {
+            exposedQty = cap;
+            exposedEffective = cap;
             isCappedOverThreshold = true;
           } else {
             exposedQty = effectiveAvailable;
@@ -1482,9 +1483,10 @@ async function _buildCatalogPayload(
         } else {
           exposedQty = null;
           exposedEffective = null;
+          isCappedOverThreshold = true;
         }
       } else {
-        // STATUS_ONLY or HIDDEN: never expose exact qty
+        // STATUS_ONLY or HIDDEN: never expose exact qty numbers
         exposedQty = undefined;
         exposedEffective = undefined;
       }
