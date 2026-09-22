@@ -67,11 +67,43 @@ export const CatalogVariantConfigInputSchema = z.object({
   shopifyVariantId: z.string().min(1),
   enabled: z.boolean().default(true),
   customPrice: z.number().min(0).max(999999).optional().nullable(),
+  overrideQuantityRules: z.boolean().optional().default(false),
   minQty: z.number().int().min(1).max(10000).optional().nullable(),
   maxQty: z.number().int().min(1).max(100000).optional().nullable(),
   qtyIncrement: z.number().int().min(1).max(1000).optional().nullable(),
   position: z.number().int().min(0).optional().default(0),
 });
+
+// ─── Quantity rule resolution ──────────────────────────────────────────────────
+
+export interface EffectiveQuantityRules {
+  min: number;
+  max: number | null;
+  step: number;
+}
+
+export function resolveEffectiveQuantityRules(
+  catalog: { minQty?: number | null; maxQty?: number | null; qtyIncrement?: number | null },
+  variantConfig?: { overrideQuantityRules?: boolean | null; minQty?: number | null; maxQty?: number | null; qtyIncrement?: number | null } | null
+): EffectiveQuantityRules {
+  const hasOverride = Boolean(variantConfig?.overrideQuantityRules);
+
+  const min = hasOverride && variantConfig?.minQty != null ? variantConfig.minQty : (catalog?.minQty ?? 1);
+  const max = hasOverride && variantConfig?.maxQty != null ? variantConfig.maxQty : (catalog?.maxQty ?? null);
+  const step = hasOverride && variantConfig?.qtyIncrement != null ? variantConfig.qtyIncrement : (catalog?.qtyIncrement ?? 1);
+
+  return {
+    min: Math.max(1, min),
+    max: max != null && max > 0 ? max : null,
+    step: Math.max(1, step),
+  };
+}
+
+export function isValidQuantityStep(quantity: number, min: number, step: number, max: number | null = null): boolean {
+  if (quantity < min) return false;
+  if (max !== null && quantity > max) return false;
+  return (quantity - min) % step === 0;
+}
 
 // ─── Buyer form config ────────────────────────────────────────────────────────
 
@@ -217,7 +249,6 @@ export const BuyerSubmitOrderSchema = z.preprocess(
     orderLinkToken: z.string().optional().nullable(),
     linkAccessToken: z.string().optional().nullable(),
     passcode: z.string().optional().nullable(),
-    reorderIntentToken: z.string().optional().nullable(),
   })
 );
 
@@ -240,12 +271,6 @@ export const BuyerValidateOrderSchema = z.preprocess(
   })
 );
 
-// ─── CSV Bulk Order schema ─────────────────────────────────────────────────────
-
-export const CsvBulkOrderSchema = z.object({
-  csvText: z.string().min(1).max(500_000, 'CSV input too large (max 500KB)'),
-});
-
 // ─── Type exports ──────────────────────────────────────────────────────────────
 
 export type BuyerOrderLine = z.infer<typeof BuyerOrderLineSchema>;
@@ -258,3 +283,4 @@ export type CatalogVariantConfigInput = z.input<typeof CatalogVariantConfigInput
 export type BuyerFormConfig = z.infer<typeof BuyerFormConfigSchema>;
 export type CreateOrderLinkInput = z.infer<typeof CreateOrderLinkInputSchema>;
 export type UpdateOrderLinkInput = z.infer<typeof UpdateOrderLinkInputSchema>;
+

@@ -188,7 +188,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                         <div className="qty-rules-hint">
                           {row.minQty && <span>Min: {row.minQty} </span>}
                           {row.maxQty && <span>Max: {row.maxQty} </span>}
-                          {row.qtyIncrement && row.qtyIncrement > 1 && <span>Multiples of {row.qtyIncrement}</span>}
+                          {row.qtyIncrement && row.qtyIncrement > 1 && <span>Step: {row.qtyIncrement}</span>}
                         </div>
                       )}
                     </td>
@@ -242,7 +242,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                         </button>
                       </div>
                     </td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                    <td data-label="Line Total" style={{ textAlign: 'right', fontWeight: 600 }}>
                       {currentQty > 0 ? `$${lineTotal.toFixed(2)}` : '—'}
                     </td>
                   </tr>

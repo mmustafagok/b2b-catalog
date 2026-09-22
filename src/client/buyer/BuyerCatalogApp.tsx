@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { VariantMatrix, ProductItem } from './VariantMatrix.js';
 import { QuickOrderView } from './QuickOrderView.js';
-import { CsvBulkUpload } from './CsvBulkUpload.js';
 import { PasscodeGate } from './PasscodeGate.js';
 import { OrderSummaryDrawer } from './OrderSummaryDrawer.js';
 import { parseBuyerRoute, BuyerRouteType } from '../routeUtils.js';
@@ -62,7 +61,6 @@ export const BuyerCatalogApp: React.FC = () => {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
   const [viewMode, setViewMode] = useState<'matrix' | 'quick'>('matrix');
-  const [showCsvModal, setShowCsvModal] = useState(false);
 
   // Passcode gating (scoped access credential, NO passcodes in URLs)
   const [passcodeRequired, setPasscodeRequired] = useState(false);
@@ -76,10 +74,6 @@ export const BuyerCatalogApp: React.FC = () => {
   });
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
   const [passcodeLoading, setPasscodeLoading] = useState(false);
-
-  // Reorder tracking
-  const [reorderIntentToken, setReorderIntentToken] = useState<string | null>(null);
-  const [reorderNotice, setReorderNotice] = useState<string | null>(null);
 
   const [submittedOrder, setSubmittedOrder] = useState<{
     submissionId: string;
@@ -116,35 +110,7 @@ export const BuyerCatalogApp: React.FC = () => {
         headers['X-Link-Access-Token'] = tokenToUse;
       }
 
-      if (routeType === 'reorder') {
-        // First fetch reorder intent payload
-        const reorderRes = await fetch(`/api/public/reorder/${routeToken}`);
-        if (!reorderRes.ok) {
-          const errJson = await reorderRes.json().catch(() => ({}));
-          throw new Error(errJson.error || 'Reorder link expired or invalid');
-        }
-        const reorderData = await reorderRes.json();
-        setReorderIntentToken(reorderData.intentToken);
-
-        // Prepopulate cart
-        const prefill: Record<string, number> = {};
-        let unavailableCount = 0;
-        for (const line of reorderData.prefillLines || []) {
-          if (line.currentlyAvailable && !line.deleted) {
-            prefill[line.variantId] = line.quantity;
-          } else {
-            unavailableCount++;
-          }
-        }
-        setQuantities(prefill);
-
-        if (unavailableCount > 0) {
-          setReorderNotice(`${unavailableCount} previously ordered item(s) are currently out of stock or unavailable.`);
-        }
-
-        // Now load the underlying catalog
-        url = `/api/public/catalog/${reorderData.catalogPublicToken}`;
-      } else if (routeType === 'link') {
+      if (routeType === 'link') {
         // Passcode is NEVER in the query string or URL
         url = `/api/public/link/${routeToken}`;
       } else {
@@ -328,7 +294,6 @@ export const BuyerCatalogApp: React.FC = () => {
         dataVersion: data.dataVersion,
         orderLinkToken: routeType === 'link' ? routeToken : undefined,
         linkAccessToken: routeType === 'link' ? (linkAccessToken || undefined) : undefined,
-        reorderIntentToken: reorderIntentToken || undefined,
       };
 
       const submitEndpoint = routeType === 'link'
@@ -350,32 +315,23 @@ export const BuyerCatalogApp: React.FC = () => {
       });
 
       const json = await res.json();
-
       if (!res.ok) {
-        if (json.fields) {
-          setFieldErrors(json.fields);
-        } else if (json.error?.fields) {
-          setFieldErrors(json.error.fields);
+        if (json.details?.fieldErrors) {
+          setFieldErrors(json.details.fieldErrors);
         }
-        if (res.status === 409) {
-          throw new Error(
-            json.error?.message || json.message || 'Product catalog or inventory changed. Please refresh and review.'
-          );
-        }
-        throw new Error(
-          json.error?.message || json.message || json.error || 'Failed to submit order to Shopify.'
-        );
+        throw new Error(json.error || 'Failed to submit order');
       }
 
       clearBuyerIdempotencyKey(tokenKey);
       setSubmittedOrder({
         submissionId: json.submissionId,
-        reference: json.reference || json.draftOrderName || 'DRAFT-ORDER',
-        subtotal,
+        reference: json.orderName || json.reference || 'SUBMITTED',
+        subtotal: subtotal,
       });
       setIsDrawerOpen(false);
+      setQuantities({});
     } catch (err: any) {
-      setSubmitError(err.message || 'Submission error');
+      setSubmitError(err.message || 'Submission failed');
     } finally {
       setIsSubmitting(false);
     }
@@ -383,9 +339,9 @@ export const BuyerCatalogApp: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="buyer-loading-container">
+      <div className="buyer-loading">
         <div className="spinner" />
-        <p>Loading wholesale catalog...</p>
+        <p>Loading Wholesale Catalog...</p>
       </div>
     );
   }
@@ -393,8 +349,7 @@ export const BuyerCatalogApp: React.FC = () => {
   if (passcodeRequired) {
     return (
       <PasscodeGate
-        catalogName={data?.catalog?.name}
-        linkLabel={data?.orderLink?.label}
+        catalogName={data?.catalog.name || 'Wholesale Order Link'}
         onSubmitPasscode={handlePasscodeSubmit}
         error={passcodeError}
         loading={passcodeLoading}
@@ -404,11 +359,9 @@ export const BuyerCatalogApp: React.FC = () => {
 
   if (error || !data) {
     return (
-      <div className="buyer-error-container">
-        <div className="error-card">
-          <h2>Catalog Unavailable</h2>
-          <p>{error || 'This wholesale catalog could not be loaded.'}</p>
-        </div>
+      <div className="buyer-error">
+        <h2>Unable to load catalog</h2>
+        <p>{error || 'Catalog not found'}</p>
       </div>
     );
   }
@@ -416,22 +369,18 @@ export const BuyerCatalogApp: React.FC = () => {
   if (submittedOrder) {
     return (
       <div className="buyer-success-container">
-        <div className="success-card">
+        <div className="buyer-success-card">
           <div className="success-icon">✓</div>
-          <h2>Wholesale Order Submitted!</h2>
-          <p className="success-reference">
-            Reference: <strong>{submittedOrder.reference}</strong>
-          </p>
-          <p className="success-text">
-            Thank you for your order. A Shopify draft invoice will be sent to your email with payment and shipping terms.
+          <h2>Wholesale Order Received!</h2>
+          <p className="order-ref">Order Reference: <strong>{submittedOrder.reference}</strong></p>
+          <p className="success-sub">
+            Thank you, <strong>{data.catalog.name}</strong> has received your order submission.
+            A confirmation and Shopify invoice will be issued shortly.
           </p>
           <button
             type="button"
             className="btn-primary"
-            onClick={() => {
-              setSubmittedOrder(null);
-              setQuantities({});
-            }}
+            onClick={() => setSubmittedOrder(null)}
           >
             Place Another Order
           </button>
@@ -441,52 +390,42 @@ export const BuyerCatalogApp: React.FC = () => {
   }
 
   return (
-    <div className="buyer-app">
-      {/* Header */}
+    <div
+      className="buyer-app-container"
+      style={{ '--accent-color': data.catalog.accentColor } as React.CSSProperties}
+    >
+      {/* Catalog Header */}
       <header className="buyer-header">
-        <div className="buyer-header-content">
-          <div className="buyer-brand">
-            {data.catalog.logoUrl ? (
-              <img src={data.catalog.logoUrl} alt={data.catalog.name} className="catalog-logo" />
-            ) : (
-              <div className="brand-dot" />
-            )}
-            <div>
-              <h1 className="catalog-name">{data.catalog.name}</h1>
-              <p className="catalog-subtitle">B2B Wholesale Order Portal</p>
-            </div>
+        <div className="header-top">
+          {data.catalog.logoUrl && (
+            <img src={data.catalog.logoUrl} alt="Logo" className="catalog-logo" />
+          )}
+          <div>
+            <h1 className="catalog-title">{data.catalog.name}</h1>
+            <p className="catalog-subtitle">Wholesale Order Portal</p>
+          </div>
+        </div>
+
+        <div className="header-toolbar">
+          {/* View Mode Switcher */}
+          <div className="view-mode-toggle">
+            <button
+              type="button"
+              className={`toggle-btn ${viewMode === 'matrix' ? 'active' : ''}`}
+              onClick={() => setViewMode('matrix')}
+            >
+              📱 Browse View
+            </button>
+            <button
+              type="button"
+              className={`toggle-btn ${viewMode === 'quick' ? 'active' : ''}`}
+              onClick={() => setViewMode('quick')}
+            >
+              ⚡ Quick Order
+            </button>
           </div>
 
           <div className="header-actions">
-            {/* View Mode Switcher */}
-            <div className="view-mode-toggle">
-              <button
-                type="button"
-                className={`view-toggle-btn ${viewMode === 'matrix' ? 'active' : ''}`}
-                onClick={() => setViewMode('matrix')}
-                title="Visual Card Matrix"
-              >
-                ⊞ Grid
-              </button>
-              <button
-                type="button"
-                className={`view-toggle-btn ${viewMode === 'quick' ? 'active' : ''}`}
-                onClick={() => setViewMode('quick')}
-                title="Quick Order Table"
-              >
-                ☰ Quick Order
-              </button>
-            </div>
-
-            {/* CSV Bulk Upload Button */}
-            <button
-              type="button"
-              className="csv-upload-trigger-btn"
-              onClick={() => setShowCsvModal(true)}
-            >
-              📄 CSV Bulk Upload
-            </button>
-
             {/* Cart Trigger */}
             <button
               type="button"
@@ -505,12 +444,6 @@ export const BuyerCatalogApp: React.FC = () => {
 
       {/* Main Content */}
       <main className="buyer-main">
-        {reorderNotice && (
-          <div className="reorder-notice-banner">
-            ℹ️ {reorderNotice}
-          </div>
-        )}
-
         {viewMode === 'matrix' ? (
           <>
             {/* Search Bar for Matrix */}
@@ -586,17 +519,6 @@ export const BuyerCatalogApp: React.FC = () => {
             </button>
           </div>
         </div>
-      )}
-
-      {/* CSV Bulk Upload Modal */}
-      {showCsvModal && (
-        <CsvBulkUpload
-          token={routeToken}
-          isLinkRoute={routeType === 'link'}
-          linkAccessToken={linkAccessToken || undefined}
-          onApplyLines={handleApplyCsvLines}
-          onClose={() => setShowCsvModal(false)}
-        />
       )}
 
       {/* Review & Submit Drawer */}

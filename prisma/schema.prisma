@@ -113,14 +113,15 @@ model CatalogVariantConfig {
   id               String   @id @default(uuid())
   catalogId        String
   shopifyVariantId String
-  enabled          Boolean  @default(true)
-  customPrice      Decimal? @db.Decimal(12, 2)
-  minQty           Int?     // Overrides catalog-level minQty if set
-  maxQty           Int?     // Overrides catalog-level maxQty if set
-  qtyIncrement     Int?     // Overrides catalog-level qtyIncrement if set
-  position         Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  enabled               Boolean  @default(true)
+  customPrice           Decimal? @db.Decimal(12, 2)
+  overrideQuantityRules Boolean  @default(false)
+  minQty                Int?     // Overrides catalog-level minQty if set
+  maxQty                Int?     // Overrides catalog-level maxQty if set
+  qtyIncrement          Int?     // Overrides catalog-level qtyIncrement if set
+  position              Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   catalog          Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
 

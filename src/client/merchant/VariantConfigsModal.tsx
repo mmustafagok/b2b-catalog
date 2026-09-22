@@ -6,6 +6,7 @@ interface VariantConfigItem {
   shopifyVariantId: string;
   enabled: boolean;
   customPrice: number | null;
+  overrideQuantityRules: boolean;
   minQty: number | null;
   maxQty: number | null;
   qtyIncrement: number | null;
@@ -39,7 +40,12 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
         const res = await authenticatedFetch(`/api/admin/catalogs/${catalog.id}/variant-configs`);
         if (res.ok) {
           const data = await res.json();
-          setConfigs(data.configs || []);
+          setConfigs(
+            (data.configs || []).map((c: any) => ({
+              ...c,
+              overrideQuantityRules: Boolean(c.overrideQuantityRules || c.minQty != null || c.maxQty != null || c.qtyIncrement != null),
+            }))
+          );
         }
       } catch (err: any) {
         onToast(`Error loading variant configs: ${err.message}`);
@@ -76,9 +82,10 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
         customPrice: c.customPrice !== null && c.customPrice !== undefined && c.customPrice !== ('' as any)
           ? Number(c.customPrice)
           : null,
-        minQty: c.minQty ? Number(c.minQty) : null,
-        maxQty: c.maxQty ? Number(c.maxQty) : null,
-        qtyIncrement: c.qtyIncrement ? Number(c.qtyIncrement) : null,
+        overrideQuantityRules: Boolean(c.overrideQuantityRules),
+        minQty: c.overrideQuantityRules && c.minQty ? Number(c.minQty) : null,
+        maxQty: c.overrideQuantityRules && c.maxQty ? Number(c.maxQty) : null,
+        qtyIncrement: c.overrideQuantityRules && c.qtyIncrement ? Number(c.qtyIncrement) : null,
       }));
 
       const res = await authenticatedFetch(`/api/admin/catalogs/${catalog.id}/variant-configs`, {
@@ -111,14 +118,18 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
     );
   });
 
+  const catMin = catalog.minQty || 1;
+  const catMax = catalog.maxQty || null;
+  const catStep = catalog.qtyIncrement || 1;
+
   return (
     <div className="cf-modal-backdrop" onClick={onClose}>
-      <div className="cf-modal cf-modal-xl" style={{ maxWidth: '900px' }} onClick={(e) => e.stopPropagation()}>
+      <div className="cf-modal cf-modal-xl" style={{ maxWidth: '960px' }} onClick={(e) => e.stopPropagation()}>
         <div className="cf-modal-header">
           <div>
             <h3>Configure Variants: {catalog.name}</h3>
             <p style={{ fontSize: '0.825rem', color: '#64748b' }}>
-              Selectively enable/disable variants and set variant-specific price or quantity rule overrides.
+              Selectively enable variants or override quantity rules per variant. Unchecked variants inherit catalog defaults automatically.
             </p>
           </div>
           <button type="button" className="cf-modal-close" onClick={onClose}>
@@ -137,7 +148,7 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
               onChange={(e) => setSearch(e.target.value)}
             />
             <span style={{ fontSize: '0.85rem', color: '#64748b' }}>
-              Showing {filteredConfigs.length} of {configs.length} variants
+              Catalog Defaults: Min <strong>{catMin}</strong> · Step <strong>{catStep}</strong> {catMax ? `· Max ${catMax}` : ''}
             </span>
           </div>
 
@@ -150,12 +161,13 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
               <table className="cf-table" style={{ fontSize: '0.85rem' }}>
                 <thead>
                   <tr>
-                    <th style={{ width: '60px' }}>Active</th>
+                    <th style={{ width: '50px' }}>Active</th>
                     <th>Product / Variant / SKU</th>
-                    <th style={{ width: '120px' }}>Custom Price ($)</th>
-                    <th style={{ width: '90px' }}>Min Qty</th>
-                    <th style={{ width: '90px' }}>Max Qty</th>
-                    <th style={{ width: '90px' }}>Step</th>
+                    <th style={{ width: '110px' }}>Custom Price</th>
+                    <th style={{ width: '130px' }}>Qty Rules Override</th>
+                    <th style={{ width: '80px' }}>Min Qty</th>
+                    <th style={{ width: '80px' }}>Max Qty</th>
+                    <th style={{ width: '80px' }}>Step</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -179,7 +191,7 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
                           type="number"
                           step="0.01"
                           min="0"
-                          placeholder="Default"
+                          placeholder="Retail"
                           className="cf-input cf-input-sm"
                           value={c.customPrice ?? ''}
                           disabled={!c.enabled}
@@ -187,13 +199,24 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
                         />
                       </td>
                       <td>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={c.overrideQuantityRules}
+                            disabled={!c.enabled}
+                            onChange={(e) => handleFieldChange(c.shopifyVariantId, 'overrideQuantityRules', e.target.checked)}
+                          />
+                          <span>Override</span>
+                        </label>
+                      </td>
+                      <td>
                         <input
                           type="number"
                           min="1"
-                          placeholder="Default"
+                          placeholder={String(catMin)}
                           className="cf-input cf-input-sm"
-                          value={c.minQty ?? ''}
-                          disabled={!c.enabled}
+                          value={c.overrideQuantityRules ? (c.minQty ?? '') : ''}
+                          disabled={!c.enabled || !c.overrideQuantityRules}
                           onChange={(e) => handleFieldChange(c.shopifyVariantId, 'minQty', e.target.value ? parseInt(e.target.value, 10) : null)}
                         />
                       </td>
@@ -201,10 +224,10 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
                         <input
                           type="number"
                           min="1"
-                          placeholder="None"
+                          placeholder={catMax ? String(catMax) : '∞'}
                           className="cf-input cf-input-sm"
-                          value={c.maxQty ?? ''}
-                          disabled={!c.enabled}
+                          value={c.overrideQuantityRules ? (c.maxQty ?? '') : ''}
+                          disabled={!c.enabled || !c.overrideQuantityRules}
                           onChange={(e) => handleFieldChange(c.shopifyVariantId, 'maxQty', e.target.value ? parseInt(e.target.value, 10) : null)}
                         />
                       </td>
@@ -212,10 +235,10 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
                         <input
                           type="number"
                           min="1"
-                          placeholder="1"
+                          placeholder={String(catStep)}
                           className="cf-input cf-input-sm"
-                          value={c.qtyIncrement ?? ''}
-                          disabled={!c.enabled}
+                          value={c.overrideQuantityRules ? (c.qtyIncrement ?? '') : ''}
+                          disabled={!c.enabled || !c.overrideQuantityRules}
                           onChange={(e) => handleFieldChange(c.shopifyVariantId, 'qtyIncrement', e.target.value ? parseInt(e.target.value, 10) : null)}
                         />
                       </td>

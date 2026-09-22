@@ -61,13 +61,7 @@ import {
   verifyPasscode,
   isOrderLinkExpired,
 } from './services/orderlink.server.js';
-import {
-  createReorderIntent,
-  getReorderIntentPayload,
-} from './services/reorder.server.js';
-import {
-  parseCsvBulkOrder,
-} from './services/bulkorder.server.js';
+
 import {
   recordAnalyticsEvent,
   ANALYTICS_EVENTS,
@@ -716,71 +710,7 @@ app.post('/api/public/link/:linkToken/submit', publicSubmitLimiter, async (req: 
   }
 });
 
-// 5. Reorder Intent API
-app.get('/api/public/reorder/:intentToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
-  try {
-    const { intentToken } = req.params;
-    const payload = await getReorderIntentPayload(intentToken);
-    return res.status(200).json(payload);
-  } catch (error: any) {
-    const statusCode = error.statusCode || 400;
-    return res.status(statusCode).json({ error: error.message || 'Reorder lookup failed', code: error.code });
-  }
-});
 
-// 6. CSV Bulk Order Validation API
-app.post('/api/public/catalog/:publicToken/bulk-validate', publicValidateLimiter, async (req: Request, res: Response) => {
-  try {
-    const { publicToken } = req.params;
-    const { csvText } = req.body;
-
-    if (!csvText || typeof csvText !== 'string') {
-      return res.status(400).json({ error: 'Missing csvText in request body' });
-    }
-
-    const catalog = await getPublishedCatalogByToken(publicToken);
-    if (!catalog) {
-      return res.status(404).json({ error: 'Catalog not found or unavailable' });
-    }
-
-    const result = await parseCsvBulkOrder(catalog.shopId, catalog.id, csvText);
-    return res.status(200).json(result);
-  } catch (error: any) {
-    return res.status(500).json({ error: sanitizeErrorMessage(error) });
-  }
-});
-
-app.post('/api/public/link/:linkToken/bulk-validate', publicValidateLimiter, async (req: Request, res: Response) => {
-  try {
-    const { linkToken } = req.params;
-    const { csvText } = req.body;
-    const linkAccessToken = (
-      req.get('X-Link-Access-Token') ||
-      req.get('x-link-access-token') ||
-      (req.body?.linkAccessToken as string) ||
-      undefined
-    )?.trim();
-
-    if (!csvText || typeof csvText !== 'string') {
-      return res.status(400).json({ error: 'Missing csvText in request body' });
-    }
-
-    const link = await getOrderLinkByToken(linkToken);
-    if (!link) {
-      return res.status(404).json({ error: 'Order link not found' });
-    }
-
-    const access = validateOrderLinkAccess(link, linkAccessToken);
-    if (!access.ok) {
-      return res.status(401).json({ error: 'Access denied to order link', reason: access.reason });
-    }
-
-    const result = await parseCsvBulkOrder(link.shopId, link.catalogId, csvText);
-    return res.status(200).json(result);
-  } catch (error: any) {
-    return res.status(500).json({ error: sanitizeErrorMessage(error) });
-  }
-});
 
 // ==========================================
 // SHOPIFY WEBHOOKS (FAIL CLOSED & IDEMPOTENCY STATE MACHINE)
@@ -1483,20 +1413,7 @@ app.post('/api/admin/submissions/:id/reconcile', adminAuthMiddleware, async (req
   }
 });
 
-// Create Reorder Link from Submission
-app.post('/api/admin/submissions/:id/reorder-link', adminAuthMiddleware, async (req: any, res: Response) => {
-  try {
-    const { expiresInDays } = req.body || {};
-    const intent = await createReorderIntent(req.params.id, req.shop.id, expiresInDays);
-    const host = req.get('host') || 'localhost:8080';
-    const protocol = req.protocol || 'https';
-    const reorderUrl = `${protocol}://${host}/reorder/${intent.token}`;
-    return res.status(201).json({ ...intent, reorderUrl });
-  } catch (err: any) {
-    const statusCode = err.statusCode || 400;
-    return res.status(statusCode).json({ error: err.message, code: err.code });
-  }
-});
+
 
 // Variant Configs (M10)
 app.get('/api/admin/catalogs/:id/variant-configs', adminAuthMiddleware, async (req: any, res: Response) => {

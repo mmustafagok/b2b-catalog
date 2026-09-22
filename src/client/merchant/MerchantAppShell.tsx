@@ -407,23 +407,6 @@ export const MerchantAppShell: React.FC = () => {
     loadData();
   };
 
-  const handleCreateReorderLink = async (submissionId: string) => {
-    try {
-      const res = await authenticatedFetch(`/api/admin/submissions/${submissionId}/reorder-link`, {
-        method: 'POST',
-        body: JSON.stringify({ expiresInDays: 30 }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Failed to create reorder link');
-      }
-      const data = await res.json();
-      navigator.clipboard.writeText(data.reorderUrl);
-      showToast('Reorder link copied to clipboard!');
-    } catch (err: any) {
-      showToast(`Error: ${err.message}`);
-    }
-  };
 
   const [createWizardTab, setCreateWizardTab] = useState<'sources' | 'pricing' | 'rules' | 'form'>('sources');
   const [createFormState, setCreateFormState] = useState<CatalogFormState>({
@@ -1053,15 +1036,6 @@ export const MerchantAppShell: React.FC = () => {
                                   </button>
                                 ) : (
                                   <span className="cf-text-muted">No Shopify Link</span>
-                                )}
-                                {sub.status === 'COMPLETED' && (
-                                  <button
-                                    className="cf-btn cf-btn-sm cf-btn-secondary"
-                                    onClick={() => handleCreateReorderLink(sub.id)}
-                                    title="Create shareable 1-click reorder link for this buyer"
-                                  >
-                                    🔄 Reorder Link
-                                  </button>
                                 )}
                               </div>
                             </td>

@@ -1,6 +1,6 @@
 import { prisma } from '../db.js';
 import { Prisma } from '@prisma/client';
-import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus, PriceMode } from '../types/index.js';
+import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus, PriceMode, resolveEffectiveQuantityRules } from '../types/index.js';
 import { calculateDisplayPrice, toDecimal, formatMoney, roundDecimal } from './pricing.server.js';
 import {
   reserveSubmissionQuotaSlot,
@@ -17,14 +17,6 @@ import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 import { sanitizeErrorMessage } from './security.server.js';
 import { SubmitStageTracker, recordRuntimeIncident } from './incident.server.js';
 import { validateOrderLinkAccess, recordOrderLinkSubmission, isOrderLinkExpired, verifyPasscode } from './orderlink.server.js';
-import {
-  claimReorderIntent,
-  releaseReorderIntentClaim,
-  commitReorderIntentUsed,
-  markReorderIntentReconciliationPending,
-  resetReorderIntentToAvailable,
-  ReorderIntentError,
-} from './reorder.server.js';
 import crypto from 'crypto';
 
 export class OrderSubmissionError extends Error {
@@ -345,15 +337,13 @@ export async function submitBuyerOrder(
     }
 
     // Server-side: enforce quantity rules
-    const effectiveMin = vcfg?.minQty ?? catalogMinQty;
-    const effectiveMax = vcfg?.maxQty ?? catalogMaxQty;
-    const effectiveIncrement = vcfg?.qtyIncrement ?? catalogQtyIncrement;
+    const { min: effectiveMin, max: effectiveMax, step: effectiveIncrement } = resolveEffectiveQuantityRules(catalog as any, vcfg);
     if (line.quantity < effectiveMin) {
       qtyRuleViolations.push({ variantId: line.variantId, detail: `Minimum quantity for ${snap.sku || line.variantId} is ${effectiveMin}` });
     } else if (effectiveMax !== null && line.quantity > effectiveMax) {
       qtyRuleViolations.push({ variantId: line.variantId, detail: `Maximum quantity for ${snap.sku || line.variantId} is ${effectiveMax}` });
-    } else if (effectiveIncrement > 1 && line.quantity % effectiveIncrement !== 0) {
-      qtyRuleViolations.push({ variantId: line.variantId, detail: `Quantity for ${snap.sku || line.variantId} must be a multiple of ${effectiveIncrement}` });
+    } else if (effectiveIncrement > 1 && (line.quantity - effectiveMin) % effectiveIncrement !== 0) {
+      qtyRuleViolations.push({ variantId: line.variantId, detail: `Quantity for ${snap.sku || line.variantId} must be in increments of ${effectiveIncrement} starting from ${effectiveMin}` });
     }
   }
 
@@ -394,19 +384,6 @@ export async function submitBuyerOrder(
     shopId: catalog.shopId,
   });
 
-  // 4. Claim Reorder Intent Atomically if provided
-  if (validated.reorderIntentToken) {
-    try {
-      await claimReorderIntent(validated.reorderIntentToken, correlationId);
-    } catch (reorderErr: any) {
-      tracker.transition('SUBMISSION_FAILED', reorderErr.code || 'REORDER_ERROR');
-      if (reorderErr instanceof ReorderIntentError) {
-        throw new OrderSubmissionError(reorderErr.message, reorderErr.statusCode, reorderErr.code);
-      }
-      throw reorderErr;
-    }
-  }
-
   // 5. Idempotency State Machine & Pre-Shopify Reservation
   const keyHash = hashIdempotencyKey(catalog.id, idempotencyKey.trim());
   let submission = await prisma.orderSubmission.findUnique({
@@ -422,15 +399,6 @@ export async function submitBuyerOrder(
 
   if (submission) {
     if (submission.status === 'COMPLETED') {
-      if (validated.reorderIntentToken) {
-        try {
-          await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
-        } catch (commitErr: any) {
-          if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
-            await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-          }
-        }
-      }
       return {
         success: true,
         submissionId: submission.id,
@@ -453,15 +421,6 @@ export async function submitBuyerOrder(
           quotaReserved: true,
         },
       });
-      if (validated.reorderIntentToken) {
-        try {
-          await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
-        } catch (commitErr: any) {
-          if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
-            await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-          }
-        }
-      }
       return {
         success: true,
         submissionId: completedSub.id,
@@ -502,9 +461,6 @@ export async function submitBuyerOrder(
     const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
     const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
     if (!slotReserved) {
-      if (validated.reorderIntentToken) {
-        await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
-      }
       throw new OrderSubmissionError(
         'Merchant order submission limit reached for their current plan. Please contact the merchant.',
         403,
@@ -532,14 +488,10 @@ export async function submitBuyerOrder(
           buyerName: validated.buyer.buyerName ?? null,
           buyerPhone: validated.buyer.phone ?? null,
           taxId: validated.buyer.taxId ?? null,
-          reorderIntentId: validated.reorderIntentToken ?? null,
         },
       });
     } catch (insertErr: any) {
       await releaseSubmissionQuotaSlotDirect(catalog.shopId, activeAnchor);
-      if (validated.reorderIntentToken) {
-        await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
-      }
       tracker.transition('SUBMISSION_FAILED', 'CONCURRENT_PROCESSING');
       throw new OrderSubmissionError(
         'Order submission is currently being processed by another worker',
@@ -629,16 +581,6 @@ export async function submitBuyerOrder(
           `draft_order_created:${updated.id}`
         );
 
-        if (validated.reorderIntentToken) {
-          try {
-            await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
-          } catch (commitErr: any) {
-            if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
-              await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-            }
-          }
-        }
-
         return {
           success: true,
           submissionId: updated.id,
@@ -678,9 +620,6 @@ export async function submitBuyerOrder(
       } else {
         // REQUIRES_RECONCILIATION or CREATING must NEVER automatically call draftOrderCreate!
         // Keep status REQUIRES_RECONCILIATION, keep quota slot reserved, throw RECONCILIATION_PENDING!
-        if (validated.reorderIntentToken) {
-          await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-        }
         throw new OrderSubmissionError(
           'We are still confirming the previous order attempt. Please retry shortly.',
           409,
@@ -688,9 +627,6 @@ export async function submitBuyerOrder(
         );
       }
     } catch (reconcileSearchErr: any) {
-      if (validated.reorderIntentToken) {
-        await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-      }
       if (reconcileSearchErr instanceof OrderSubmissionError) {
         throw reconcileSearchErr;
       }
@@ -747,9 +683,6 @@ export async function submitBuyerOrder(
     liveNodes = res.nodes || [];
   } catch (liveQueryErr: any) {
     await releaseSubmissionQuotaReservation(submission.id);
-    if (validated.reorderIntentToken) {
-      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Live variant verification failed' },
@@ -873,9 +806,6 @@ export async function submitBuyerOrder(
 
   if (inventoryChangedItems.length > 0) {
     await releaseSubmissionQuotaReservation(submission.id);
-    if (validated.reorderIntentToken) {
-      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Inventory changed during submit' },
@@ -913,9 +843,6 @@ export async function submitBuyerOrder(
 
   if (changedLines.length > 0) {
     await releaseSubmissionQuotaReservation(submission.id);
-    if (validated.reorderIntentToken) {
-      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: { status: 'FAILED', processingStartedAt: null, lastError: 'Catalog data changed during submit' },
@@ -1175,10 +1102,6 @@ export async function submitBuyerOrder(
       },
     });
 
-    if (validated.reorderIntentToken) {
-      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
-
     tracker.transition('SUBMISSION_FAILED', ambiguousCode);
 
     void recordRuntimeIncident({
@@ -1234,9 +1157,6 @@ export async function submitBuyerOrder(
     }).join('; ');
 
     await releaseSubmissionQuotaReservation(submission.id);
-    if (validated.reorderIntentToken) {
-      await releaseReorderIntentClaim(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
     await prisma.orderSubmission.update({
       where: { id: submission.id },
       data: {
@@ -1287,10 +1207,6 @@ export async function submitBuyerOrder(
         lastError: sanitizeErrorMessage(reasonMsg),
       },
     });
-
-    if (validated.reorderIntentToken) {
-      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
 
     tracker.transition('SUBMISSION_FAILED', 'SHOPIFY_API_ERROR');
 
@@ -1368,10 +1284,6 @@ export async function submitBuyerOrder(
       },
     }).catch(() => {});
 
-    if (validated.reorderIntentToken) {
-      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
-
     throw new OrderSubmissionError(
       `Your draft order was created in Shopify with reference ${createdDraft.name || 'pending'}. Please refresh to view order status.`,
       502,
@@ -1399,17 +1311,6 @@ export async function submitBuyerOrder(
   // Record order link analytics if this order was submitted via a named link
   if (resolvedOrderLinkId) {
     void recordOrderLinkSubmission(resolvedOrderLinkId, subtotalNumber).catch(() => {});
-  }
-
-  // Mark reorder intent as used if one was provided
-  if (validated.reorderIntentToken) {
-    try {
-      await commitReorderIntentUsed(validated.reorderIntentToken, correlationId);
-    } catch (commitErr: any) {
-      console.error('[ReorderIntent:CommitUsedFailed]', commitErr?.message);
-      // Invariant: Draft Order exists in Shopify. Never leave token AVAILABLE / reclaimable.
-      await markReorderIntentReconciliationPending(validated.reorderIntentToken, correlationId).catch(() => {});
-    }
   }
 
   tracker.transition('SUBMISSION_COMPLETED');
@@ -1759,16 +1660,6 @@ export async function reconcileSubmission(
       },
       `draft_order_created:${updated.id}`
     );
-
-    if (submission.reorderIntentId) {
-      try {
-        await commitReorderIntentUsed(submission.reorderIntentId);
-      } catch (commitErr: any) {
-        if (commitErr?.code !== 'REORDER_LINK_ALREADY_USED') {
-          await markReorderIntentReconciliationPending(submission.reorderIntentId).catch(() => {});
-        }
-      }
-    }
 
     return {
       reconciled: true,

@@ -193,6 +193,7 @@ async function _upsertVariantConfigs(
       update: {
         enabled: vc.enabled ?? true,
         customPrice: vc.customPrice ?? null,
+        overrideQuantityRules: vc.overrideQuantityRules ?? false,
         minQty: vc.minQty ?? null,
         maxQty: vc.maxQty ?? null,
         qtyIncrement: vc.qtyIncrement ?? null,
@@ -203,6 +204,7 @@ async function _upsertVariantConfigs(
         shopifyVariantId: vc.shopifyVariantId,
         enabled: vc.enabled ?? true,
         customPrice: vc.customPrice ?? null,
+        overrideQuantityRules: vc.overrideQuantityRules ?? false,
         minQty: vc.minQty ?? null,
         maxQty: vc.maxQty ?? null,
         qtyIncrement: vc.qtyIncrement ?? null,
@@ -263,6 +265,7 @@ export async function getCatalogVariantConfigs(catalogId: string, shopId: string
       imageUrl: v.imageUrl || v.product.imageUrl || null,
       enabled: override ? override.enabled : true,
       customPrice: override?.customPrice ? Number(override.customPrice) : null,
+      overrideQuantityRules: override ? override.overrideQuantityRules : false,
       minQty: override?.minQty ?? catalog.minQty ?? null,
       maxQty: override?.maxQty ?? catalog.maxQty ?? null,
       qtyIncrement: override?.qtyIncrement ?? catalog.qtyIncrement ?? null,

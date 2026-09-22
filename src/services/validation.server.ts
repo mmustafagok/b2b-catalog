@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { BuyerValidateOrderSchema } from '../types/index.js';
+import { BuyerValidateOrderSchema, resolveEffectiveQuantityRules } from '../types/index.js';
 import { calculateDisplayPrice, toDecimal, formatMoney } from './pricing.server.js';
 import { CatalogStatus, PriceMode } from '../types/index.js';
 import { Prisma } from '@prisma/client';
@@ -119,9 +119,7 @@ export async function validateBuyerOrderLines(
     }
 
     // Quantity rule validation
-    const effectiveMin = vcfg?.minQty ?? catalogMinQty;
-    const effectiveMax = vcfg?.maxQty ?? catalogMaxQty;
-    const effectiveIncrement = vcfg?.qtyIncrement ?? catalogQtyIncrement;
+    const { min: effectiveMin, max: effectiveMax, step: effectiveIncrement } = resolveEffectiveQuantityRules(catalog as any, vcfg);
 
     if (line.quantity < effectiveMin) {
       changedLines.push({
@@ -143,13 +141,13 @@ export async function validateBuyerOrderLines(
       });
       continue;
     }
-    if (effectiveIncrement > 1 && line.quantity % effectiveIncrement !== 0) {
+    if (effectiveIncrement > 1 && (line.quantity - effectiveMin) % effectiveIncrement !== 0) {
       changedLines.push({
         variantId: line.variantId,
         productTitle: snapshot.product.title,
         variantTitle: snapshot.title,
         reason: 'QTY_RULE',
-        detail: `Quantity must be a multiple of ${effectiveIncrement}`,
+        detail: `Quantity must be in increments of ${effectiveIncrement} starting from ${effectiveMin}`,
       });
       continue;
     }

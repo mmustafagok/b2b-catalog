@@ -1,6 +1,6 @@
 import { prisma } from '../db.js';
 import { calculateDisplayPrice, toDecimal, formatMoney, roundDecimal } from './pricing.server.js';
-import { CatalogSourceType, CatalogStatus } from '../types/index.js';
+import { CatalogSourceType, CatalogStatus, resolveEffectiveQuantityRules } from '../types/index.js';
 import { ShopifyAdminClient, createShopifyClient } from './shopify-client.server.js';
 import { Prisma } from '@prisma/client';
 
@@ -1329,6 +1329,7 @@ async function _buildCatalogPayload(
       shopifyVariantId: string;
       enabled: boolean;
       customPrice: any;
+      overrideQuantityRules: boolean;
       minQty: number | null;
       maxQty: number | null;
       qtyIncrement: number | null;
@@ -1489,9 +1490,7 @@ async function _buildCatalogPayload(
       }
 
       // Quantity rules: variant override → catalog default
-      const variantMinQty = vcfg?.minQty ?? catalogMinQty;
-      const variantMaxQty = vcfg?.maxQty ?? catalogMaxQty;
-      const variantQtyIncrement = vcfg?.qtyIncrement ?? catalogQtyIncrement;
+      const { min: variantMinQty, max: variantMaxQty, step: variantQtyIncrement } = resolveEffectiveQuantityRules(catalog as any, vcfg);
 
       return {
         id: v.id,

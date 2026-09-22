@@ -253,10 +253,11 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
             </button>
           </div>
 
-          <div className="cf-search-bar" style={{ marginBottom: '0.75rem' }}>
+          <div className="cf-search-bar" style={{ width: '100%', marginBottom: '0.75rem' }}>
             <input
               type="search"
               className="cf-input"
+              style={{ width: '100%', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '0.6rem 0.85rem', fontSize: '0.9rem' }}
               placeholder={
                 searchTab === 'COLLECTION'
                   ? 'Search Shopify collections by title…'

@@ -4,17 +4,15 @@
  * Canonical buyer URL formats:
  *   /c/<64 hex token>       (Standard public catalog)
  *   /l/<64 hex token>       (Wholesale Order Link)
- *   /reorder/<64 hex token> (One-click Reorder intent)
  * Optionally allow one trailing slash:
- *   /c/<token>/, /l/<token>/, /reorder/<token>/
+ *   /c/<token>/, /l/<token>/
  */
 
 export const CANONICAL_CATALOG_ROUTE_REGEX = /^\/c\/([a-f0-9]{64})\/?$/i;
 export const CANONICAL_BUYER_ROUTE_REGEX = CANONICAL_CATALOG_ROUTE_REGEX;
 export const CANONICAL_LINK_ROUTE_REGEX = /^\/l\/([a-f0-9]{64})\/?$/i;
-export const CANONICAL_REORDER_ROUTE_REGEX = /^\/reorder\/([a-f0-9]{64})\/?$/i;
 
-export type BuyerRouteType = 'catalog' | 'link' | 'reorder';
+export type BuyerRouteType = 'catalog' | 'link';
 
 export interface BuyerRouteParseResult {
   isBuyerRoute: boolean;
@@ -57,16 +55,6 @@ export function parseBuyerRoute(pathname: string): BuyerRouteParseResult {
     };
   }
 
-  // 3. Reorder intent route (/reorder/:token)
-  const reorderMatch = pathname.match(CANONICAL_REORDER_ROUTE_REGEX);
-  if (reorderMatch) {
-    return {
-      isBuyerRoute: true,
-      token: reorderMatch[1].toLowerCase(),
-      routeType: 'reorder',
-    };
-  }
-
   return { isBuyerRoute: false, token: null, routeType: null };
 }
 
@@ -77,3 +65,4 @@ export function isBuyerRoutePath(pathname: string): boolean {
 export function extractBuyerToken(pathname: string): string | null {
   return parseBuyerRoute(pathname).token;
 }
+
