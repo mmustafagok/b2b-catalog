@@ -183,6 +183,10 @@ async function _upsertVariantConfigs(
   configs: CatalogVariantConfigInput[]
 ) {
   for (const vc of configs) {
+    const isOverride = vc.overrideQuantityRules !== undefined
+      ? Boolean(vc.overrideQuantityRules)
+      : Boolean(vc.minQty != null || vc.maxQty != null || vc.qtyIncrement != null);
+
     await tx.catalogVariantConfig.upsert({
       where: {
         catalogId_shopifyVariantId: {
@@ -193,10 +197,10 @@ async function _upsertVariantConfigs(
       update: {
         enabled: vc.enabled ?? true,
         customPrice: vc.customPrice ?? null,
-        overrideQuantityRules: vc.overrideQuantityRules ?? false,
-        minQty: vc.minQty ?? null,
-        maxQty: vc.maxQty ?? null,
-        qtyIncrement: vc.qtyIncrement ?? null,
+        overrideQuantityRules: isOverride,
+        minQty: isOverride ? (vc.minQty ?? null) : null,
+        maxQty: isOverride ? (vc.maxQty ?? null) : null,
+        qtyIncrement: isOverride ? (vc.qtyIncrement ?? null) : null,
         position: vc.position ?? 0,
       },
       create: {
@@ -204,10 +208,10 @@ async function _upsertVariantConfigs(
         shopifyVariantId: vc.shopifyVariantId,
         enabled: vc.enabled ?? true,
         customPrice: vc.customPrice ?? null,
-        overrideQuantityRules: vc.overrideQuantityRules ?? false,
-        minQty: vc.minQty ?? null,
-        maxQty: vc.maxQty ?? null,
-        qtyIncrement: vc.qtyIncrement ?? null,
+        overrideQuantityRules: isOverride,
+        minQty: isOverride ? (vc.minQty ?? null) : null,
+        maxQty: isOverride ? (vc.maxQty ?? null) : null,
+        qtyIncrement: isOverride ? (vc.qtyIncrement ?? null) : null,
         position: vc.position ?? 0,
       },
     });
@@ -255,6 +259,7 @@ export async function getCatalogVariantConfigs(catalogId: string, shopId: string
   // 4. Overlay: every variant is returned with defaults + overrides
   return variants.map((v, index) => {
     const override = configMap.get(v.shopifyVariantId);
+    const hasOverride = Boolean(override?.overrideQuantityRules);
     return {
       shopifyVariantId: v.shopifyVariantId,
       shopifyProductId: v.shopifyProductId,
@@ -265,10 +270,10 @@ export async function getCatalogVariantConfigs(catalogId: string, shopId: string
       imageUrl: v.imageUrl || v.product.imageUrl || null,
       enabled: override ? override.enabled : true,
       customPrice: override?.customPrice ? Number(override.customPrice) : null,
-      overrideQuantityRules: override ? override.overrideQuantityRules : false,
-      minQty: override?.minQty ?? catalog.minQty ?? null,
-      maxQty: override?.maxQty ?? catalog.maxQty ?? null,
-      qtyIncrement: override?.qtyIncrement ?? catalog.qtyIncrement ?? null,
+      overrideQuantityRules: hasOverride,
+      minQty: hasOverride ? (override?.minQty ?? null) : (catalog.minQty ?? null),
+      maxQty: hasOverride ? (override?.maxQty ?? null) : (catalog.maxQty ?? null),
+      qtyIncrement: hasOverride ? (override?.qtyIncrement ?? null) : (catalog.qtyIncrement ?? null),
       position: override?.position ?? index,
     };
   });

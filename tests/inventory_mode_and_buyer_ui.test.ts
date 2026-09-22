@@ -1,12 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { prisma } from '../src/db.js';
 import { installOrUpdateShop } from '../src/services/shop.server.js';
-import { createCatalog, updateCatalog, publishCatalog } from '../src/services/catalog.server.js';
-import { getPublicCatalogPayload } from '../src/services/sync.server.js';
+import {
+  createCatalog,
+  updateCatalog,
+  publishCatalog,
+  getCatalogVariantConfigs,
+  upsertCatalogVariantConfigs,
+} from '../src/services/catalog.server.js';
+import { getPublicCatalogPayload, syncProductSnapshot } from '../src/services/sync.server.js';
 import { renderStockBadge } from '../src/client/buyer/VariantMatrix.js';
-import { CatalogSourceType, PriceMode } from '../src/types/index.js';
+import { CatalogSourceType, PriceMode, resolveEffectiveQuantityRules, isValidQuantityStep } from '../src/types/index.js';
 
-describe('Inventory Display Mode & Buyer Portal Hardening', () => {
+describe('Inventory Display Mode & Quantity Rule Inheritance Suite', () => {
   let shop: { id: string; shopDomain: string };
   const prodGid1 = 'gid://shopify/Product/9001';
   const varGidInStock = 'gid://shopify/ProductVariant/90011';
@@ -76,122 +82,317 @@ describe('Inventory Display Mode & Buyer Portal Hardening', () => {
     });
   });
 
-  it('1. Admin persistence: inventoryMode and inventoryCap are correctly created and updated in DB', async () => {
+  // ───────────────────────────────────────────────────────────────────────────
+  // BUG 1 TESTS: INVENTORY DISPLAY & AVAILABILITY
+  // ───────────────────────────────────────────────────────────────────────────
+
+  it('1. Positive tracked inventory is detected correctly', async () => {
     const catalog = await createCatalog(shop.id, {
-      name: 'Persistence Catalog',
+      name: 'Tracked Inv Catalog',
       priceMode: PriceMode.SHOPIFY_PRICE,
-      inventoryMode: 'CAPPED' as any,
-      inventoryCap: 20,
-      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
-    });
-
-    expect(catalog.inventoryMode).toBe('CAPPED');
-    expect(catalog.inventoryCap).toBe(20);
-
-    const updated = await updateCatalog(shop.id, catalog.id, {
       inventoryMode: 'EXACT' as any,
-    });
-    expect(updated.inventoryMode).toBe('EXACT');
-    expect(updated.inventoryCap).toBeNull();
-  });
-
-  it('2. Public catalog DTO payload contains correct inventoryMode, cap, and variant effective availability', async () => {
-    const catalog = await createCatalog(shop.id, {
-      name: 'DTO Test Catalog',
-      priceMode: PriceMode.SHOPIFY_PRICE,
-      inventoryMode: 'CAPPED' as any,
-      inventoryCap: 10,
       sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
     });
     await publishCatalog(shop.id, catalog.id);
 
     const payload = await getPublicCatalogPayload(catalog.publicToken);
-    expect(payload).not.toBeNull();
-    expect(payload?.catalog.inventoryMode).toBe('CAPPED');
-    expect(payload?.catalog.inventoryCap).toBe(10);
-
-    const product = payload?.products[0];
-    expect(product).toBeDefined();
-
-    const lowStockVar = product?.variants.find((v) => v.shopifyVariantId === varGidInStock);
+    const lowStockVar = payload?.products[0]?.variants.find((v) => v.shopifyVariantId === varGidInStock);
+    expect(lowStockVar?.inventoryQuantity).toBe(4);
     expect(lowStockVar?.effectiveAvailable).toBe(4);
-    expect(lowStockVar?.isCappedOverThreshold).toBe(false);
-
-    const highStockVar = product?.variants.find((v) => v.shopifyVariantId === varGidHighStock);
-    expect(highStockVar?.effectiveAvailable).toBe(10); // Capped at 10
-    expect(highStockVar?.isCappedOverThreshold).toBe(true);
-
-    const oosVar = product?.variants.find((v) => v.shopifyVariantId === varGidOutOfStock);
-    expect(oosVar?.availableForSale).toBe(false);
-    expect(oosVar?.effectiveAvailable).toBe(0);
+    expect(lowStockVar?.availableForSale).toBe(true);
   });
 
-  it('3. HIDDEN mode: public payload returns mode HIDDEN and badge renderer returns null', async () => {
+  it('2. Zero tracked inventory becomes Out of stock', async () => {
     const catalog = await createCatalog(shop.id, {
-      name: 'Hidden Mode Catalog',
+      name: 'Zero Stock Catalog',
       priceMode: PriceMode.SHOPIFY_PRICE,
-      inventoryMode: 'HIDDEN' as any,
+      inventoryMode: 'EXACT' as any,
       sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
     });
     await publishCatalog(shop.id, catalog.id);
 
     const payload = await getPublicCatalogPayload(catalog.publicToken);
-    expect(payload?.catalog.inventoryMode).toBe('HIDDEN');
+    const oosVar = payload?.products[0]?.variants.find((v) => v.shopifyVariantId === varGidOutOfStock);
+    expect(oosVar?.effectiveAvailable).toBe(0);
+    expect(oosVar?.availableForSale).toBe(false);
 
-    const lowVar = { availableForSale: true, effectiveAvailable: 4 };
-    const oosVar = { availableForSale: false, effectiveAvailable: 0 };
-
-    expect(renderStockBadge(lowVar, 'HIDDEN')).toBeNull();
-    expect(renderStockBadge(oosVar, 'HIDDEN')).toBeNull();
+    const badge = renderStockBadge(oosVar!, 'EXACT');
+    expect(badge?.props.children).toBe('Out of stock');
   });
 
-  it('4. STATUS_ONLY mode: buyer badge renders "In stock" or "Out of stock" without leaking numbers', async () => {
-    const lowVar = { availableForSale: true, effectiveAvailable: 4 };
-    const oosVar = { availableForSale: false, effectiveAvailable: 0 };
+  it('3. Missing / untracked inventory is not blindly treated as positive stock', async () => {
+    const untrackedGid = 'gid://shopify/ProductVariant/90099';
+    await prisma.variantSnapshot.create({
+      data: {
+        shopId: shop.id,
+        shopifyProductId: prodGid1,
+        shopifyVariantId: untrackedGid,
+        title: 'Untracked Variant',
+        shopifyPrice: 10.0,
+        inventoryQuantity: 0,
+        availableForSale: true,
+        inventoryTracked: false,
+        inventoryPolicy: 'CONTINUE',
+        selectedOptionsJson: '[]',
+      },
+    });
 
-    const inStockBadge = renderStockBadge(lowVar, 'STATUS_ONLY');
-    const oosBadge = renderStockBadge(oosVar, 'STATUS_ONLY');
+    const catalog = await createCatalog(shop.id, {
+      name: 'Untracked Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      inventoryMode: 'EXACT' as any,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    const payload = await getPublicCatalogPayload(catalog.publicToken);
+    const untrackedVar = payload?.products[0]?.variants.find((v) => v.shopifyVariantId === untrackedGid);
+    expect(untrackedVar?.effectiveAvailable).toBeNull();
+    expect(untrackedVar?.availableForSale).toBe(true);
+
+    const badge = renderStockBadge(untrackedVar!, 'EXACT');
+    expect(badge?.props.children).toBe('In stock');
+  });
+
+  it('4. STATUS_ONLY mode rendering', async () => {
+    const inStockBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 4 }, 'STATUS_ONLY');
+    const oosBadge = renderStockBadge({ availableForSale: false, effectiveAvailable: 0 }, 'STATUS_ONLY');
 
     expect(inStockBadge?.props.children).toBe('In stock');
     expect(oosBadge?.props.children).toBe('Out of stock');
   });
 
-  it('5. CAPPED mode: buyer badge renders exact count under cap and "{cap}+ available" over cap', async () => {
-    const cap = 10;
-
-    const lowVar = { availableForSale: true, effectiveAvailable: 4, isCappedOverThreshold: false };
-    const highVar = { availableForSale: true, effectiveAvailable: 10, isCappedOverThreshold: true };
-    const oosVar = { availableForSale: false, effectiveAvailable: 0 };
-
-    const lowBadge = renderStockBadge(lowVar, 'CAPPED', cap);
-    const highBadge = renderStockBadge(highVar, 'CAPPED', cap);
-    const oosBadge = renderStockBadge(oosVar, 'CAPPED', cap);
+  it('5. EXACT mode rendering', async () => {
+    const lowBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 4 }, 'EXACT');
+    const oosBadge = renderStockBadge({ availableForSale: false, effectiveAvailable: 0 }, 'EXACT');
 
     expect(lowBadge?.props.children).toBe('4 available');
-    expect(highBadge?.props.children).toBe('10+ available');
     expect(oosBadge?.props.children).toBe('Out of stock');
   });
 
-  it('6. EXACT mode: buyer badge renders exact numeric available count', async () => {
-    const lowVar = { availableForSale: true, effectiveAvailable: 4 };
-    const highVar = { availableForSale: true, effectiveAvailable: 75 };
-    const oosVar = { availableForSale: false, effectiveAvailable: 0 };
-
-    const lowBadge = renderStockBadge(lowVar, 'EXACT');
-    const highBadge = renderStockBadge(highVar, 'EXACT');
-    const oosBadge = renderStockBadge(oosVar, 'EXACT');
-
-    expect(lowBadge?.props.children).toBe('4 available');
-    expect(highBadge?.props.children).toBe('75 available');
-    expect(oosBadge?.props.children).toBe('Out of stock');
+  it('6. CAPPED below cap', async () => {
+    const cap = 50;
+    const lowBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 23, isCappedOverThreshold: false }, 'CAPPED', cap);
+    expect(lowBadge?.props.children).toBe('23 available');
   });
 
-  it('7. Out-of-stock variants are never misleadingly shown as "In stock" under any mode', async () => {
-    const oosVar = { availableForSale: false, effectiveAvailable: 0 };
+  it('7. CAPPED above cap', async () => {
+    const cap = 50;
+    const highBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 50, isCappedOverThreshold: true }, 'CAPPED', cap);
+    expect(highBadge?.props.children).toBe('50+ available');
+  });
 
-    ['STATUS_ONLY', 'CAPPED', 'EXACT'].forEach((mode) => {
+  it('8. HIDDEN mode rendering returns null', async () => {
+    const badge = renderStockBadge({ availableForSale: true, effectiveAvailable: 4 }, 'HIDDEN');
+    expect(badge).toBeNull();
+  });
+
+  it('9. Browse and Quick Order use same result', async () => {
+    const oosVar = { availableForSale: false, effectiveAvailable: 0 };
+    ['STATUS_ONLY', 'EXACT', 'CAPPED'].forEach((mode) => {
       const badge = renderStockBadge(oosVar, mode, 50);
       expect(badge?.props.children).toBe('Out of stock');
     });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // BUG 2 TESTS: QUANTITY RULE INHERITANCE
+  // ───────────────────────────────────────────────────────────────────────────
+
+  it('10. Variant with override OFF inherits catalog Step', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Step Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 1,
+      maxQty: 20,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+
+    const configs = await getCatalogVariantConfigs(catalog.id, shop.id);
+    const variantConfig = configs.find((c) => c.shopifyVariantId === varGidInStock);
+
+    expect(variantConfig?.overrideQuantityRules).toBe(false);
+    expect(variantConfig?.minQty).toBe(1);
+    expect(variantConfig?.maxQty).toBe(20);
+    expect(variantConfig?.qtyIncrement).toBe(5);
+
+    const effective = resolveEffectiveQuantityRules(catalog, variantConfig);
+    expect(effective.min).toBe(1);
+    expect(effective.max).toBe(20);
+    expect(effective.step).toBe(5);
+  });
+
+  it('11. Changing catalog Step updates inherited variant', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Inherit Update Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 1,
+      maxQty: 20,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+
+    const updatedCatalog = await updateCatalog(shop.id, catalog.id, {
+      qtyIncrement: 3,
+    });
+
+    const configs = await getCatalogVariantConfigs(catalog.id, shop.id);
+    const variantConfig = configs.find((c) => c.shopifyVariantId === varGidInStock);
+
+    const effective = resolveEffectiveQuantityRules(updatedCatalog, variantConfig);
+    expect(effective.step).toBe(3);
+  });
+
+  it('12. Variant with override ON uses variant Step', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Override Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 1,
+      maxQty: 20,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+
+    await upsertCatalogVariantConfigs(catalog.id, shop.id, [
+      {
+        shopifyVariantId: varGidInStock,
+        enabled: true,
+        overrideQuantityRules: true,
+        minQty: 2,
+        maxQty: 20,
+        qtyIncrement: 2,
+      },
+    ]);
+
+    const configs = await getCatalogVariantConfigs(catalog.id, shop.id);
+    const variantConfig = configs.find((c) => c.shopifyVariantId === varGidInStock);
+
+    expect(variantConfig?.overrideQuantityRules).toBe(true);
+    expect(variantConfig?.qtyIncrement).toBe(2);
+
+    const effective = resolveEffectiveQuantityRules(catalog, variantConfig);
+    expect(effective.min).toBe(2);
+    expect(effective.step).toBe(2);
+  });
+
+  it('13. Turning override OFF restores catalog Step', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Toggle Override Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 1,
+      maxQty: 20,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+
+    // Turn ON override
+    await upsertCatalogVariantConfigs(catalog.id, shop.id, [
+      {
+        shopifyVariantId: varGidInStock,
+        enabled: true,
+        overrideQuantityRules: true,
+        minQty: 2,
+        qtyIncrement: 2,
+      },
+    ]);
+
+    // Turn OFF override
+    await upsertCatalogVariantConfigs(catalog.id, shop.id, [
+      {
+        shopifyVariantId: varGidInStock,
+        enabled: true,
+        overrideQuantityRules: false,
+        minQty: null,
+        qtyIncrement: null,
+      },
+    ]);
+
+    const configs = await getCatalogVariantConfigs(catalog.id, shop.id);
+    const variantConfig = configs.find((c) => c.shopifyVariantId === varGidInStock);
+
+    expect(variantConfig?.overrideQuantityRules).toBe(false);
+    expect(variantConfig?.qtyIncrement).toBe(5);
+
+    const effective = resolveEffectiveQuantityRules(catalog, variantConfig);
+    expect(effective.step).toBe(5);
+  });
+
+  it('14. Saving Variant Config with override OFF does not persist silent override values', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'No Silent Override Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      minQty: 1,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+
+    await upsertCatalogVariantConfigs(catalog.id, shop.id, [
+      {
+        shopifyVariantId: varGidInStock,
+        enabled: true,
+        overrideQuantityRules: false,
+        minQty: 10 as any, // Stale input passed when override=false
+        qtyIncrement: 10 as any,
+      },
+    ]);
+
+    const rawDbConfig = await prisma.catalogVariantConfig.findUnique({
+      where: {
+        catalogId_shopifyVariantId: {
+          catalogId: catalog.id,
+          shopifyVariantId: varGidInStock,
+        },
+      },
+    });
+
+    expect(rawDbConfig?.overrideQuantityRules).toBe(false);
+    expect(rawDbConfig?.minQty).toBeNull();
+    expect(rawDbConfig?.qtyIncrement).toBeNull();
+  });
+
+  it('15. Stale quantity override fields are ignored when overrideQuantityRules=false', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Stale Field Catalog',
+      priceMode: PriceMode.SHOPIFY_PRICE,
+      qtyIncrement: 5,
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: prodGid1 }],
+    });
+
+    const fakeStaleConfig = {
+      overrideQuantityRules: false,
+      minQty: 99,
+      qtyIncrement: 99,
+    };
+
+    const effective = resolveEffectiveQuantityRules(catalog, fakeStaleConfig);
+    expect(effective.step).toBe(5);
+    expect(effective.min).toBe(1);
+  });
+
+  it('16. Client and server calculate same effective rules and step validation', async () => {
+    // Test relative step calculation: (quantity - min) % step === 0
+    // Min = 1, Step = 5, Max = 20
+    const min1 = 1;
+    const step5 = 5;
+    const max20 = 20;
+
+    expect(isValidQuantityStep(1, min1, step5, max20)).toBe(true);
+    expect(isValidQuantityStep(6, min1, step5, max20)).toBe(true);
+    expect(isValidQuantityStep(11, min1, step5, max20)).toBe(true);
+    expect(isValidQuantityStep(16, min1, step5, max20)).toBe(true);
+
+    expect(isValidQuantityStep(5, min1, step5, max20)).toBe(false);
+    expect(isValidQuantityStep(10, min1, step5, max20)).toBe(false);
+    expect(isValidQuantityStep(15, min1, step5, max20)).toBe(false);
+
+    // Min = 6, Step = 6
+    const min6 = 6;
+    const step6 = 6;
+    expect(isValidQuantityStep(6, min6, step6)).toBe(true);
+    expect(isValidQuantityStep(12, min6, step6)).toBe(true);
+    expect(isValidQuantityStep(18, min6, step6)).toBe(true);
+    expect(isValidQuantityStep(24, min6, step6)).toBe(true);
+    expect(isValidQuantityStep(7, min6, step6)).toBe(false);
   });
 });

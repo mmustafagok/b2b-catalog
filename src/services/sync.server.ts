@@ -12,6 +12,7 @@ export interface ShopifyWebhookProductVariant {
   sku?: string | null;
   barcode?: string | null;
   inventory_quantity?: number;
+  inventoryQuantity?: number;
   inventory_policy?: string;
   inventoryPolicy?: string;
   inventory_tracked?: boolean;
@@ -277,6 +278,7 @@ export async function syncProductSnapshot(
         if (v.option3 && product.options[2]) options.push({ name: product.options[2].name, value: v.option3 });
       }
 
+      const inventoryQuantity = v.inventoryQuantity ?? v.inventory_quantity ?? 0;
       const inventoryPolicy = (v.inventoryPolicy || v.inventory_policy || 'DENY').toUpperCase();
       const inventoryTracked = v.inventoryTracked !== undefined
         ? Boolean(v.inventoryTracked)
@@ -298,7 +300,7 @@ export async function syncProductSnapshot(
           sku: v.sku || null,
           barcode: v.barcode || null,
           shopifyPrice: priceDecimal,
-          inventoryQuantity: v.inventory_quantity ?? 0,
+          inventoryQuantity,
           inventoryPolicy,
           inventoryTracked,
           availableForSale: v.available ?? true,
@@ -315,7 +317,7 @@ export async function syncProductSnapshot(
           sku: v.sku || null,
           barcode: v.barcode || null,
           shopifyPrice: priceDecimal,
-          inventoryQuantity: v.inventory_quantity ?? 0,
+          inventoryQuantity,
           inventoryPolicy,
           inventoryTracked,
           availableForSale: v.available ?? true,
@@ -474,6 +476,8 @@ export async function fetchAllProductVariants(
         sku: v.sku,
         barcode: v.barcode,
         inventory_quantity: v.inventoryQuantity,
+        inventory_policy: v.inventoryPolicy,
+        inventory_tracked: v.inventoryItem?.tracked,
         available: v.availableForSale,
         selectedOptions: v.selectedOptions,
       });

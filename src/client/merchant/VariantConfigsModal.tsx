@@ -43,7 +43,7 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
           setConfigs(
             (data.configs || []).map((c: any) => ({
               ...c,
-              overrideQuantityRules: Boolean(c.overrideQuantityRules || c.minQty != null || c.maxQty != null || c.qtyIncrement != null),
+              overrideQuantityRules: Boolean(c.overrideQuantityRules),
             }))
           );
         }
@@ -67,26 +67,39 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
 
   const handleFieldChange = (variantId: string, field: keyof VariantConfigItem, val: any) => {
     setConfigs((prev) =>
-      prev.map((c) =>
-        c.shopifyVariantId === variantId ? { ...c, [field]: val } : c
-      )
+      prev.map((c) => {
+        if (c.shopifyVariantId !== variantId) return c;
+        if (field === 'overrideQuantityRules' && !val) {
+          return {
+            ...c,
+            overrideQuantityRules: false,
+            minQty: null,
+            maxQty: null,
+            qtyIncrement: null,
+          };
+        }
+        return { ...c, [field]: val };
+      })
     );
   };
 
   const handleSave = async () => {
     try {
       setSaving(true);
-      const payload = configs.map((c) => ({
-        shopifyVariantId: c.shopifyVariantId,
-        enabled: c.enabled,
-        customPrice: c.customPrice !== null && c.customPrice !== undefined && c.customPrice !== ('' as any)
-          ? Number(c.customPrice)
-          : null,
-        overrideQuantityRules: Boolean(c.overrideQuantityRules),
-        minQty: c.overrideQuantityRules && c.minQty ? Number(c.minQty) : null,
-        maxQty: c.overrideQuantityRules && c.maxQty ? Number(c.maxQty) : null,
-        qtyIncrement: c.overrideQuantityRules && c.qtyIncrement ? Number(c.qtyIncrement) : null,
-      }));
+      const payload = configs.map((c) => {
+        const isOverride = Boolean(c.overrideQuantityRules);
+        return {
+          shopifyVariantId: c.shopifyVariantId,
+          enabled: c.enabled,
+          customPrice: c.customPrice !== null && c.customPrice !== undefined && c.customPrice !== ('' as any)
+            ? Number(c.customPrice)
+            : null,
+          overrideQuantityRules: isOverride,
+          minQty: isOverride && c.minQty ? Number(c.minQty) : null,
+          maxQty: isOverride && c.maxQty ? Number(c.maxQty) : null,
+          qtyIncrement: isOverride && c.qtyIncrement ? Number(c.qtyIncrement) : null,
+        };
+      });
 
       const res = await authenticatedFetch(`/api/admin/catalogs/${catalog.id}/variant-configs`, {
         method: 'PUT',
