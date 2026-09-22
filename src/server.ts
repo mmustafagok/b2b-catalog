@@ -258,17 +258,20 @@ app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
 
 // 1. Get Public Catalog (M9.2 Tiered Rate Limiter)
 app.get('/api/public/catalog/:publicToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
+  const requestId = (req.get('X-Request-ID') || req.get('x-request-id') || crypto.randomUUID()).trim();
+  res.setHeader('X-Request-ID', requestId);
+
   try {
     const { publicToken } = req.params;
 
     if (!isValidPublicToken(publicToken)) {
-      return res.status(400).json({ error: 'Invalid catalog token format' });
+      return res.status(400).json({ error: 'Invalid catalog token format', requestId });
     }
 
     const payload = await getPublicCatalogPayload(publicToken);
 
     if (!payload) {
-      return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable' });
+      return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable', requestId });
     }
 
     // Safe non-blocking fire-and-forget analytics recording (never delays or breaks buyer load)
@@ -278,7 +281,25 @@ app.get('/api/public/catalog/:publicToken', publicCatalogGetLimiter, async (req:
 
     return res.status(200).json(payload);
   } catch (error: any) {
-    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+    console.error(`[PublicCatalog:Error] requestId=${requestId} route=/api/public/catalog/:publicToken code=${error?.code || error?.name || 'INTERNAL_ERROR'} message=${sanitizeErrorMessage(error)}`);
+    void recordRuntimeIncident({
+      type: 'PUBLIC_CATALOG_GET_ERROR',
+      requestId,
+      route: '/api/public/catalog/:publicToken',
+      errorCode: error?.code || error?.name || 'INTERNAL_ERROR',
+      message: sanitizeErrorMessage(error),
+      metadata: {
+        prismaCode: error?.code,
+        name: error?.name,
+        stack: error?.stack ? error.stack.slice(0, 1000) : undefined,
+      },
+    });
+
+    return res.status(500).json({
+      code: 'INTERNAL_ERROR',
+      message: 'Unable to load this wholesale catalog right now.',
+      requestId,
+    });
   }
 });
 
@@ -441,46 +462,70 @@ app.post('/api/public/catalog/:publicToken/submit', publicSubmitLimiter, async (
 
 // 4a. Unlock Passcode-Protected Order Link (POST body only, returns scoped access credential)
 app.post('/api/public/link/:linkToken/unlock', publicValidateLimiter, async (req: Request, res: Response) => {
+  const requestId = (req.get('X-Request-ID') || req.get('x-request-id') || crypto.randomUUID()).trim();
+  res.setHeader('X-Request-ID', requestId);
+
   try {
     const { linkToken } = req.params;
     const { passcode } = req.body || {};
 
     if (!passcode || typeof passcode !== 'string' || !passcode.trim()) {
-      return res.status(400).json({ error: 'Passcode is required', code: 'PASSCODE_REQUIRED' });
+      return res.status(400).json({ error: 'Passcode is required', code: 'PASSCODE_REQUIRED', requestId });
     }
 
     const link = await getOrderLinkByToken(linkToken);
     if (!link) {
-      return res.status(404).json({ error: 'Order link not found or unavailable', code: 'NOT_FOUND' });
+      return res.status(404).json({ error: 'Order link not found or unavailable', code: 'NOT_FOUND', requestId });
     }
 
     if (!link.active) {
-      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE' });
+      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE', requestId });
     }
 
     if (isOrderLinkExpired(link)) {
-      return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED' });
+      return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED', requestId });
     }
 
     if (!link.passcodeHash) {
       const linkAccessToken = generateOrderLinkAccessToken(link);
-      return res.status(200).json({ success: true, linkAccessToken });
+      return res.status(200).json({ success: true, linkAccessToken, requestId });
     }
 
     const isValid = verifyPasscode(passcode.trim(), link.passcodeHash);
     if (!isValid) {
-      return res.status(401).json({ error: 'Invalid passcode', code: 'PASSCODE_INVALID' });
+      return res.status(401).json({ error: 'Invalid passcode', code: 'PASSCODE_INVALID', requestId });
     }
 
     const linkAccessToken = generateOrderLinkAccessToken(link);
-    return res.status(200).json({ success: true, linkAccessToken });
+    return res.status(200).json({ success: true, linkAccessToken, requestId });
   } catch (error: any) {
-    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+    console.error(`[OrderLinkUnlock:Error] requestId=${requestId} route=/api/public/link/:linkToken/unlock code=${error?.code || error?.name || 'INTERNAL_ERROR'} message=${sanitizeErrorMessage(error)}`);
+    void recordRuntimeIncident({
+      type: 'PUBLIC_ORDER_LINK_UNLOCK_ERROR',
+      requestId,
+      route: '/api/public/link/:linkToken/unlock',
+      errorCode: error?.code || error?.name || 'INTERNAL_ERROR',
+      message: sanitizeErrorMessage(error),
+      metadata: {
+        prismaCode: error?.code,
+        name: error?.name,
+        stack: error?.stack ? error.stack.slice(0, 1000) : undefined,
+      },
+    });
+
+    return res.status(500).json({
+      code: 'INTERNAL_ERROR',
+      message: 'Unable to process passcode right now.',
+      requestId,
+    });
   }
 });
 
 // 4b. Fetch Catalog by Order Link Token
 app.get('/api/public/link/:linkToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
+  const requestId = (req.get('X-Request-ID') || req.get('x-request-id') || crypto.randomUUID()).trim();
+  res.setHeader('X-Request-ID', requestId);
+
   try {
     const { linkToken } = req.params;
     // Passcodes in query string or URL are strictly ignored / rejected.
@@ -494,15 +539,15 @@ app.get('/api/public/link/:linkToken', publicCatalogGetLimiter, async (req: Requ
 
     const link = await getOrderLinkByToken(linkToken);
     if (!link) {
-      return res.status(404).json({ error: 'Order link not found or unavailable' });
+      return res.status(404).json({ error: 'Order link not found or unavailable', requestId });
     }
 
     if (!link.active) {
-      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE' });
+      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE', requestId });
     }
 
     if (isOrderLinkExpired(link)) {
-      return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED' });
+      return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED', requestId });
     }
 
     const access = validateOrderLinkAccess(link, linkAccessToken);
@@ -524,17 +569,18 @@ app.get('/api/public/link/:linkToken', publicCatalogGetLimiter, async (req: Requ
           catalog: {
             name: link.catalog.name,
           },
+          requestId,
         });
       }
       if (access.reason === 'LINK_EXPIRED') {
-        return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED' });
+        return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED', requestId });
       }
-      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE' });
+      return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE', requestId });
     }
 
     const payload = await getPublicCatalogPayloadByLinkToken(linkToken);
     if (!payload) {
-      return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable' });
+      return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable', requestId });
     }
 
     // Session-based view deduplication (privacy-safe anonymous session window)
@@ -548,9 +594,36 @@ app.get('/api/public/link/:linkToken', publicCatalogGetLimiter, async (req: Requ
       void recordAnalyticsEvent(payload.shop.id, ANALYTICS_EVENTS.CATALOG_VIEWED, payload.catalog.id);
     }
 
-    return res.status(200).json(payload);
+    return res.status(200).json({
+      ...payload,
+      orderLink: {
+        id: link.id,
+        token: link.token,
+        label: link.label,
+        requiresPasscode: Boolean(link.passcodeHash),
+      },
+      requestId,
+    });
   } catch (error: any) {
-    return res.status(500).json({ error: sanitizeErrorMessage(error) });
+    console.error(`[OrderLinkGet:Error] requestId=${requestId} route=/api/public/link/:linkToken code=${error?.code || error?.name || 'INTERNAL_ERROR'} message=${sanitizeErrorMessage(error)}`);
+    void recordRuntimeIncident({
+      type: 'PUBLIC_ORDER_LINK_GET_ERROR',
+      requestId,
+      route: '/api/public/link/:linkToken',
+      errorCode: error?.code || error?.name || 'INTERNAL_ERROR',
+      message: sanitizeErrorMessage(error),
+      metadata: {
+        prismaCode: error?.code,
+        name: error?.name,
+        stack: error?.stack ? error.stack.slice(0, 1000) : undefined,
+      },
+    });
+
+    return res.status(500).json({
+      code: 'INTERNAL_ERROR',
+      message: 'Unable to load this wholesale catalog right now.',
+      requestId,
+    });
   }
 });
 
