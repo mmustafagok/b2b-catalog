@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { BuyerFormConfig } from '../../types/index.js';
 import { CatalogConfigurationForm, CatalogFormState } from './CatalogConfigurationForm.js';
+import { authenticatedFetch } from './appBridgeAuth.js';
 
 export interface CatalogSummary {
   id: string;
@@ -31,6 +32,7 @@ interface EditCatalogModalProps {
   catalog: CatalogSummary;
   onSave: (updates: Record<string, any>) => Promise<void>;
   onClose: () => void;
+  onDeleteSuccess?: (message: string) => void;
 }
 
 type EditTab = 'sources' | 'pricing' | 'rules' | 'form';
@@ -39,8 +41,11 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
   catalog,
   onSave,
   onClose,
+  onDeleteSuccess,
 }) => {
   const [activeTab, setActiveTab] = useState<EditTab>('sources');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const initialBuyerForm: BuyerFormConfig =
     typeof catalog.buyerFormConfig === 'string'
@@ -124,144 +129,262 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
     }
   };
 
+  const handleDeleteCatalog = async () => {
+    try {
+      setDeleting(true);
+      setError(null);
+      const res = await authenticatedFetch(`/api/admin/catalogs/${catalog.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || 'Failed to delete catalog');
+      }
+      setShowDeleteConfirm(false);
+      onDeleteSuccess?.(`Catalog "${catalog.name}" and all associated buyer links have been deleted.`);
+      onClose();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete catalog');
+      setShowDeleteConfirm(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
-    <div className="cf-modal-backdrop" onClick={onClose}>
-      <div className="cf-modal cf-modal-wide" onClick={(e) => e.stopPropagation()}>
-        {/* Modal Header */}
-        <div className="cf-modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <h3 style={{ margin: 0 }}>Edit Catalog: {catalog.name}</h3>
-            <span
-              className={`cf-badge ${
-                catalog.status === 'PUBLISHED' ? 'cf-badge-success' : 'cf-badge-outline'
-              }`}
-            >
-              {catalog.status}
-            </span>
+    <>
+      <div className="cf-modal-backdrop" onClick={onClose}>
+        <div className="cf-modal cf-modal-wide" onClick={(e) => e.stopPropagation()}>
+          {/* Modal Header */}
+          <div className="cf-modal-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <h3 style={{ margin: 0 }}>Edit Catalog: {catalog.name}</h3>
+              <span
+                className={`cf-badge ${
+                  catalog.status === 'PUBLISHED' ? 'cf-badge-success' : 'cf-badge-outline'
+                }`}
+              >
+                {catalog.status}
+              </span>
+            </div>
+            <button type="button" className="cf-close-btn" onClick={onClose}>
+              ✕
+            </button>
           </div>
-          <button type="button" className="cf-close-btn" onClick={onClose}>
-            ✕
-          </button>
-        </div>
 
-        {/* Modal Body & Navigation Tabs */}
-        <form onSubmit={handleSubmit}>
-          <div className="cf-modal-body" style={{ minHeight: '380px' }}>
-            {error && (
+          {/* Modal Body & Navigation Tabs */}
+          <form onSubmit={handleSubmit}>
+            <div className="cf-modal-body" style={{ minHeight: '380px' }}>
+              {error && (
+                <div
+                  style={{
+                    background: '#fee2e2',
+                    color: '#dc2626',
+                    padding: '0.65rem 0.85rem',
+                    borderRadius: '6px',
+                    marginBottom: '1rem',
+                    fontSize: '0.88rem',
+                  }}
+                >
+                  ⚠️ {error}
+                </div>
+              )}
+
+              {/* Navigation Tabs */}
               <div
+                className="cf-tab-header"
                 style={{
-                  background: '#fee2e2',
-                  color: '#dc2626',
-                  padding: '0.65rem 0.85rem',
-                  borderRadius: '6px',
-                  marginBottom: '1rem',
-                  fontSize: '0.88rem',
+                  display: 'flex',
+                  gap: '0.5rem',
+                  borderBottom: '1px solid #e2e8f0',
+                  marginBottom: '1.25rem',
+                  paddingBottom: '0.5rem',
                 }}
               >
-                ⚠️ {error}
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${activeTab === 'sources' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('sources')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: activeTab === 'sources' ? 700 : 500,
+                    color: activeTab === 'sources' ? '#108043' : '#64748b',
+                    borderBottom: activeTab === 'sources' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  📦 Products & Sources ({formState.sources.length})
+                </button>
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${activeTab === 'pricing' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('pricing')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: activeTab === 'pricing' ? 700 : 500,
+                    color: activeTab === 'pricing' ? '#108043' : '#64748b',
+                    borderBottom: activeTab === 'pricing' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  🏷️ Pricing & Inventory
+                </button>
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${activeTab === 'rules' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('rules')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: activeTab === 'rules' ? 700 : 500,
+                    color: activeTab === 'rules' ? '#108043' : '#64748b',
+                    borderBottom: activeTab === 'rules' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  ⚙️ Quantity & Appearance
+                </button>
+                <button
+                  type="button"
+                  className={`cf-tab-btn ${activeTab === 'form' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('form')}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: '0.45rem 0.85rem',
+                    fontWeight: activeTab === 'form' ? 700 : 500,
+                    color: activeTab === 'form' ? '#108043' : '#64748b',
+                    borderBottom: activeTab === 'form' ? '2px solid #108043' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  📋 Buyer Order Form
+                </button>
               </div>
-            )}
 
-            {/* Navigation Tabs */}
-            <div
-              className="cf-tab-header"
-              style={{
-                display: 'flex',
-                gap: '0.5rem',
-                borderBottom: '1px solid #e2e8f0',
-                marginBottom: '1.25rem',
-                paddingBottom: '0.5rem',
-              }}
-            >
-              <button
-                type="button"
-                className={`cf-tab-btn ${activeTab === 'sources' ? 'active' : ''}`}
-                onClick={() => setActiveTab('sources')}
+              {/* Render Shared Form */}
+              <CatalogConfigurationForm
+                formState={formState}
+                onChange={handleFormChange}
+                activeTab={activeTab}
+              />
+
+              {/* Danger Zone */}
+              <div
+                className="cf-danger-zone"
                 style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: '0.45rem 0.85rem',
-                  fontWeight: activeTab === 'sources' ? 700 : 500,
-                  color: activeTab === 'sources' ? '#108043' : '#64748b',
-                  borderBottom: activeTab === 'sources' ? '2px solid #108043' : '2px solid transparent',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem',
+                  marginTop: '2.5rem',
+                  padding: '1.25rem',
+                  borderRadius: '8px',
+                  border: '1px solid #fee2e2',
+                  backgroundColor: '#fff5f5',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '1rem',
+                  flexWrap: 'wrap',
                 }}
               >
-                📦 Products & Sources ({formState.sources.length})
-              </button>
-              <button
-                type="button"
-                className={`cf-tab-btn ${activeTab === 'pricing' ? 'active' : ''}`}
-                onClick={() => setActiveTab('pricing')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: '0.45rem 0.85rem',
-                  fontWeight: activeTab === 'pricing' ? 700 : 500,
-                  color: activeTab === 'pricing' ? '#108043' : '#64748b',
-                  borderBottom: activeTab === 'pricing' ? '2px solid #108043' : '2px solid transparent',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem',
-                }}
-              >
-                🏷️ Pricing & Inventory
-              </button>
-              <button
-                type="button"
-                className={`cf-tab-btn ${activeTab === 'rules' ? 'active' : ''}`}
-                onClick={() => setActiveTab('rules')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: '0.45rem 0.85rem',
-                  fontWeight: activeTab === 'rules' ? 700 : 500,
-                  color: activeTab === 'rules' ? '#108043' : '#64748b',
-                  borderBottom: activeTab === 'rules' ? '2px solid #108043' : '2px solid transparent',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem',
-                }}
-              >
-                ⚙️ Quantity & Appearance
-              </button>
-              <button
-                type="button"
-                className={`cf-tab-btn ${activeTab === 'form' ? 'active' : ''}`}
-                onClick={() => setActiveTab('form')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: '0.45rem 0.85rem',
-                  fontWeight: activeTab === 'form' ? 700 : 500,
-                  color: activeTab === 'form' ? '#108043' : '#64748b',
-                  borderBottom: activeTab === 'form' ? '2px solid #108043' : '2px solid transparent',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem',
-                }}
-              >
-                📋 Buyer Order Form
-              </button>
+                <div>
+                  <h4 style={{ margin: '0 0 0.25rem 0', color: '#b91c1c', fontSize: '0.9rem', fontWeight: 600 }}>
+                    Danger Zone
+                  </h4>
+                  <p style={{ margin: 0, fontSize: '0.825rem', color: '#64748b' }}>
+                    Permanently delete this catalog and all associated buyer links.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="cf-btn cf-btn-destructive"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={saving || deleting}
+                  style={{
+                    backgroundColor: '#dc2626',
+                    color: '#ffffff',
+                    border: '1px solid #b91c1c',
+                    padding: '0.45rem 0.9rem',
+                    borderRadius: '6px',
+                    fontWeight: 600,
+                    fontSize: '0.85rem',
+                    cursor: 'pointer',
+                    transition: 'background-color 0.15s ease',
+                  }}
+                >
+                  {deleting ? 'Deleting…' : 'Delete catalog'}
+                </button>
+              </div>
             </div>
 
-            {/* Render Shared Form */}
-            <CatalogConfigurationForm
-              formState={formState}
-              onChange={handleFormChange}
-              activeTab={activeTab}
-            />
-          </div>
-
-          {/* Modal Footer */}
-          <div className="cf-modal-footer">
-            <button type="button" className="cf-btn cf-btn-secondary" onClick={onClose} disabled={saving}>
-              Cancel
-            </button>
-            <button type="submit" className="cf-btn cf-btn-primary" disabled={saving}>
-              {saving ? 'Saving Changes…' : 'Save Catalog Changes'}
-            </button>
-          </div>
-        </form>
+            {/* Modal Footer */}
+            <div className="cf-modal-footer">
+              <button type="button" className="cf-btn cf-btn-secondary" onClick={onClose} disabled={saving}>
+                Cancel
+              </button>
+              <button type="submit" className="cf-btn cf-btn-primary" disabled={saving}>
+                {saving ? 'Saving Changes…' : 'Save Catalog Changes'}
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
-    </div>
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div
+          className="cf-modal-backdrop"
+          style={{ zIndex: 10001 }}
+          onClick={() => !deleting && setShowDeleteConfirm(false)}
+        >
+          <div
+            className="cf-modal cf-modal-sm"
+            style={{ maxWidth: '440px', padding: '1.5rem' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: '0 0 0.75rem 0', color: '#b91c1c', fontSize: '1.15rem' }}>
+              Delete Catalog Permanently
+            </h3>
+            <p style={{ color: '#475569', fontSize: '0.9rem', lineHeight: '1.5', margin: '0 0 1.5rem 0' }}>
+              Delete this catalog permanently? This will delete the catalog and all associated buyer links. This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+              <button
+                type="button"
+                className="cf-btn cf-btn-secondary"
+                disabled={deleting}
+                onClick={() => setShowDeleteConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cf-btn cf-btn-destructive"
+                disabled={deleting}
+                onClick={handleDeleteCatalog}
+                style={{
+                  backgroundColor: '#dc2626',
+                  color: '#ffffff',
+                  border: 'none',
+                  padding: '0.5rem 1rem',
+                  borderRadius: '6px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                {deleting ? 'Deleting…' : 'Delete permanently'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };

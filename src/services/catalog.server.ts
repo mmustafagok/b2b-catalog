@@ -525,8 +525,18 @@ export async function deleteCatalog(shopId: string, catalogId: string) {
     );
   }
 
-  return prisma.catalog.delete({
-    where: { id: catalogId },
+  return prisma.$transaction(async (tx) => {
+    // Clean up all order links, variant configs, overrides, sources, and intents
+    await tx.orderLink.deleteMany({ where: { catalogId } });
+    await tx.catalogVariantConfig.deleteMany({ where: { catalogId } });
+    await tx.catalogItemOverride.deleteMany({ where: { catalogId } });
+    await tx.catalogSource.deleteMany({ where: { catalogId } });
+    await tx.reorderIntent.deleteMany({ where: { catalogId } });
+    await tx.analyticsEvent.deleteMany({ where: { catalogId } });
+
+    return tx.catalog.delete({
+      where: { id: catalogId },
+    });
   });
 }
 

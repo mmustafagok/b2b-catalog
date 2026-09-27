@@ -1793,6 +1793,10 @@ export const MerchantAppShell: React.FC = () => {
           catalog={editingCatalog}
           onSave={handleSaveCatalog}
           onClose={() => setEditingCatalog(null)}
+          onDeleteSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
         />
       )}
 
