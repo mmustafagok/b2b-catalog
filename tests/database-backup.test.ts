@@ -20,6 +20,7 @@ import {
 import {
   runDatabaseBackup,
   sanitizeDatabaseUrlForLogging,
+  parsePostgresUrlToEnv,
 } from '../scripts/backup-database.js';
 import {
   runDatabaseRestore,
@@ -450,6 +451,205 @@ describe('Production-Safe Encrypted PostgreSQL Backup Architecture', () => {
       // Plaintext decrypted file MUST be deleted in finally block even after failure
       expect(capturedDecryptedPath).not.toBe('');
       expect(fs.existsSync(capturedDecryptedPath)).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // 5. DATABASE URL LIBPQ ENVIRONMENT CONNECTION & CREDENTIAL HYGIENE
+  // =========================================================================
+  describe('5. Database URL Libpq Environment Connection & Credential Hygiene', () => {
+    it('parses standard PostgreSQL URL into PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE', () => {
+      const env = parsePostgresUrlToEnv('postgresql://catalog_user:secret_pass_123@db.hostless.app:5432/catalogflow_db');
+
+      expect(env.PGHOST).toBe('db.hostless.app');
+      expect(env.PGPORT).toBe('5432');
+      expect(env.PGUSER).toBe('catalog_user');
+      expect(env.PGPASSWORD).toBe('secret_pass_123');
+      expect(env.PGDATABASE).toBe('catalogflow_db');
+      expect(env.PGSSLMODE).toBe('require');
+    });
+
+    it('defaults PGPORT to 5432 when port is omitted in URL', () => {
+      const env = parsePostgresUrlToEnv('postgres://u:p@db.hostless.app/catalogflow_db');
+      expect(env.PGPORT).toBe('5432');
+      expect(env.PGHOST).toBe('db.hostless.app');
+    });
+
+    it('correctly URL-decodes percent-encoded username, password, and database components', () => {
+      const encodedUrl = 'postgresql://b2b%40user.org:p%40ss%23word%21@db.hostless.app:5433/b2b%20catalog%20db';
+      const env = parsePostgresUrlToEnv(encodedUrl);
+
+      expect(env.PGUSER).toBe('b2b@user.org');
+      expect(env.PGPASSWORD).toBe('p@ss#word!');
+      expect(env.PGDATABASE).toBe('b2b catalog db');
+      expect(env.PGPORT).toBe('5433');
+      expect(env.PGHOST).toBe('db.hostless.app');
+    });
+
+    it('rejects malformed URLs and non-postgresql/postgres protocols', () => {
+      expect(() => parsePostgresUrlToEnv('')).toThrow(/Database URL is required/);
+      expect(() => parsePostgresUrlToEnv('not-a-valid-url')).toThrow(/Invalid database URL/);
+      expect(() => parsePostgresUrlToEnv('mysql://user:pass@db.hostless.app:3306/db')).toThrow(
+        /expected 'postgresql:' or 'postgres:'/
+      );
+      expect(() => parsePostgresUrlToEnv('http://user:pass@db.hostless.app/db')).toThrow(
+        /expected 'postgresql:' or 'postgres:'/
+      );
+      expect(() => parsePostgresUrlToEnv('redis://db.hostless.app:6379')).toThrow(
+        /expected 'postgresql:' or 'postgres:'/
+      );
+      expect(() => parsePostgresUrlToEnv('postgresql:///db_without_host')).toThrow(
+        /missing hostname/
+      );
+      expect(() => parsePostgresUrlToEnv('postgresql://user:pass@db.hostless.app:5432/')).toThrow(
+        /missing database name/
+      );
+    });
+
+    it('pg_dump receives Hostless host rather than falling back to localhost or Unix socket', async () => {
+      const tempDir = path.join(testDir, 'temp');
+      const outputDir = path.join(testDir, 'backups');
+
+      let capturedArgs: string[] = [];
+      let capturedEnv: NodeJS.ProcessEnv = {};
+
+      const mockDumpExecutor = async (args: string[], env: NodeJS.ProcessEnv) => {
+        capturedArgs = [...args];
+        capturedEnv = { ...env };
+        const fileArg = args.find((a) => a.startsWith('--file='));
+        if (fileArg) {
+          fs.writeFileSync(fileArg.replace('--file=', ''), 'MOCK_PG_DUMP_OUTPUT');
+        }
+        return { stdout: '', stderr: '' };
+      };
+
+      const backupUrl = 'postgresql://hostless_admin:very_secret_pwd_999@db-prod.hostless.app:5432/catalogflow_prod';
+
+      await runDatabaseBackup({
+        databaseBackupUrl: backupUrl,
+        backupEncryptionKey: testKeyBase64,
+        tempDir,
+        outputDir,
+        dumpExecutor: mockDumpExecutor,
+      });
+
+      // 1. Hostless host is set in PGHOST (not localhost or socket)
+      expect(capturedEnv.PGHOST).toBe('db-prod.hostless.app');
+      expect(capturedEnv.PGPORT).toBe('5432');
+      expect(capturedEnv.PGUSER).toBe('hostless_admin');
+      expect(capturedEnv.PGPASSWORD).toBe('very_secret_pwd_999');
+      expect(capturedEnv.PGDATABASE).toBe('catalogflow_prod');
+      expect(capturedEnv.PGSSLMODE).toBe('require');
+
+      // 2. Full DATABASE_BACKUP_URL is NOT present in command arguments
+      for (const arg of capturedArgs) {
+        expect(arg).not.toContain(backupUrl);
+        expect(arg).not.toContain('very_secret_pwd_999');
+        expect(arg).not.toContain('hostless_admin');
+        expect(arg).not.toContain('--dbname');
+      }
+
+      // 3. DATABASE_BACKUP_URL itself must NOT be forwarded as PGDATABASE
+      expect(capturedEnv.PGDATABASE).not.toContain('postgresql://');
+      expect(capturedEnv.PGDATABASE).toBe('catalogflow_prod');
+    });
+
+    it('pg_dump overrides conflicting ambient local PostgreSQL environment variables', async () => {
+      const tempDir = path.join(testDir, 'temp');
+      const outputDir = path.join(testDir, 'backups');
+
+      const originalPgHost = process.env.PGHOST;
+      const originalPgPort = process.env.PGPORT;
+      const originalPgDatabase = process.env.PGDATABASE;
+      const originalPgUser = process.env.PGUSER;
+      const originalPgPassword = process.env.PGPASSWORD;
+
+      try {
+        // Set conflicting local environment variables mimicking runner / local environment
+        process.env.PGHOST = '/var/run/postgresql';
+        process.env.PGPORT = '5433';
+        process.env.PGDATABASE = 'local_override_db';
+        process.env.PGUSER = 'local_user';
+        process.env.PGPASSWORD = 'local_password';
+
+        let capturedEnv: NodeJS.ProcessEnv = {};
+        const mockDumpExecutor = async (args: string[], env: NodeJS.ProcessEnv) => {
+          capturedEnv = { ...env };
+          const fileArg = args.find((a) => a.startsWith('--file='));
+          if (fileArg) {
+            fs.writeFileSync(fileArg.replace('--file=', ''), 'MOCK_DATA');
+          }
+          return { stdout: '', stderr: '' };
+        };
+
+        await runDatabaseBackup({
+          databaseBackupUrl: 'postgresql://remote_user:remote_pass@remote.hostless.app:5432/remote_db',
+          backupEncryptionKey: testKeyBase64,
+          tempDir,
+          outputDir,
+          dumpExecutor: mockDumpExecutor,
+        });
+
+        // Parsed PG* values must strictly override ambient values
+        expect(capturedEnv.PGHOST).toBe('remote.hostless.app');
+        expect(capturedEnv.PGPORT).toBe('5432');
+        expect(capturedEnv.PGDATABASE).toBe('remote_db');
+        expect(capturedEnv.PGUSER).toBe('remote_user');
+        expect(capturedEnv.PGPASSWORD).toBe('remote_pass');
+        expect(capturedEnv.PGSSLMODE).toBe('require');
+      } finally {
+        process.env.PGHOST = originalPgHost;
+        process.env.PGPORT = originalPgPort;
+        process.env.PGDATABASE = originalPgDatabase;
+        process.env.PGUSER = originalPgUser;
+        process.env.PGPASSWORD = originalPgPassword;
+      }
+    });
+
+    it('restore uses the same safe connection mechanism without passing secrets in command arguments', async () => {
+      const encryptedPath = path.join(testDir, 'restore_env_test.dump.enc');
+      fs.writeFileSync(encryptedPath, encryptBackupBuffer(Buffer.from('RESTORE_DATA'), testKeyBuffer));
+
+      let capturedArgs: string[] = [];
+      let capturedEnv: NodeJS.ProcessEnv = {};
+
+      const mockRestoreExecutor = async (args: string[], env: NodeJS.ProcessEnv) => {
+        capturedArgs = [...args];
+        capturedEnv = { ...env };
+        return { stdout: '', stderr: '' };
+      };
+
+      const restoreUrl = 'postgresql://restore_user:restore_secret_pass%21@restore-db.hostless.app:5432/restore_target_db';
+
+      const result = await runDatabaseRestore({
+        restoreDatabaseUrl: restoreUrl,
+        backupEncryptionKey: testKeyBase64,
+        backupFilePath: encryptedPath,
+        allowProductionRestore: true,
+        restoreExecutor: mockRestoreExecutor,
+      });
+
+      expect(result.success).toBe(true);
+
+      // 1. Connection environment is parsed properly
+      expect(capturedEnv.PGHOST).toBe('restore-db.hostless.app');
+      expect(capturedEnv.PGPORT).toBe('5432');
+      expect(capturedEnv.PGUSER).toBe('restore_user');
+      expect(capturedEnv.PGPASSWORD).toBe('restore_secret_pass!');
+      expect(capturedEnv.PGDATABASE).toBe('restore_target_db');
+      expect(capturedEnv.PGSSLMODE).toBe('require');
+
+      // 2. No credentials or URL in command arguments
+      for (const arg of capturedArgs) {
+        expect(arg).not.toContain(restoreUrl);
+        expect(arg).not.toContain('restore_secret_pass');
+        expect(arg).not.toContain('restore_user');
+        expect(arg).not.toContain('--dbname');
+      }
+
+      // 3. RESTORE_DATABASE_URL itself is NOT forwarded as PGDATABASE
+      expect(capturedEnv.PGDATABASE).not.toContain('postgresql://');
+      expect(capturedEnv.PGDATABASE).toBe('restore_target_db');
     });
   });
 });

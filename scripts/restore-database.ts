@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { parseBackupEncryptionKey, decryptBackupFile } from './backup-crypto.js';
-import { sanitizeDatabaseUrlForLogging } from './backup-database.js';
+import { sanitizeDatabaseUrlForLogging, parsePostgresUrlToEnv } from './backup-database.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -134,10 +134,10 @@ export async function runDatabaseRestore(options: RestoreOptions = {}): Promise<
       tempPlaintextDumpPath,
     ];
 
-    const restoreEnv = {
+    const libpqEnv = parsePostgresUrlToEnv(restoreUrl);
+    const restoreEnv: NodeJS.ProcessEnv = {
       ...process.env,
-      PGDATABASE: restoreUrl,
-      PGSSLMODE: process.env.PGSSLMODE || 'require',
+      ...libpqEnv,
     };
 
     if (options.restoreExecutor) {

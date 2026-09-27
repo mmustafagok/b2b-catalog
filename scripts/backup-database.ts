@@ -23,6 +23,67 @@ export interface BackupResult {
   timestamp: string;
 }
 
+export interface LibpqEnvConfig {
+  PGHOST: string;
+  PGPORT: string;
+  PGUSER?: string;
+  PGPASSWORD?: string;
+  PGDATABASE: string;
+  PGSSLMODE: string;
+}
+
+/**
+ * Parses a PostgreSQL connection string into standard libpq environment variables.
+ * Decodes percent-encoded components and ensures the remote host, port, credentials,
+ * and database are set explicitly so pg_dump/pg_restore never falls back to local sockets.
+ */
+export function parsePostgresUrlToEnv(rawUrl: string): LibpqEnvConfig {
+  if (!rawUrl || typeof rawUrl !== 'string' || rawUrl.trim() === '') {
+    throw new Error('Database URL is required and cannot be empty.');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch (err: any) {
+    throw new Error(`Invalid database URL: failed to parse connection string (${err?.message || 'malformed URL'}).`);
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== 'postgres:' && protocol !== 'postgresql:') {
+    throw new Error(`Invalid database URL protocol '${parsed.protocol}': expected 'postgresql:' or 'postgres:'.`);
+  }
+
+  if (!parsed.hostname) {
+    throw new Error('Invalid database URL: missing hostname.');
+  }
+
+  const rawPath = parsed.pathname.replace(/^\//, '').split('?')[0].trim();
+  if (!rawPath) {
+    throw new Error('Invalid database URL: missing database name.');
+  }
+  const databaseName = decodeURIComponent(rawPath);
+
+  const sslmodeParam = parsed.searchParams.get('sslmode');
+  const pgsslmode = sslmodeParam || 'require';
+
+  const envConfig: LibpqEnvConfig = {
+    PGHOST: decodeURIComponent(parsed.hostname),
+    PGPORT: parsed.port || '5432',
+    PGDATABASE: databaseName,
+    PGSSLMODE: pgsslmode,
+  };
+
+  if (parsed.username) {
+    envConfig.PGUSER = decodeURIComponent(parsed.username);
+  }
+  if (parsed.password) {
+    envConfig.PGPASSWORD = decodeURIComponent(parsed.password);
+  }
+
+  return envConfig;
+}
+
 /**
  * Sanitizes connection strings for safe logging (removes password/credentials).
  */
@@ -46,6 +107,8 @@ export function sanitizeDatabaseUrlForLogging(rawUrl: string): string {
  * 2. Uses AES-256-GCM authenticated encryption with a validated 32-byte key.
  * 3. Plaintext pg_dump file is deleted in a finally block under all circumstances (success or error).
  * 4. Outputs only authenticated .dump.enc files.
+ * 5. Passes connection parameters via parsed libpq environment variables (PGHOST, PGPORT, etc.)
+ *    so credentials never appear in process command arguments and connection never falls back to localhost.
  */
 export async function runDatabaseBackup(options: BackupOptions = {}): Promise<BackupResult> {
   const backupUrl = options.databaseBackupUrl ?? process.env.DATABASE_BACKUP_URL;
@@ -54,6 +117,9 @@ export async function runDatabaseBackup(options: BackupOptions = {}): Promise<Ba
       'DATABASE_BACKUP_URL is required for database backups. Refusing to fall back to DATABASE_URL.'
     );
   }
+
+  // Parse connection URL to validate protocol, hostname, and extract libpq variables
+  const libpqEnv = parsePostgresUrlToEnv(backupUrl);
 
   const keyBase64 = options.backupEncryptionKey ?? process.env.BACKUP_ENCRYPTION_KEY;
   const key = parseBackupEncryptionKey(keyBase64);
@@ -90,10 +156,11 @@ export async function runDatabaseBackup(options: BackupOptions = {}): Promise<Ba
       `--file=${tempPlaintextDumpPath}`,
     ];
 
-    const dumpEnv = {
+    // Pass connection parameters via libpq environment variables (PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE)
+    // Overrides any local socket defaults, and DATABASE_BACKUP_URL is NOT passed as PGDATABASE.
+    const dumpEnv: NodeJS.ProcessEnv = {
       ...process.env,
-      PGDATABASE: backupUrl,
-      PGSSLMODE: process.env.PGSSLMODE || 'require',
+      ...libpqEnv,
     };
 
     if (options.dumpExecutor) {
