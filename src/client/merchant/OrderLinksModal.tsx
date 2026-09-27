@@ -113,6 +113,9 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
 
   const getBuyerUrl = (token: string) => {
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    if (token === catalog.publicToken) {
+      return `${origin}/c/${token}`;
+    }
     return `${origin}/l/${token}`;
   };
 
@@ -150,6 +153,7 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
     }
   };
 
+  const defaultLink = links.find((l) => l.token === catalog.publicToken);
   const defaultBuyerUrl = typeof window !== 'undefined' ? `${window.location.origin}/c/${catalog.publicToken}` : `/c/${catalog.publicToken}`;
   const handleCopyDefaultLink = () => {
     navigator.clipboard.writeText(defaultBuyerUrl);
@@ -176,14 +180,24 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
           <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1.25rem', marginBottom: '1.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.75rem' }}>
               <div>
-                <h4 style={{ margin: '0 0 0.25rem 0', fontSize: '0.95rem', fontWeight: 600, color: '#0f172a' }}>
-                  Default Buyer Link (Quick Share)
-                </h4>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                  <h4 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600, color: '#0f172a' }}>
+                    Default Buyer Link (Quick Share)
+                  </h4>
+                  {defaultLink && (
+                    <span
+                      className={`cf-badge ${defaultLink.active ? 'cf-badge-success' : 'cf-badge-outline'}`}
+                      style={!defaultLink.active ? { background: '#fee2e2', color: '#991b1b', borderColor: '#fca5a5' } : undefined}
+                    >
+                      {defaultLink.active ? 'Active' : 'Inactive'}
+                    </span>
+                  )}
+                </div>
                 <p style={{ margin: 0, fontSize: '0.82rem', color: '#64748b' }}>
                   The direct, unrestricted catalog URL for quick sharing via email, WhatsApp, or messages.
                 </p>
               </div>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                 <button
                   type="button"
                   className="cf-btn cf-btn-sm cf-btn-secondary"
@@ -191,6 +205,16 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                 >
                   📋 Copy Link
                 </button>
+                {defaultLink && (
+                  <button
+                    type="button"
+                    className={`cf-btn cf-btn-sm ${defaultLink.active ? 'cf-btn-outline' : 'cf-btn-primary'}`}
+                    onClick={() => handleToggleActive(defaultLink)}
+                    title={defaultLink.active ? 'Deactivate default buyer link' : 'Activate default buyer link'}
+                  >
+                    {defaultLink.active ? 'Deactivate' : 'Activate'}
+                  </button>
+                )}
                 <a
                   href={`/c/${catalog.publicToken}`}
                   target="_blank"
@@ -201,6 +225,11 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                 </a>
               </div>
             </div>
+            {defaultLink && !defaultLink.active && (
+              <div style={{ padding: '0.5rem 0.75rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '6px', fontSize: '0.8rem', color: '#991b1b', marginBottom: '0.75rem' }}>
+                ⚠️ This default link is currently deactivated. Buyers visiting this link will see an inactive message and cannot submit orders.
+              </div>
+            )}
             <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '0.45rem 0.75rem', fontSize: '0.82rem', fontFamily: 'monospace', color: '#334155', wordBreak: 'break-all' }}>
               {defaultBuyerUrl}
             </div>
@@ -319,11 +348,16 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                       <tr key={link.id}>
                         <td>
                           <strong>{link.label}</strong>
+                          {link.token === catalog.publicToken && (
+                            <span className="cf-badge cf-badge-secondary" style={{ marginLeft: '0.35rem', fontSize: '0.7rem' }}>
+                              Default
+                            </span>
+                          )}
                           {link.source && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>Source: {link.source}</div>}
                         </td>
                         <td>
                           <code style={{ fontSize: '0.75rem', background: '#f1f5f9', padding: '0.2rem 0.4rem', borderRadius: '4px' }}>
-                            /l/{link.token.slice(0, 10)}...
+                            {link.token === catalog.publicToken ? '/c/' : '/l/'}{link.token.slice(0, 10)}...
                           </code>
                         </td>
                         <td>

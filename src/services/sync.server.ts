@@ -1291,6 +1291,17 @@ export async function getPublicCatalogPayload(publicToken: string) {
     return null;
   }
 
+  // Check if default OrderLink is deactivated or expired
+  const defaultLink = await prisma.orderLink.findUnique({
+    where: { token: publicToken },
+  });
+  if (defaultLink && !defaultLink.active) {
+    return null;
+  }
+  if (defaultLink && defaultLink.expiresAt && new Date() > defaultLink.expiresAt) {
+    return null;
+  }
+
   return _buildCatalogPayload(catalog);
 }
 

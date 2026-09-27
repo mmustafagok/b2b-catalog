@@ -305,6 +305,31 @@ app.get('/api/public/catalog/:publicToken', publicCatalogGetLimiter, async (req:
       return res.status(400).json({ error: 'Invalid catalog token format', requestId });
     }
 
+    const defaultLink = await prisma.orderLink.findUnique({
+      where: { token: publicToken },
+    });
+    if (defaultLink) {
+      const access = validateOrderLinkAccess(defaultLink, req.get('X-Link-Access-Token'));
+      if (!access.ok) {
+        if (access.reason === 'PASSCODE_REQUIRED') {
+          return res.status(401).json({
+            error: 'Passcode required to access this wholesale link',
+            code: 'PASSCODE_REQUIRED',
+            orderLink: {
+              id: defaultLink.id,
+              label: defaultLink.label,
+              requiresPasscode: true,
+            },
+            requestId,
+          });
+        }
+        if (access.reason === 'LINK_EXPIRED') {
+          return res.status(410).json({ error: 'This order link has expired', code: 'LINK_EXPIRED', requestId });
+        }
+        return res.status(403).json({ error: 'Order link is inactive', code: 'LINK_INACTIVE', requestId });
+      }
+    }
+
     const payload = await getPublicCatalogPayload(publicToken);
 
     if (!payload) {

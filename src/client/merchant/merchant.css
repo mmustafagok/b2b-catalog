@@ -372,13 +372,30 @@ body {
   background: #ffffff;
   border: 1px solid var(--cf-border);
   border-radius: 10px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .cf-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   text-align: left;
+}
+
+.cf-table thead tr:first-child th:first-child {
+  border-top-left-radius: 9px;
+}
+
+.cf-table thead tr:first-child th:last-child {
+  border-top-right-radius: 9px;
+}
+
+.cf-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: 9px;
+}
+
+.cf-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: 9px;
 }
 
 .cf-table th {
@@ -1357,20 +1374,30 @@ body {
   display: inline-block;
 }
 
+.cf-dropdown-container.open {
+  z-index: 1000;
+}
+
 .cf-dropdown-menu {
   position: absolute;
-  top: 100%;
+  top: calc(100% + 4px);
   right: 0;
-  margin-top: 4px;
   background: #ffffff;
   border: 1px solid var(--cf-border);
   border-radius: 8px;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
-  min-width: 190px;
-  z-index: 100;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  min-width: 200px;
+  z-index: 1000;
   display: flex;
   flex-direction: column;
   padding: 0.35rem 0;
+}
+
+.cf-dropdown-menu.dropup {
+  top: auto;
+  bottom: calc(100% + 4px);
+  margin-top: 0;
+  box-shadow: 0 -10px 25px -5px rgba(0, 0, 0, 0.15), 0 -8px 10px -6px rgba(0, 0, 0, 0.1);
 }
 
 .cf-dropdown-item {

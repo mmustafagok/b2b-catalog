@@ -6,8 +6,8 @@ import { app } from '../src/server.js';
 import { prisma } from '../src/db.js';
 import { installOrUpdateShop } from '../src/services/shop.server.js';
 import { createCatalog, publishCatalog, upsertCatalogVariantConfigs } from '../src/services/catalog.server.js';
-import { createOrderLink } from '../src/services/orderlink.server.js';
-import { syncProductSnapshot, getPublicCatalogPayloadByLinkToken } from '../src/services/sync.server.js';
+import { createOrderLink, updateOrderLink, getOrderLinksForCatalog } from '../src/services/orderlink.server.js';
+import { syncProductSnapshot, getPublicCatalogPayloadByLinkToken, getPublicCatalogPayload } from '../src/services/sync.server.js';
 import { CatalogSourceType, PriceMode, resolveEffectiveQuantityRules } from '../src/types/index.js';
 
 describe('Production Fix: Order Link HTTP 500 & Quantity Rule Override Migration', () => {
@@ -274,5 +274,71 @@ describe('Production Fix: Order Link HTTP 500 & Quantity Rule Override Migration
     await new Promise((r) => setTimeout(r, 50));
     const check2 = await prisma.orderLink.findUnique({ where: { id: link.id } });
     expect(check2?.views).toBe(1); // STILL 1!
+  });
+
+  it('10. Deactivating default buyer link blocks public catalog access and order submission with 403 LINK_INACTIVE', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Deactivatable Default Link Catalog',
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/8801' }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    // Verify default link was created and is active
+    const links = await getOrderLinksForCatalog(catalog.id, shop.id);
+    const defaultLink = links.find((l) => l.token === catalog.publicToken);
+    expect(defaultLink).toBeDefined();
+    expect(defaultLink?.active).toBe(true);
+
+    // Initial check: public catalog loads fine
+    const activeRes = await request(app).get(`/api/public/catalog/${catalog.publicToken}`);
+    expect(activeRes.status).toBe(200);
+
+    // Deactivate the default buyer link
+    await updateOrderLink(defaultLink!.id, shop.id, { active: false });
+
+    // Verify GET /api/public/catalog/:publicToken returns 403 LINK_INACTIVE
+    const inactiveRes = await request(app).get(`/api/public/catalog/${catalog.publicToken}`);
+    expect(inactiveRes.status).toBe(403);
+    expect(inactiveRes.body.code).toBe('LINK_INACTIVE');
+
+    // Verify getPublicCatalogPayload returns null
+    const payload = await getPublicCatalogPayload(catalog.publicToken);
+    expect(payload).toBeNull();
+
+    // Verify buyer submission via default link endpoint is rejected with 403
+    const submitRes = await request(app)
+      .post(`/api/public/catalog/${catalog.publicToken}/submit`)
+      .set('Idempotency-Key', 'test-inactive-default-link-submit')
+      .send({
+        dataVersion: 1,
+        lines: [{ variantId: 'gid://shopify/ProductVariant/9901', quantity: 2 }],
+        buyer: { businessName: 'Acme Wholesaler', email: 'buyer@example.com' },
+      });
+    expect(submitRes.status).toBe(403);
+    expect(submitRes.body.code).toBe('LINK_INACTIVE');
+  });
+
+  it('11. Reactivating default buyer link restores catalog access and allows submissions', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Reactivatable Catalog',
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/8801' }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    const links = await getOrderLinksForCatalog(catalog.id, shop.id);
+    const defaultLink = links.find((l) => l.token === catalog.publicToken)!;
+
+    // Deactivate then reactivate
+    await updateOrderLink(defaultLink.id, shop.id, { active: false });
+    const checkInactive = await request(app).get(`/api/public/catalog/${catalog.publicToken}`);
+    expect(checkInactive.status).toBe(403);
+
+    await updateOrderLink(defaultLink.id, shop.id, { active: true });
+    const checkActive = await request(app).get(`/api/public/catalog/${catalog.publicToken}`);
+    expect(checkActive.status).toBe(200);
+
+    const payload = await getPublicCatalogPayload(catalog.publicToken);
+    expect(payload).not.toBeNull();
+    expect(payload?.catalog.id).toBe(catalog.id);
   });
 });

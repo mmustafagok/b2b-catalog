@@ -184,6 +184,24 @@ export async function createOrderLink(
 }
 
 export async function getOrderLinksForCatalog(catalogId: string, shopId: string) {
+  const catalog = await prisma.catalog.findFirst({ where: { id: catalogId, shopId } });
+  if (catalog && catalog.publicToken) {
+    const existingDefault = await prisma.orderLink.findUnique({
+      where: { token: catalog.publicToken },
+    });
+    if (!existingDefault) {
+      await prisma.orderLink.create({
+        data: {
+          catalogId,
+          shopId,
+          token: catalog.publicToken,
+          label: 'Default Link',
+          active: true,
+        },
+      });
+    }
+  }
+
   return prisma.orderLink.findMany({
     where: { catalogId, shopId },
     orderBy: { createdAt: 'asc' },

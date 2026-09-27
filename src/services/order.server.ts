@@ -206,13 +206,14 @@ export async function submitBuyerOrder(
   });
   tracker.transition('CATALOG_VALIDATED');
 
-  // 1b. Order Link validation (if order was submitted via a link token)
+  // 1b. Order Link validation (if order was submitted via a link token or default link)
   let resolvedOrderLinkId: string | null = null;
-  if (validated.orderLinkToken) {
-    const orderLink = await prisma.orderLink.findUnique({
-      where: { token: validated.orderLinkToken },
-    });
-    if (!orderLink || orderLink.catalogId !== catalog.id) {
+  const linkTokenToValidate = validated.orderLinkToken || publicToken;
+  const orderLink = await prisma.orderLink.findUnique({
+    where: { token: linkTokenToValidate },
+  });
+  if (orderLink) {
+    if (orderLink.catalogId !== catalog.id) {
       tracker.transition('SUBMISSION_FAILED', 'INVALID_LINK');
       throw new OrderSubmissionError('Order link not found or does not belong to this catalog', 403, 'INVALID_LINK');
     }

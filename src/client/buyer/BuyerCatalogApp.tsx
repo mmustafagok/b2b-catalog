@@ -151,6 +151,8 @@ export const BuyerCatalogApp: React.FC = () => {
           setError('This wholesale catalog is currently unavailable, expired, or unpublished.');
         } else if (res.status === 410) {
           setError('This wholesale order link or catalog has expired.');
+        } else if (res.status === 403) {
+          setError('This wholesale order link is inactive.');
         } else {
           setError('Failed to load wholesale catalog.');
         }

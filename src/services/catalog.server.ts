@@ -86,6 +86,17 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
       await _upsertVariantConfigs(tx, catalog.id, validated.variantConfigs);
     }
 
+    // Ensure default OrderLink exists for this catalog
+    await tx.orderLink.create({
+      data: {
+        catalogId: catalog.id,
+        shopId,
+        token: catalog.publicToken,
+        label: 'Default Link',
+        active: true,
+      },
+    });
+
     return catalog;
   });
 }
@@ -606,6 +617,12 @@ export async function getCatalogsByShop(shopId: string, includeArchived: boolean
     orderBy: { createdAt: 'desc' },
   });
 
+  const defaultOrderLinks = await prisma.orderLink.findMany({
+    where: { shopId, token: { in: catalogs.map((c) => c.publicToken) } },
+    select: { token: true, active: true },
+  });
+  const defaultLinkActiveMap = new Map(defaultOrderLinks.map((l) => [l.token, l.active]));
+
   return Promise.all(
     catalogs.map(async (cat) => {
       const [allowedGids, enrichedSources, variantCount] = await Promise.all([
@@ -622,6 +639,7 @@ export async function getCatalogsByShop(shopId: string, includeArchived: boolean
         variantCount,
         linkCount: cat._count.orderLinks,
         submissionsCount: cat._count.submissions,
+        defaultLinkActive: defaultLinkActiveMap.get(cat.publicToken) ?? true,
       };
     })
   );

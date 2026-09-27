@@ -1077,101 +1077,114 @@ export const MerchantAppShell: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {catalogs.map((cat) => (
-                          <tr key={cat.id}>
-                            <td>
-                              <strong>{cat.name}</strong>
-                              <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#64748b', marginTop: '2px' }}>
-                                ID: {cat.id.slice(0, 8)}…
-                              </div>
-                            </td>
-                            <td>
-                              <span
-                                className={`cf-badge ${
-                                  cat.status === 'PUBLISHED' ? 'cf-badge-success' : 'cf-badge-outline'
-                                }`}
-                              >
-                                {cat.status}
-                              </span>
-                            </td>
-                            <td>
-                              <span style={{ fontSize: '0.86rem', fontWeight: 500 }}>
-                                {cat.productCount ?? 0} products ({cat.variantCount ?? 0} variants)
-                              </span>
-                            </td>
-                            <td>
-                              <div style={{ fontSize: '0.86rem' }}>
-                                <div>
-                                  {cat.priceMode === 'PERCENT_DISCOUNT'
-                                    ? `${cat.discountPercent}% Wholesale Discount`
-                                    : cat.priceMode === 'CUSTOM_PRICE'
-                                    ? `$${cat.customPriceAmount ?? '—'} Fixed Wholesale`
-                                    : 'Shopify Retail Price'}
+                        {catalogs.map((cat, index) => {
+                          const isDropup = catalogs.length > 1 && index >= Math.max(1, catalogs.length - 2);
+                          const isMenuOpen = openMenuCatalogId === cat.id;
+                          return (
+                            <tr
+                              key={cat.id}
+                              style={{
+                                position: isMenuOpen ? 'relative' : undefined,
+                                zIndex: isMenuOpen ? 50 : undefined,
+                              }}
+                            >
+                              <td>
+                                <strong>{cat.name}</strong>
+                                <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#64748b', marginTop: '2px' }}>
+                                  ID: {cat.id.slice(0, 8)}…
                                 </div>
-                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                                  Inventory: {cat.inventoryMode || 'STATUS_ONLY'}
+                              </td>
+                              <td>
+                                <span
+                                  className={`cf-badge ${
+                                    cat.status === 'PUBLISHED' ? 'cf-badge-success' : 'cf-badge-outline'
+                                  }`}
+                                >
+                                  {cat.status}
                                 </span>
-                              </div>
-                            </td>
-                            <td>
-                              {cat.status === 'PUBLISHED' ? (
-                                <div>
-                                  <button
-                                    className="cf-btn cf-btn-sm cf-btn-outline"
-                                    onClick={() => handleCopyLink(cat.publicToken)}
-                                    title="Copy live buyer link to clipboard"
-                                  >
-                                    📋 Copy Link
-                                  </button>
-                                  <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '3px' }}>
-                                    Default link
+                              </td>
+                              <td>
+                                <span style={{ fontSize: '0.86rem', fontWeight: 500 }}>
+                                  {cat.productCount ?? 0} products ({cat.variantCount ?? 0} variants)
+                                </span>
+                              </td>
+                              <td>
+                                <div style={{ fontSize: '0.86rem' }}>
+                                  <div>
+                                    {cat.priceMode === 'PERCENT_DISCOUNT'
+                                      ? `${cat.discountPercent}% Wholesale Discount`
+                                      : cat.priceMode === 'CUSTOM_PRICE'
+                                      ? `$${cat.customPriceAmount ?? '—'} Fixed Wholesale`
+                                      : 'Shopify Retail Price'}
                                   </div>
+                                  <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                    Inventory: {cat.inventoryMode || 'STATUS_ONLY'}
+                                  </span>
                                 </div>
-                              ) : (
-                                <span className="cf-text-muted" style={{ fontSize: '0.82rem' }}>
-                                  Draft (Unpublished)
-                                </span>
-                              )}
-                            </td>
-                            <td>
-                              <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center' }}>
+                              </td>
+                              <td>
                                 {cat.status === 'PUBLISHED' ? (
-                                  <button
-                                    type="button"
-                                    className="cf-btn cf-btn-sm cf-btn-primary"
-                                    onClick={() => setLinksCatalog(cat)}
-                                    title="Share catalog & manage buyer links"
-                                  >
-                                    🔗 Share
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="cf-btn cf-btn-sm cf-btn-primary"
-                                    onClick={() => setEditingCatalog(cat)}
-                                    title="Continue setup / edit catalog"
-                                  >
-                                    ✏️ Edit
-                                  </button>
-                                )}
-
-                                <div className="cf-dropdown-container">
-                                  <button
-                                    type="button"
-                                    className="cf-btn cf-btn-sm cf-btn-secondary"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setOpenMenuCatalogId(openMenuCatalogId === cat.id ? null : cat.id);
-                                    }}
-                                    title="More options"
-                                  >
-                                    ⋯ More
-                                  </button>
-                                  {openMenuCatalogId === cat.id && (
-                                    <div
-                                      className="cf-dropdown-menu"
-                                      onClick={(e) => e.stopPropagation()}
+                                  <div>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-outline"
+                                      onClick={() => handleCopyLink(cat.publicToken)}
+                                      title="Copy live buyer link to clipboard"
                                     >
+                                      📋 Copy Link
+                                    </button>
+                                    <div style={{ fontSize: '0.72rem', marginTop: '3px' }}>
+                                      {cat.defaultLinkActive === false ? (
+                                        <span style={{ color: '#dc2626', fontWeight: 600 }}>Default link (Inactive)</span>
+                                      ) : (
+                                        <span style={{ color: '#64748b' }}>Default link</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <span className="cf-text-muted" style={{ fontSize: '0.82rem' }}>
+                                    Draft (Unpublished)
+                                  </span>
+                                )}
+                              </td>
+                              <td style={{ position: isMenuOpen ? 'relative' : undefined, zIndex: isMenuOpen ? 60 : undefined }}>
+                                <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center' }}>
+                                  {cat.status === 'PUBLISHED' ? (
+                                    <button
+                                      type="button"
+                                      className="cf-btn cf-btn-sm cf-btn-primary"
+                                      onClick={() => setLinksCatalog(cat)}
+                                      title="Share catalog & manage buyer links"
+                                    >
+                                      🔗 Share
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="cf-btn cf-btn-sm cf-btn-primary"
+                                      onClick={() => setEditingCatalog(cat)}
+                                      title="Continue setup / edit catalog"
+                                    >
+                                      ✏️ Edit
+                                    </button>
+                                  )}
+
+                                  <div className={`cf-dropdown-container ${isMenuOpen ? 'open' : ''}`}>
+                                    <button
+                                      type="button"
+                                      className="cf-btn cf-btn-sm cf-btn-secondary"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenMenuCatalogId(isMenuOpen ? null : cat.id);
+                                      }}
+                                      title="More options"
+                                    >
+                                      ⋯ More
+                                    </button>
+                                    {isMenuOpen && (
+                                      <div
+                                        className={`cf-dropdown-menu ${isDropup ? 'dropup' : ''}`}
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
                                       <button
                                         type="button"
                                         className="cf-dropdown-item"
@@ -1265,7 +1278,8 @@ export const MerchantAppShell: React.FC = () => {
                               </div>
                             </td>
                           </tr>
-                        ))}
+                        );
+                      })}
                       </tbody>
                     </table>
                   </div>

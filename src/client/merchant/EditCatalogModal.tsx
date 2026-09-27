@@ -25,6 +25,7 @@ export interface CatalogSummary {
   productCount?: number;
   variantCount?: number;
   submissionsCount?: number;
+  defaultLinkActive?: boolean;
   sources: Array<{ type: 'COLLECTION' | 'PRODUCT'; shopifyGid: string; title?: string; imageUrl?: string | null }>;
 }
 
