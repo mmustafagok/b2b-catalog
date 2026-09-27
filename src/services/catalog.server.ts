@@ -483,22 +483,46 @@ export async function archiveCatalog(shopId: string, catalogId: string) {
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
   }
 
-  return prisma.catalog.update({
-    where: { id: catalogId },
-    data: {
-      status: CatalogStatus.ARCHIVED,
-      dataVersion: { increment: 1 },
-    },
+  return prisma.$transaction(async (tx) => {
+    // Invalidate / deactivate all order links for this catalog
+    await tx.orderLink.updateMany({
+      where: { catalogId },
+      data: { active: false },
+    });
+
+    return tx.catalog.update({
+      where: { id: catalogId },
+      data: {
+        status: CatalogStatus.ARCHIVED,
+        dataVersion: { increment: 1 },
+      },
+      include: { sources: true },
+    });
   });
 }
 
 export async function deleteCatalog(shopId: string, catalogId: string) {
   const existing = await prisma.catalog.findFirst({
     where: { id: catalogId, shopId },
+    include: {
+      _count: {
+        select: {
+          submissions: true,
+        },
+      },
+    },
   });
 
   if (!existing) {
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
+  }
+
+  if (existing._count.submissions > 0) {
+    throw new CatalogError(
+      'Cannot delete catalog with order submission history. Please archive this catalog instead.',
+      409,
+      'CATALOG_HAS_HISTORY'
+    );
   }
 
   return prisma.catalog.delete({
@@ -554,9 +578,12 @@ async function _enrichSources(
   });
 }
 
-export async function getCatalogsByShop(shopId: string) {
+export async function getCatalogsByShop(shopId: string, includeArchived: boolean = false) {
   const catalogs = await prisma.catalog.findMany({
-    where: { shopId },
+    where: {
+      shopId,
+      ...(includeArchived ? {} : { status: { not: CatalogStatus.ARCHIVED } }),
+    },
     include: {
       sources: true,
       _count: {
@@ -584,6 +611,7 @@ export async function getCatalogsByShop(shopId: string) {
         productCount,
         variantCount,
         linkCount: cat._count.orderLinks,
+        submissionsCount: cat._count.submissions,
       };
     })
   );

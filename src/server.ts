@@ -39,6 +39,7 @@ import {
   updateCatalog,
   publishCatalog,
   unpublishCatalog,
+  archiveCatalog,
   deleteCatalog,
   getCatalogsByShop,
   getCatalogById,
@@ -1474,6 +1475,18 @@ app.post('/api/admin/catalogs/:id/publish', adminAuthMiddleware, async (req: any
 app.post('/api/admin/catalogs/:id/unpublish', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
     const catalog = await unpublishCatalog(req.shop.id, req.params.id);
+    return res.status(200).json({ catalog });
+  } catch (err: any) {
+    if (err instanceof CatalogError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    return res.status(400).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.post('/api/admin/catalogs/:id/archive', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const catalog = await archiveCatalog(req.shop.id, req.params.id);
     return res.status(200).json({ catalog });
   } catch (err: any) {
     if (err instanceof CatalogError) {

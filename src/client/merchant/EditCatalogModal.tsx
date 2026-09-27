@@ -23,6 +23,7 @@ export interface CatalogSummary {
   updatedAt: string;
   productCount?: number;
   variantCount?: number;
+  submissionsCount?: number;
   sources: Array<{ type: 'COLLECTION' | 'PRODUCT'; shopifyGid: string; title?: string; imageUrl?: string | null }>;
 }
 
@@ -81,6 +82,12 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
     }
     if (formState.sources.length === 0) {
       setError('Please select at least one product or collection for this catalog');
+      return;
+    }
+    const minVal = Math.max(1, formState.minQty);
+    const packVal = Math.max(1, formState.qtyIncrement);
+    if (minVal > 1 && minVal % packVal !== 0) {
+      setError(`Minimum order quantity (${minVal}) must be a multiple of pack size (${packVal})`);
       return;
     }
     if (saving) return;

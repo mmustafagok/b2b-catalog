@@ -81,7 +81,18 @@ export const CatalogVariantConfigInputSchema = z.object({
   maxQty: z.number().int().min(1).max(100000).optional().nullable(),
   qtyIncrement: z.number().int().min(1).max(1000).optional().nullable(),
   position: z.number().int().min(0).optional().default(0),
-});
+}).refine(
+  (data) => {
+    if (data.minQty && data.qtyIncrement && data.minQty > 1) {
+      return data.minQty % data.qtyIncrement === 0;
+    }
+    return true;
+  },
+  {
+    message: 'Minimum order quantity must be a multiple of pack size',
+    path: ['minQty'],
+  }
+);
 
 // ─── Quantity rule resolution & Canonical Mathematics ──────────────────────────
 
@@ -122,12 +133,19 @@ export function resolveEffectiveQuantityRules(
 export function isValidQuantity(quantity: number, min: number, step: number, max: number | null = null): boolean {
   if (!Number.isInteger(quantity)) return false;
   if (quantity === 0) return true; // Special "not in cart" state
-  const effectiveMin = Math.max(1, min);
-  const effectiveStep = Math.max(1, step);
-  if (quantity < effectiveMin) return false;
-  if (max !== null && quantity > max) return false;
+  if (quantity < 0) return false;
 
-  return (quantity - effectiveMin) % effectiveStep === 0;
+  const pack = Math.max(1, step);
+  // All positive quantities must be integer multiples of pack size
+  if (quantity % pack !== 0) return false;
+
+  // Effective positive minimum: if min is provided and > 0, it must be at least min
+  const effectiveMin = min && min > 0 ? Math.ceil(min / pack) * pack : pack;
+  if (quantity < effectiveMin) return false;
+
+  if (max !== null && max > 0 && quantity > max) return false;
+
+  return true;
 }
 
 export function isValidQuantityStep(quantity: number, min: number, step: number, max: number | null = null): boolean {
@@ -135,26 +153,25 @@ export function isValidQuantityStep(quantity: number, min: number, step: number,
 }
 
 /**
- * Computes the next valid quantity for increment (+) using unified pack step model.
+ * Computes the next valid quantity for increment (+) using wholesale pack-size model.
+ * - From 0 (or below effective minimum), moves to effective minimum (e.g. 2, 3, or min).
+ * - Subsequent steps add pack size (e.g. 3 -> 6 -> 9 -> 12...).
+ * - Never exceeds max; if next step would exceed max, remains at current valid quantity.
  */
 export function nextValidQuantity(currentQty: number, min: number, step: number, max: number | null = null): number {
-  const effectiveMin = Math.max(1, min);
-  const effectiveStep = Math.max(1, step);
+  const pack = Math.max(1, step);
+  const effectiveMin = min && min > 0 ? Math.ceil(min / pack) * pack : pack;
 
   if (currentQty <= 0 || currentQty < effectiveMin) {
-    if (max !== null && effectiveMin > max) return currentQty <= 0 ? 0 : currentQty;
+    if (max !== null && max > 0 && effectiveMin > max) {
+      return currentQty <= 0 ? 0 : currentQty;
+    }
     return effectiveMin;
   }
 
-  const offset = (currentQty - effectiveMin) % effectiveStep;
-  let next: number;
-  if (offset === 0) {
-    next = currentQty + effectiveStep;
-  } else {
-    next = currentQty + (effectiveStep - offset);
-  }
+  const next = (Math.floor(currentQty / pack) + 1) * pack;
 
-  if (max !== null && next > max) {
+  if (max !== null && max > 0 && next > max) {
     return currentQty;
   }
 
@@ -162,24 +179,19 @@ export function nextValidQuantity(currentQty: number, min: number, step: number,
 }
 
 /**
- * Computes the previous valid quantity for decrement (-) using unified pack step model.
+ * Computes the previous valid quantity for decrement (-) using wholesale pack-size model.
+ * - Steps down by pack size.
+ * - If current quantity is at or below effective minimum, returns 0 (removes item from cart).
  */
 export function previousValidQuantity(currentQty: number, min: number, step: number): number {
-  const effectiveMin = Math.max(1, min);
-  const effectiveStep = Math.max(1, step);
+  const pack = Math.max(1, step);
+  const effectiveMin = min && min > 0 ? Math.ceil(min / pack) * pack : pack;
 
   if (currentQty <= effectiveMin) {
     return 0;
   }
 
-  const offset = (currentQty - effectiveMin) % effectiveStep;
-  let prev: number;
-  if (offset === 0) {
-    prev = currentQty - effectiveStep;
-  } else {
-    prev = currentQty - offset;
-  }
-
+  const prev = (Math.ceil(currentQty / pack) - 1) * pack;
   if (prev < effectiveMin) {
     return 0;
   }
@@ -188,31 +200,29 @@ export function previousValidQuantity(currentQty: number, min: number, step: num
 }
 
 /**
- * Normalizes an arbitrary quantity input to nearest valid step.
+ * Normalizes an arbitrary quantity input to the nearest valid multiple of pack size.
+ * - If <= 0, returns 0.
+ * - If < effectiveMin, returns effectiveMin.
+ * - Rounds to nearest multiple of pack.
+ * - If rounded value exceeds max, clamps down to largest valid multiple <= max.
  */
 export function normalizeQuantity(quantity: number, min: number, step: number, max: number | null = null): number {
   if (quantity <= 0) return 0;
-  const effectiveMin = Math.max(1, min);
-  const effectiveStep = Math.max(1, step);
+
+  const pack = Math.max(1, step);
+  const effectiveMin = min && min > 0 ? Math.ceil(min / pack) * pack : pack;
 
   if (quantity < effectiveMin) return effectiveMin;
 
-  const offset = (quantity - effectiveMin) % effectiveStep;
-  let normalized: number;
-  if (offset === 0) {
-    normalized = quantity;
-  } else if (offset >= effectiveStep / 2) {
-    normalized = quantity + (effectiveStep - offset);
-  } else {
-    normalized = quantity - offset;
-  }
+  const rem = quantity % pack;
+  let normalized = rem >= pack / 2 ? quantity + (pack - rem) : quantity - rem;
 
   if (normalized < effectiveMin) normalized = effectiveMin;
 
-  if (max !== null && normalized > max) {
-    let maxValid = Math.floor((max - effectiveMin) / effectiveStep) * effectiveStep + effectiveMin;
-    if (maxValid < effectiveMin) return 0;
-    return maxValid;
+  if (max !== null && max > 0 && normalized > max) {
+    const maxMultiple = Math.floor(max / pack) * pack;
+    if (maxMultiple < effectiveMin) return 0;
+    return maxMultiple;
   }
 
   return normalized;
@@ -413,7 +423,18 @@ export const CreateCatalogInputSchema = z.object({
   buyerFormConfig: z.union([z.string(), BuyerFormConfigSchema]).optional(),
   sources: z.array(CatalogSourceSchema).min(1, 'At least one collection or product source is required'),
   variantConfigs: z.array(CatalogVariantConfigInputSchema).optional(),
-});
+}).refine(
+  (data) => {
+    if (data.minQty && data.qtyIncrement && data.minQty > 1) {
+      return data.minQty % data.qtyIncrement === 0;
+    }
+    return true;
+  },
+  {
+    message: 'Minimum order quantity must be a multiple of pack size',
+    path: ['minQty'],
+  }
+);
 
 export const UpdateCatalogInputSchema = z.object({
   name: z.string().trim().min(1, 'Catalog name is required').max(100).optional(),
@@ -435,7 +456,18 @@ export const UpdateCatalogInputSchema = z.object({
   buyerFormConfig: z.union([z.string(), BuyerFormConfigSchema]).optional(),
   sources: z.array(CatalogSourceSchema).min(1, 'At least one collection or product source is required').optional(),
   variantConfigs: z.array(CatalogVariantConfigInputSchema).optional(),
-});
+}).refine(
+  (data) => {
+    if (data.minQty && data.qtyIncrement && data.minQty > 1) {
+      return data.minQty % data.qtyIncrement === 0;
+    }
+    return true;
+  },
+  {
+    message: 'Minimum order quantity must be a multiple of pack size',
+    path: ['minQty'],
+  }
+);
 
 // ─── Order Link schemas ────────────────────────────────────────────────────────
 

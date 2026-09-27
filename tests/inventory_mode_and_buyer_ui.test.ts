@@ -367,30 +367,30 @@ describe('Inventory Display Mode & Quantity Rule Inheritance Suite', () => {
     expect(effective.min).toBe(1);
   });
 
-  it('16. Client and server calculate same effective rules and step validation', async () => {
-    // Test relative step calculation: (quantity - min) % step === 0
-    // Min = 1, Step = 5, Max = 20
+  it('16. Client and server calculate same effective rules and pack size validation', async () => {
+    // Pack size model: quantity % pack === 0, >= minQty, <= maxQty
+    // Min = 1, Pack = 5, Max = 20
     const min1 = 1;
-    const step5 = 5;
+    const pack5 = 5;
     const max20 = 20;
 
-    expect(isValidQuantityStep(1, min1, step5, max20)).toBe(true);
-    expect(isValidQuantityStep(6, min1, step5, max20)).toBe(true);
-    expect(isValidQuantityStep(11, min1, step5, max20)).toBe(true);
-    expect(isValidQuantityStep(16, min1, step5, max20)).toBe(true);
+    expect(isValidQuantityStep(5, min1, pack5, max20)).toBe(true);
+    expect(isValidQuantityStep(10, min1, pack5, max20)).toBe(true);
+    expect(isValidQuantityStep(15, min1, pack5, max20)).toBe(true);
+    expect(isValidQuantityStep(20, min1, pack5, max20)).toBe(true);
 
-    expect(isValidQuantityStep(5, min1, step5, max20)).toBe(false);
-    expect(isValidQuantityStep(10, min1, step5, max20)).toBe(false);
-    expect(isValidQuantityStep(15, min1, step5, max20)).toBe(false);
+    expect(isValidQuantityStep(1, min1, pack5, max20)).toBe(false);
+    expect(isValidQuantityStep(6, min1, pack5, max20)).toBe(false);
+    expect(isValidQuantityStep(11, min1, pack5, max20)).toBe(false);
 
-    // Min = 6, Step = 6
+    // Min = 6, Pack = 6
     const min6 = 6;
-    const step6 = 6;
-    expect(isValidQuantityStep(6, min6, step6)).toBe(true);
-    expect(isValidQuantityStep(12, min6, step6)).toBe(true);
-    expect(isValidQuantityStep(18, min6, step6)).toBe(true);
-    expect(isValidQuantityStep(24, min6, step6)).toBe(true);
-    expect(isValidQuantityStep(7, min6, step6)).toBe(false);
+    const pack6 = 6;
+    expect(isValidQuantityStep(6, min6, pack6)).toBe(true);
+    expect(isValidQuantityStep(12, min6, pack6)).toBe(true);
+    expect(isValidQuantityStep(18, min6, pack6)).toBe(true);
+    expect(isValidQuantityStep(24, min6, pack6)).toBe(true);
+    expect(isValidQuantityStep(7, min6, pack6)).toBe(false);
   });
 
   it('17. Browse and Quick Order use same effective rules', async () => {
@@ -431,18 +431,18 @@ describe('Inventory Display Mode & Quantity Rule Inheritance Suite', () => {
     expect(resMin.changedLines.some((l) => l.reason === 'QTY_RULE')).toBe(true);
   });
 
-  it('19. Min 5 Step 3 validates 5, 8, 11', async () => {
-    const min5 = 5;
-    const step3 = 3;
+  it('19. Min 6 Pack 3 validates 6, 9, 12', async () => {
+    const min6 = 6;
+    const pack3 = 3;
 
-    expect(isValidQuantityStep(5, min5, step3)).toBe(true);
-    expect(isValidQuantityStep(8, min5, step3)).toBe(true);
-    expect(isValidQuantityStep(11, min5, step3)).toBe(true);
+    expect(isValidQuantityStep(6, min6, pack3)).toBe(true);
+    expect(isValidQuantityStep(9, min6, pack3)).toBe(true);
+    expect(isValidQuantityStep(12, min6, pack3)).toBe(true);
 
-    expect(isValidQuantityStep(6, min5, step3)).toBe(false);
-    expect(isValidQuantityStep(7, min5, step3)).toBe(false);
-    expect(isValidQuantityStep(9, min5, step3)).toBe(false);
-    expect(isValidQuantityStep(10, min5, step3)).toBe(false);
+    expect(isValidQuantityStep(3, min6, pack3)).toBe(false); // < min 6
+    expect(isValidQuantityStep(7, min6, pack3)).toBe(false);
+    expect(isValidQuantityStep(8, min6, pack3)).toBe(false);
+    expect(isValidQuantityStep(10, min6, pack3)).toBe(false);
   });
 
   it('20. Invalid step quantities rejected', async () => {

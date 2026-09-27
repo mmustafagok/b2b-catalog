@@ -527,9 +527,11 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
             Set order unit constraints across all variants in this catalog. Defaults are ready to use (1 unit minimum with no maximum limit).
           </p>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem' }}>
-            <div>
-              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Minimum order quantity</label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.25rem', alignItems: 'start' }}>
+            <div className="cf-form-group">
+              <label className="cf-label" style={{ whiteSpace: 'nowrap', marginBottom: '0.25rem', fontSize: '0.84rem', fontWeight: 600 }}>
+                Minimum order quantity
+              </label>
               <input
                 type="number"
                 min="1"
@@ -537,11 +539,15 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                 value={formState.minQty}
                 onChange={(e) => onChange({ minQty: Math.max(1, parseInt(e.target.value, 10) || 1) })}
               />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Minimum units required per order</span>
+              <span className="cf-field-hint" style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.35rem', lineHeight: '1.3' }}>
+                Lowest quantity a buyer can order for this item.
+              </span>
             </div>
 
-            <div>
-              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Order in multiples of</label>
+            <div className="cf-form-group">
+              <label className="cf-label" style={{ whiteSpace: 'nowrap', marginBottom: '0.25rem', fontSize: '0.84rem', fontWeight: 600 }}>
+                Pack size
+              </label>
               <input
                 type="number"
                 min="1"
@@ -549,11 +555,15 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                 value={formState.qtyIncrement}
                 onChange={(e) => onChange({ qtyIncrement: Math.max(1, parseInt(e.target.value, 10) || 1) })}
               />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Pack size or order increment</span>
+              <span className="cf-field-hint" style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.35rem', lineHeight: '1.3' }}>
+                Buyers can only order in this increment. Example: 3, 6, 9…
+              </span>
             </div>
 
-            <div>
-              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Maximum quantity (Optional)</label>
+            <div className="cf-form-group">
+              <label className="cf-label" style={{ whiteSpace: 'nowrap', marginBottom: '0.25rem', fontSize: '0.84rem', fontWeight: 600 }}>
+                Maximum quantity (optional)
+              </label>
               <input
                 type="number"
                 min="1"
@@ -562,13 +572,60 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                 value={formState.maxQty}
                 onChange={(e) => onChange({ maxQty: e.target.value })}
               />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Optional ceiling per line</span>
+              <span className="cf-field-hint" style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.35rem', lineHeight: '1.3' }}>
+                Optional cap per line item.
+              </span>
             </div>
           </div>
 
-          <div style={{ marginTop: '0.85rem', fontSize: '0.82rem', color: '#475569', background: '#f8fafc', padding: '0.6rem 0.85rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-            💡 <strong>Example:</strong> Buyers can order {formState.minQty}, {formState.minQty + formState.qtyIncrement}, {formState.minQty + 2 * formState.qtyIncrement}, {formState.minQty + 3 * formState.qtyIncrement}{formState.maxQty ? ` (up to ${formState.maxQty})` : ''}...
-          </div>
+          {(() => {
+            const pack = Math.max(1, formState.qtyIncrement || 1);
+            const min = formState.minQty ? parseInt(String(formState.minQty), 10) : 1;
+            const max = formState.maxQty ? parseInt(String(formState.maxQty), 10) : null;
+
+            const isIncompatible = min > 1 && min % pack !== 0;
+            if (isIncompatible) {
+              return (
+                <div style={{ marginTop: '1rem', fontSize: '0.84rem', color: '#b91c1c', background: '#fef2f2', padding: '0.75rem 1rem', borderRadius: '6px', border: '1px solid #fecaca', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span>⚠️</span>
+                  <span><strong>Invalid rule:</strong> Minimum order quantity ({min}) must be a multiple of pack size ({pack}) (e.g. {pack}, {pack * 2}, {pack * 3}…).</span>
+                </div>
+              );
+            }
+
+            const start = min > 1 ? min : pack;
+            const values: number[] = [];
+
+            if (max && max > 0) {
+              for (let v = start; v <= max; v += pack) {
+                values.push(v);
+                if (values.length >= 8) break;
+              }
+              if (values.length === 0) {
+                return (
+                  <div style={{ marginTop: '1rem', fontSize: '0.84rem', color: '#b91c1c', background: '#fef2f2', padding: '0.75rem 1rem', borderRadius: '6px', border: '1px solid #fecaca' }}>
+                    ⚠️ Maximum quantity ({max}) is lower than the minimum allowed quantity ({start}).
+                  </div>
+                );
+              }
+              return (
+                <div style={{ marginTop: '1rem', fontSize: '0.84rem', color: '#334155', background: '#f8fafc', padding: '0.75rem 1rem', borderRadius: '6px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span>💡</span>
+                  <span><strong>Example:</strong> Buyers can order {values.join(', ')}.</span>
+                </div>
+              );
+            } else {
+              for (let i = 0; i < 4; i++) {
+                values.push(start + i * pack);
+              }
+              return (
+                <div style={{ marginTop: '1rem', fontSize: '0.84rem', color: '#334155', background: '#f8fafc', padding: '0.75rem 1rem', borderRadius: '6px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span>💡</span>
+                  <span><strong>Example:</strong> Buyers can order {values.join(', ')}…</span>
+                </div>
+              );
+            }
+          })()}
 
           <hr style={{ border: 'none', borderTop: '1px solid #e2e8f0', margin: '1.25rem 0' }} />
 

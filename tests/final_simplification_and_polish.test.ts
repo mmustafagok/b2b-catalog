@@ -103,45 +103,45 @@ describe('Final Product Simplification, Quantity Inheritance, Inventory & Featur
       expect(isValidQuantityStep(25, min, step, max)).toBe(false);
     });
 
-    it('7. validates min=5 step=3 valid quantities (5, 8, 11, 14) relative to minimum', () => {
-      const min = 5;
-      const step = 3;
+    it('7. validates min=6 pack=3 valid quantities (6, 9, 12, 15) in wholesale pack model', () => {
+      const min = 6;
+      const pack = 3;
 
-      expect(isValidQuantityStep(5, min, step)).toBe(true);
-      expect(isValidQuantityStep(8, min, step)).toBe(true);
-      expect(isValidQuantityStep(11, min, step)).toBe(true);
-      expect(isValidQuantityStep(14, min, step)).toBe(true);
+      expect(isValidQuantityStep(6, min, pack)).toBe(true);
+      expect(isValidQuantityStep(9, min, pack)).toBe(true);
+      expect(isValidQuantityStep(12, min, pack)).toBe(true);
+      expect(isValidQuantityStep(15, min, pack)).toBe(true);
 
-      // 6 is NOT valid under min=5, step=3 because (6-5)%3 = 1 != 0
-      expect(isValidQuantityStep(6, min, step)).toBe(false);
-      expect(isValidQuantityStep(7, min, step)).toBe(false);
+      // 7 and 8 are NOT valid under pack=3 because 7%3 != 0, 8%3 != 0
+      expect(isValidQuantityStep(7, min, pack)).toBe(false);
+      expect(isValidQuantityStep(8, min, pack)).toBe(false);
     });
 
-    it('8. +/- step calculations move through valid increments relative to min', () => {
-      const min = 5;
-      const step = 3;
+    it('8. +/- step calculations move through valid increments in pack size', () => {
+      const min = 6;
+      const pack = 3;
 
-      // Starting from 0 and clicking '+' -> jumps to min (5)
+      // Starting from 0 and clicking '+' -> jumps to min (6)
       let current = 0;
-      let next = current === 0 ? min : current + step;
-      expect(next).toBe(5);
+      let next = current === 0 ? min : current + pack;
+      expect(next).toBe(6);
 
-      // Incrementing from 5 -> 8 -> 11
-      current = 5;
-      next = current + step;
-      expect(next).toBe(8);
+      // Incrementing from 6 -> 9 -> 12
+      current = 6;
+      next = current + pack;
+      expect(next).toBe(9);
 
-      current = 8;
-      next = current + step;
-      expect(next).toBe(11);
+      current = 9;
+      next = current + pack;
+      expect(next).toBe(12);
 
-      // Decrementing from 8 -> 5 -> 0
-      current = 8;
-      let prev = current - step < min ? 0 : current - step;
-      expect(prev).toBe(5);
+      // Decrementing from 9 -> 6 -> 0
+      current = 9;
+      let prev = current - pack < min ? 0 : current - pack;
+      expect(prev).toBe(6);
 
-      current = 5;
-      prev = current - step < min ? 0 : current - step;
+      current = 6;
+      prev = current - pack < min ? 0 : current - pack;
       expect(prev).toBe(0);
     });
 

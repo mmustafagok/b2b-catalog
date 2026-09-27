@@ -195,24 +195,25 @@ describe('Final Hardening Pass Regression Matrix', () => {
       expect(rules.max).toBeNull();
     });
 
-    it('step=3: valid positive quantities are 1, 4, 7, 10... relative to min 1', () => {
-      expect(isValidQuantity(1, 1, 3)).toBe(true);
+    it('pack=3: valid positive quantities are multiples 3, 6, 9, 12... of pack size', () => {
+      expect(isValidQuantity(3, 1, 3)).toBe(true);
+      expect(isValidQuantity(1, 1, 3)).toBe(false);
       expect(isValidQuantity(2, 1, 3)).toBe(false);
-      expect(isValidQuantity(4, 1, 3)).toBe(true);
-      expect(isValidQuantity(7, 1, 3)).toBe(true);
-      expect(isValidQuantity(10, 1, 3)).toBe(true);
+      expect(isValidQuantity(6, 1, 3)).toBe(true);
+      expect(isValidQuantity(9, 1, 3)).toBe(true);
+      expect(isValidQuantity(12, 1, 3)).toBe(true);
     });
 
-    it('step=3 + max=20: sequences 1 -> 4 -> 7 -> 10 -> 13 -> 16 -> 19 and stops at 19', () => {
+    it('pack=3 + max=20: sequences 3 -> 6 -> 9 -> 12 -> 15 -> 18 and stops at 18 (never jumps to 20)', () => {
       let q = 0;
       const sequence = [q];
       for (let i = 0; i < 8; i++) {
         q = nextValidQuantity(q, 1, 3, 20);
         sequence.push(q);
       }
-      expect(sequence).toEqual([0, 1, 4, 7, 10, 13, 16, 19, 19]);
+      expect(sequence).toEqual([0, 3, 6, 9, 12, 15, 18, 18, 18]);
       expect(isValidQuantity(20, 1, 3, 20)).toBe(false);
-      expect(isValidQuantity(19, 1, 3, 20)).toBe(true);
+      expect(isValidQuantity(18, 1, 3, 20)).toBe(true);
     });
 
     it('min=6 + step=3: sequence 0 -> 6 -> 9 -> 12... (buyer must never submit 3)', () => {

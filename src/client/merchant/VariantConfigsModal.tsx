@@ -86,6 +86,16 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
   const handleSave = async () => {
     try {
       setSaving(true);
+      for (const c of configs) {
+        if (c.enabled && c.overrideQuantityRules && c.minQty && c.qtyIncrement) {
+          if (c.minQty > 1 && c.minQty % c.qtyIncrement !== 0) {
+            onToast(`Error in ${c.productTitle ? `${c.productTitle} (${c.variantTitle || 'variant'})` : 'variant'}: Minimum order quantity (${c.minQty}) must be a multiple of pack size (${c.qtyIncrement}).`);
+            setSaving(false);
+            return;
+          }
+        }
+      }
+
       const payload = configs.map((c) => {
         const isOverride = Boolean(c.overrideQuantityRules);
         return {
@@ -161,7 +171,7 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
               onChange={(e) => setSearch(e.target.value)}
             />
             <span style={{ fontSize: '0.85rem', color: '#64748b' }}>
-              Catalog Defaults: Min <strong>{catMin}</strong> · Step <strong>{catStep}</strong> {catMax ? `· Max ${catMax}` : ''}
+              Catalog Defaults: Min <strong>{catMin}</strong> · Pack size <strong>{catStep}</strong> {catMax ? `· Max ${catMax}` : ''}
             </span>
           </div>
 
@@ -180,7 +190,7 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
                     <th style={{ width: '130px' }}>Qty Rules Override</th>
                     <th style={{ width: '80px' }}>Min Qty</th>
                     <th style={{ width: '80px' }}>Max Qty</th>
-                    <th style={{ width: '80px' }}>Step</th>
+                    <th style={{ width: '90px' }}>Pack size</th>
                   </tr>
                 </thead>
                 <tbody>

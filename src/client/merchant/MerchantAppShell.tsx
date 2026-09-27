@@ -172,6 +172,11 @@ export const MerchantAppShell: React.FC = () => {
   const [variantConfigsCatalog, setVariantConfigsCatalog] = useState<CatalogSummary | null>(null);
   const [linkShared, setLinkShared] = useState<boolean>(false);
   const [postPublishCatalog, setPostPublishCatalog] = useState<CatalogSummary | null>(null);
+  const [openMenuCatalogId, setOpenMenuCatalogId] = useState<string | null>(null);
+  const [confirmArchiveCatalog, setConfirmArchiveCatalog] = useState<CatalogSummary | null>(null);
+  const [confirmDeleteCatalog, setConfirmDeleteCatalog] = useState<CatalogSummary | null>(null);
+  const [archivingCatalog, setArchivingCatalog] = useState<boolean>(false);
+  const [deletingCatalog, setDeletingCatalog] = useState<boolean>(false);
 
   // ── Catalog creation wizard state ─────────────────────────────────────────
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -341,6 +346,88 @@ export const MerchantAppShell: React.FC = () => {
     markLinkShared();
   };
 
+  useEffect(() => {
+    const handleGlobalClick = () => setOpenMenuCatalogId(null);
+    if (openMenuCatalogId) {
+      window.addEventListener('click', handleGlobalClick);
+      return () => window.removeEventListener('click', handleGlobalClick);
+    }
+  }, [openMenuCatalogId]);
+
+  const handleArchiveCatalog = async (cat: CatalogSummary) => {
+    try {
+      setArchivingCatalog(true);
+      const res = await authenticatedFetch(`/api/admin/catalogs/${cat.id}/archive`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to archive catalog');
+      }
+      showToast(`Catalog "${cat.name}" has been archived.`);
+      setConfirmArchiveCatalog(null);
+      loadData();
+    } catch (err: any) {
+      showToast(`Archive failed: ${err.message}`);
+    } finally {
+      setArchivingCatalog(false);
+    }
+  };
+
+  const handleDeleteCatalog = async (cat: CatalogSummary) => {
+    try {
+      setDeletingCatalog(true);
+      const res = await authenticatedFetch(`/api/admin/catalogs/${cat.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to delete catalog');
+      }
+      showToast(`Catalog "${cat.name}" has been permanently deleted.`);
+      setConfirmDeleteCatalog(null);
+      loadData();
+    } catch (err: any) {
+      showToast(`Delete failed: ${err.message}`);
+    } finally {
+      setDeletingCatalog(false);
+    }
+  };
+
+  const handleDuplicateCatalog = async (cat: CatalogSummary) => {
+    try {
+      setSyncing(true);
+      const res = await authenticatedFetch('/api/admin/catalogs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `${cat.name} (Copy)`,
+          priceMode: cat.priceMode,
+          discountPercent: cat.discountPercent,
+          customPriceAmount: cat.customPriceAmount,
+          accentColor: cat.accentColor,
+          showSku: cat.showSku,
+          inventoryMode: cat.inventoryMode,
+          minQty: cat.minQty,
+          maxQty: cat.maxQty,
+          qtyIncrement: cat.qtyIncrement,
+          buyerFormConfig: cat.buyerFormConfig,
+          sources: (cat.sources || []).map((s) => ({ type: s.type, shopifyGid: s.shopifyGid })),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to duplicate catalog');
+      }
+      showToast('Catalog duplicated as draft!');
+      loadData();
+    } catch (err: any) {
+      showToast(`Duplicate failed: ${err.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const handleManualSync = async () => {
     setSyncing(true);
     try {
@@ -504,6 +591,12 @@ export const MerchantAppShell: React.FC = () => {
   const handleCreateCatalog = async () => {
     if (!createFormState.name.trim()) { showToast('Catalog name is required'); return; }
     if (createFormState.sources.length === 0) { showToast('Select at least one product or collection'); return; }
+    const minVal = Math.max(1, createFormState.minQty);
+    const packVal = Math.max(1, createFormState.qtyIncrement);
+    if (minVal > 1 && minVal % packVal !== 0) {
+      showToast(`Minimum order quantity (${minVal}) must be a multiple of pack size (${packVal})`);
+      return;
+    }
     setCreatingCatalog(true);
     try {
       const payload = {
@@ -1041,71 +1134,134 @@ export const MerchantAppShell: React.FC = () => {
                               )}
                             </td>
                             <td>
-                              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                              <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center' }}>
                                 {cat.status === 'PUBLISHED' ? (
-                                  <>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-primary"
-                                      onClick={() => setLinksCatalog(cat)}
-                                      title="Share catalog & manage tracked buyer links"
-                                    >
-                                      🔗 Share catalog
-                                    </button>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-secondary"
-                                      onClick={() => setEditingCatalog(cat)}
-                                      title="Edit products and catalog configuration"
-                                    >
-                                      ✏️ Edit
-                                    </button>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-secondary"
-                                      onClick={() => setVariantConfigsCatalog(cat)}
-                                      title="Configure variant availability and overrides"
-                                    >
-                                      ⚙️ Variants
-                                    </button>
-                                    <a
-                                      href={`/c/${cat.publicToken}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="cf-btn cf-btn-sm cf-btn-secondary"
-                                      title="Open catalog preview in new tab"
-                                    >
-                                      Preview ↗
-                                    </a>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-outline"
-                                      onClick={() => handlePublishToggle(cat)}
-                                    >
-                                      Unpublish
-                                    </button>
-                                  </>
+                                  <button
+                                    type="button"
+                                    className="cf-btn cf-btn-sm cf-btn-primary"
+                                    onClick={() => setLinksCatalog(cat)}
+                                    title="Share catalog & manage buyer links"
+                                  >
+                                    🔗 Share
+                                  </button>
                                 ) : (
-                                  <>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-primary"
-                                      onClick={() => handlePublishToggle(cat)}
-                                      title="Publish catalog to make it shareable"
-                                    >
-                                      Publish
-                                    </button>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-secondary"
-                                      onClick={() => setEditingCatalog(cat)}
-                                      title="Edit products and catalog configuration"
-                                    >
-                                      ✏️ Edit
-                                    </button>
-                                    <button
-                                      className="cf-btn cf-btn-sm cf-btn-secondary"
-                                      onClick={() => setVariantConfigsCatalog(cat)}
-                                      title="Configure variant availability and overrides"
-                                    >
-                                      ⚙️ Variants
-                                    </button>
-                                  </>
+                                  <button
+                                    type="button"
+                                    className="cf-btn cf-btn-sm cf-btn-primary"
+                                    onClick={() => setEditingCatalog(cat)}
+                                    title="Continue setup / edit catalog"
+                                  >
+                                    ✏️ Edit
+                                  </button>
                                 )}
+
+                                <div className="cf-dropdown-container">
+                                  <button
+                                    type="button"
+                                    className="cf-btn cf-btn-sm cf-btn-secondary"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setOpenMenuCatalogId(openMenuCatalogId === cat.id ? null : cat.id);
+                                    }}
+                                    title="More options"
+                                  >
+                                    ⋯ More
+                                  </button>
+                                  {openMenuCatalogId === cat.id && (
+                                    <div
+                                      className="cf-dropdown-menu"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <button
+                                        type="button"
+                                        className="cf-dropdown-item"
+                                        onClick={() => {
+                                          setEditingCatalog(cat);
+                                          setOpenMenuCatalogId(null);
+                                        }}
+                                      >
+                                        ✏️ Edit configuration
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="cf-dropdown-item"
+                                        onClick={() => {
+                                          setVariantConfigsCatalog(cat);
+                                          setOpenMenuCatalogId(null);
+                                        }}
+                                      >
+                                        ⚙️ Variants & overrides
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="cf-dropdown-item"
+                                        onClick={() => {
+                                          setLinksCatalog(cat);
+                                          setOpenMenuCatalogId(null);
+                                        }}
+                                      >
+                                        🔗 Order links & QR
+                                      </button>
+                                      {cat.status === 'PUBLISHED' && (
+                                        <a
+                                          href={`/c/${cat.publicToken}`}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="cf-dropdown-item"
+                                          onClick={() => setOpenMenuCatalogId(null)}
+                                        >
+                                          👁️ Preview catalog ↗
+                                        </a>
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="cf-dropdown-item"
+                                        onClick={() => {
+                                          handlePublishToggle(cat);
+                                          setOpenMenuCatalogId(null);
+                                        }}
+                                      >
+                                        {cat.status === 'PUBLISHED' ? '⏸️ Unpublish' : '🚀 Publish'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="cf-dropdown-item"
+                                        onClick={() => {
+                                          handleDuplicateCatalog(cat);
+                                          setOpenMenuCatalogId(null);
+                                        }}
+                                      >
+                                        📋 Duplicate catalog
+                                      </button>
+
+                                      <div className="cf-dropdown-divider" />
+
+                                      <button
+                                        type="button"
+                                        className="cf-dropdown-item"
+                                        onClick={() => {
+                                          setConfirmArchiveCatalog(cat);
+                                          setOpenMenuCatalogId(null);
+                                        }}
+                                      >
+                                        📦 Archive catalog
+                                      </button>
+
+                                      {(!cat.submissionsCount || cat.submissionsCount === 0) && (
+                                        <button
+                                          type="button"
+                                          className="cf-dropdown-item danger"
+                                          onClick={() => {
+                                            setConfirmDeleteCatalog(cat);
+                                            setOpenMenuCatalogId(null);
+                                          }}
+                                        >
+                                          🗑️ Delete permanently
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             </td>
                           </tr>
@@ -1616,7 +1772,12 @@ export const MerchantAppShell: React.FC = () => {
               <button
                 type="button"
                 className="cf-btn cf-btn-primary"
-                disabled={creatingCatalog || !createFormState.name.trim() || createFormState.sources.length === 0}
+                disabled={
+                  creatingCatalog ||
+                  !createFormState.name.trim() ||
+                  createFormState.sources.length === 0 ||
+                  (createFormState.minQty > 1 && createFormState.minQty % createFormState.qtyIncrement !== 0)
+                }
                 onClick={handleCreateCatalog}
               >
                 {creatingCatalog ? 'Creating…' : newPublish ? 'Create & Publish Catalog' : 'Create Draft Catalog'}
@@ -1721,6 +1882,82 @@ export const MerchantAppShell: React.FC = () => {
                 onClick={() => setPostPublishCatalog(null)}
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Archive Catalog Confirmation Modal */}
+      {confirmArchiveCatalog && (
+        <div className="cf-modal-backdrop" onClick={() => setConfirmArchiveCatalog(null)}>
+          <div className="cf-modal cf-modal-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="cf-modal-header">
+              <h3>Archive Catalog</h3>
+              <button type="button" className="cf-modal-close" onClick={() => setConfirmArchiveCatalog(null)}>
+                ✕
+              </button>
+            </div>
+            <div className="cf-modal-body">
+              <p style={{ margin: 0, fontSize: '0.92rem', color: '#334155', lineHeight: '1.5' }}>
+                Archive this catalog? It will be removed from the active list and buyer links will stop working.
+              </p>
+            </div>
+            <div className="cf-modal-footer">
+              <button
+                type="button"
+                className="cf-btn cf-btn-secondary"
+                onClick={() => setConfirmArchiveCatalog(null)}
+                disabled={archivingCatalog}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cf-btn"
+                style={{ background: '#f59e0b', color: '#ffffff', borderColor: '#d97706' }}
+                onClick={() => handleArchiveCatalog(confirmArchiveCatalog)}
+                disabled={archivingCatalog}
+              >
+                {archivingCatalog ? 'Archiving…' : 'Archive Catalog'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Catalog Confirmation Modal */}
+      {confirmDeleteCatalog && (
+        <div className="cf-modal-backdrop" onClick={() => setConfirmDeleteCatalog(null)}>
+          <div className="cf-modal cf-modal-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="cf-modal-header">
+              <h3>Delete Catalog Permanently</h3>
+              <button type="button" className="cf-modal-close" onClick={() => setConfirmDeleteCatalog(null)}>
+                ✕
+              </button>
+            </div>
+            <div className="cf-modal-body">
+              <p style={{ margin: 0, fontSize: '0.92rem', color: '#334155', lineHeight: '1.5' }}>
+                Delete this catalog permanently? This action cannot be undone.
+              </p>
+            </div>
+            <div className="cf-modal-footer">
+              <button
+                type="button"
+                className="cf-btn cf-btn-secondary"
+                onClick={() => setConfirmDeleteCatalog(null)}
+                disabled={deletingCatalog}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cf-btn"
+                style={{ background: '#dc2626', color: '#ffffff', borderColor: '#b91c1c' }}
+                onClick={() => handleDeleteCatalog(confirmDeleteCatalog)}
+                disabled={deletingCatalog}
+              >
+                {deletingCatalog ? 'Deleting…' : 'Delete Permanently'}
               </button>
             </div>
           </div>
