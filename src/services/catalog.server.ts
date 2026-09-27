@@ -6,6 +6,7 @@ import {
   PriceMode,
   InventoryMode,
   PlanTier,
+  CatalogVariantConfigInputSchema,
   type CatalogVariantConfigInput,
 } from '../types/index.js';
 import { generateOpaqueToken } from './auth.server.js';
@@ -123,7 +124,7 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
         : 0;
     const customPriceAmount =
       effectivePriceMode === PriceMode.CUSTOM_PRICE
-        ? (validated.customPriceAmount ?? (existing.customPriceAmount ? Number(existing.customPriceAmount) : null))
+        ? (validated.customPriceAmount ?? (existing.customPriceAmount != null ? Number(existing.customPriceAmount) : null))
         : null;
 
     // Handle inventoryMode consistency — normalize legacy CAPPED to STATUS_ONLY
@@ -179,7 +180,7 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
 async function _upsertVariantConfigs(
   tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
   catalogId: string,
-  configs: CatalogVariantConfigInput[]
+  configs: Array<z.infer<typeof CatalogVariantConfigInputSchema>>
 ) {
   for (const vc of configs) {
     const isOverride = vc.overrideQuantityRules !== undefined
@@ -268,7 +269,7 @@ export async function getCatalogVariantConfigs(catalogId: string, shopId: string
       basePrice: Number(v.shopifyPrice),
       imageUrl: v.imageUrl || v.product.imageUrl || null,
       enabled: override ? override.enabled : true,
-      customPrice: override?.customPrice ? Number(override.customPrice) : null,
+      customPrice: override?.customPrice != null ? Number(override.customPrice) : null,
       overrideQuantityRules: hasOverride,
       minQty: hasOverride ? (override?.minQty ?? null) : (catalog.minQty ?? null),
       maxQty: hasOverride ? (override?.maxQty ?? null) : (catalog.maxQty ?? null),
@@ -288,8 +289,10 @@ export async function upsertCatalogVariantConfigs(
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
   }
 
+  const validatedConfigs = configs.map((config) => CatalogVariantConfigInputSchema.parse(config));
+
   return prisma.$transaction(async (tx) => {
-    await _upsertVariantConfigs(tx, catalogId, configs);
+    await _upsertVariantConfigs(tx, catalogId, validatedConfigs);
     // Bump dataVersion so active buyers re-fetch updated catalog
     await tx.catalog.update({
       where: { id: catalogId },

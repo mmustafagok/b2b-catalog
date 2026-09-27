@@ -1390,7 +1390,7 @@ async function _buildCatalogPayload(
     inventoryCap,
     priceMode: catalog.priceMode,
     discountPercent: catalog.discountPercent ? parseFloat(catalog.discountPercent.toFixed(2)) : 0,
-    customPriceAmount: customPriceAmount ? parseFloat(Number(customPriceAmount).toFixed(2)) : null,
+    customPriceAmount: customPriceAmount != null ? parseFloat(Number(customPriceAmount).toFixed(2)) : null,
     minQty: catalogMinQty,
     maxQty: catalogMaxQty,
     qtyIncrement: catalogQtyIncrement,
@@ -1449,9 +1449,9 @@ async function _buildCatalogPayload(
 
       // Pricing: custom per-variant price > catalog custom price > percent discount > shopify price
       let displayPriceDecimal: ReturnType<typeof calculateDisplayPrice>;
-      if (vcfg?.customPrice) {
+      if (vcfg?.customPrice != null) {
         displayPriceDecimal = roundDecimal(vcfg.customPrice);
-      } else if (catalog.priceMode === 'CUSTOM_PRICE' && customPriceAmount) {
+      } else if (catalog.priceMode === 'CUSTOM_PRICE' && customPriceAmount != null) {
         displayPriceDecimal = roundDecimal(customPriceAmount);
       } else {
         displayPriceDecimal = calculateDisplayPrice(

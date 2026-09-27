@@ -746,6 +746,7 @@ export async function submitBuyerOrder(
   const changedLines: ChangedLineItem[] = [];
   let totalItems = 0;
   let subtotalDecimal = new Prisma.Decimal('0.00');
+  const authoritativeUnitPrices = new Map<string, Prisma.Decimal>();
 
   for (const line of validated.lines) {
     const liveVariant = liveVariantMap.get(line.variantId);
@@ -804,9 +805,9 @@ export async function submitBuyerOrder(
     // Price calculation: custom per-variant price > catalog custom price > percent discount > Shopify price
     const vcfg: any = variantConfigMap.get(line.variantId);
     let liveWholesalePrice: Prisma.Decimal;
-    if (vcfg?.customPrice) {
+    if (vcfg?.customPrice != null) {
       liveWholesalePrice = roundDecimal(vcfg.customPrice);
-    } else if (catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice) {
+    } else if (catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice != null) {
       liveWholesalePrice = roundDecimal(catalogCustomPrice);
     } else {
       liveWholesalePrice = calculateDisplayPrice(
@@ -817,9 +818,9 @@ export async function submitBuyerOrder(
     }
 
     if (localSnapshot) {
-      const localWholesalePrice = vcfg?.customPrice
+      const localWholesalePrice = vcfg?.customPrice != null
         ? roundDecimal(vcfg.customPrice)
-        : catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice
+        : catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice != null
           ? roundDecimal(catalogCustomPrice)
           : calculateDisplayPrice(
               localSnapshot.shopifyPrice,
@@ -841,6 +842,7 @@ export async function submitBuyerOrder(
 
     totalItems += line.quantity;
     subtotalDecimal = subtotalDecimal.plus(liveWholesalePrice.times(line.quantity));
+    authoritativeUnitPrices.set(line.variantId, liveWholesalePrice);
   }
 
   if (inventoryChangedItems.length > 0) {
@@ -903,7 +905,17 @@ export async function submitBuyerOrder(
       variantId: resolvedVariantGid,
       quantity: l.quantity,
     };
-    if (hasDiscount) {
+    const vcfg: any = variantConfigMap.get(l.variantId);
+    const hasPriceOverride = vcfg?.customPrice != null ||
+      (catalog.priceMode === PriceMode.CUSTOM_PRICE && catalogCustomPrice != null);
+    const authoritativePrice = authoritativeUnitPrices.get(l.variantId);
+
+    if (hasPriceOverride && authoritativePrice) {
+      item.priceOverride = {
+        amount: authoritativePrice.toFixed(2),
+        currencyCode: (catalog.shop.currency || 'USD').toUpperCase(),
+      };
+    } else if (hasDiscount) {
       item.appliedDiscount = {
         value: Number(catalog.discountPercent),
         valueType: 'PERCENTAGE',
@@ -1870,4 +1882,3 @@ export async function reconcileShopDraftOrders(
 
   return { checked: activeSubmissions.length, deleted: deletedCount, retained: retainedCount };
 }
-

@@ -15,7 +15,12 @@
 import { prisma } from '../db.js';
 import crypto from 'node:crypto';
 import QRCode from 'qrcode';
-import { CreateOrderLinkInput, UpdateOrderLinkInput } from '../types/index.js';
+import {
+  CreateOrderLinkInput,
+  UpdateOrderLinkInput,
+  CreateOrderLinkInputSchema,
+  UpdateOrderLinkInputSchema,
+} from '../types/index.js';
 
 // ─── Token generation ──────────────────────────────────────────────────────────
 
@@ -154,25 +159,26 @@ export async function createOrderLink(
   shopId: string,
   input: CreateOrderLinkInput
 ) {
+  const validated = CreateOrderLinkInputSchema.parse(input);
   const catalog = await prisma.catalog.findFirst({ where: { id: catalogId, shopId } });
   if (!catalog) {
     throw Object.assign(new Error('Catalog not found or unauthorized'), { statusCode: 404, code: 'NOT_FOUND' });
   }
 
   const token = generateOrderLinkToken();
-  const passcodeHash = input.passcode ? hashPasscode(input.passcode) : null;
-  const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
+  const passcodeHash = validated.passcode ? hashPasscode(validated.passcode) : null;
+  const expiresAt = validated.expiresAt ? new Date(validated.expiresAt) : null;
 
   return prisma.orderLink.create({
     data: {
       catalogId,
       shopId,
       token,
-      label: input.label ?? 'Default Link',
+      label: validated.label ?? 'Default Link',
       active: true,
       passcodeHash,
       expiresAt,
-      source: input.source ?? null,
+      source: validated.source ?? null,
     },
   });
 }
@@ -206,19 +212,20 @@ export async function updateOrderLink(
   shopId: string,
   input: UpdateOrderLinkInput
 ) {
+  const validated = UpdateOrderLinkInputSchema.parse(input);
   const existing = await prisma.orderLink.findFirst({ where: { id: linkId, shopId } });
   if (!existing) {
     throw Object.assign(new Error('Order link not found or unauthorized'), { statusCode: 404, code: 'NOT_FOUND' });
   }
 
   const data: Record<string, any> = {};
-  if (input.label !== undefined) data.label = input.label;
-  if (input.active !== undefined) data.active = input.active;
-  if (input.expiresAt !== undefined) data.expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
-  if (input.source !== undefined) data.source = input.source ?? null;
+  if (validated.label !== undefined) data.label = validated.label;
+  if (validated.active !== undefined) data.active = validated.active;
+  if (validated.expiresAt !== undefined) data.expiresAt = validated.expiresAt ? new Date(validated.expiresAt) : null;
+  if (validated.source !== undefined) data.source = validated.source ?? null;
   // passcode: empty string clears it; any other value re-hashes
-  if (input.passcode !== undefined) {
-    data.passcodeHash = input.passcode ? hashPasscode(input.passcode) : null;
+  if (validated.passcode !== undefined) {
+    data.passcodeHash = validated.passcode ? hashPasscode(validated.passcode) : null;
   }
 
   return prisma.orderLink.update({ where: { id: linkId }, data });
@@ -294,9 +301,11 @@ export async function recordOrderLinkSubmission(linkId: string, value: number): 
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
-export function isOrderLinkExpired(link: { expiresAt: Date | null }): boolean {
+export function isOrderLinkExpired(link: { expiresAt: Date | string | null }): boolean {
   if (!link.expiresAt) return false;
-  return new Date() > link.expiresAt;
+  const expiryTime = new Date(link.expiresAt).getTime();
+  // Invalid persisted expiry values fail closed instead of accidentally granting access.
+  return Number.isNaN(expiryTime) || Date.now() >= expiryTime;
 }
 
 export function validateOrderLinkAccess(
@@ -328,4 +337,3 @@ export async function generateQrCodeDataUrl(url: string): Promise<string> {
     width: 300,
   });
 }
-

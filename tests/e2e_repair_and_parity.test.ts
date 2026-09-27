@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import request from 'supertest';
+import { app } from '../src/server.js';
 import { prisma } from '../src/db.js';
 import { installOrUpdateShop } from '../src/services/shop.server.js';
 import {
@@ -314,6 +316,23 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       expect(access.ok).toBe(false);
       expect(access.reason).toBe('LINK_INACTIVE');
     });
+
+    it('14b. expired link is rejected by the public endpoint', async () => {
+      const catalog = await createCatalog(shop.id, {
+        name: 'Expired Link Catalog',
+        sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1001' }],
+      });
+      await publishCatalog(shop.id, catalog.id);
+
+      const link = await createOrderLink(catalog.id, shop.id, {
+        label: 'Expired Campaign',
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      });
+
+      const response = await request(app).get(`/api/public/link/${link.token}`);
+      expect(response.status).toBe(410);
+      expect(response.body.code).toBe('LINK_EXPIRED');
+    });
   });
 
   // ===========================================================================
@@ -565,6 +584,78 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       expect(fetched.priceMode).toBe(PriceMode.CUSTOM_PRICE);
       expect(Number(fetched.customPriceAmount)).toBe(49.99);
       expect(fetched.inventoryMode).toBe(InventoryMode.EXACT);
+    });
+
+    it('20. edit schema accepts decimal values serialized as strings', () => {
+      const parsed = UpdateCatalogInputSchema.parse({
+        discountPercent: '20',
+        customPriceAmount: '49.99',
+      });
+
+      expect(parsed.discountPercent).toBe(20);
+      expect(parsed.customPriceAmount).toBe(49.99);
+    });
+
+    it('21. variant custom price is sent to Shopify as the authoritative price override', async () => {
+      const catalog = await createCatalog(shop.id, {
+        name: 'Variant Override Draft Catalog',
+        priceMode: PriceMode.PERCENT_DISCOUNT,
+        discountPercent: 20,
+        sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1001' }],
+      });
+      await publishCatalog(shop.id, catalog.id);
+      await upsertCatalogVariantConfigs(catalog.id, shop.id, [{
+        shopifyVariantId: 'gid://shopify/ProductVariant/2001',
+        enabled: true,
+        customPrice: 199.99,
+      }]);
+      const current = await getCatalogById(shop.id, catalog.id);
+      let capturedInput: any;
+      const mockClient = {
+        request: async (query: string, variables?: any) => {
+          if (query.includes('getVariantsByIds')) {
+            return {
+              nodes: [{
+                id: 'gid://shopify/ProductVariant/2001',
+                title: 'Black / Mesh',
+                price: '250.00',
+                availableForSale: true,
+                inventoryQuantity: 45,
+                inventoryPolicy: 'DENY',
+                inventoryItem: { tracked: true },
+                product: { id: 'gid://shopify/Product/1001', status: 'ACTIVE', title: 'Ergonomic Office Chair' },
+              }],
+            };
+          }
+          if (query.includes('draftOrderCreate')) {
+            capturedInput = variables?.input;
+            return {
+              draftOrderCreate: {
+                draftOrder: {
+                  id: 'gid://shopify/DraftOrder/price-override',
+                  name: '#PRICE-OVERRIDE',
+                  subtotalPriceSet: { shopMoney: { amount: '199.99', currencyCode: 'USD' } },
+                  totalPriceSet: { shopMoney: { amount: '199.99', currencyCode: 'USD' } },
+                },
+                userErrors: [],
+              },
+            };
+          }
+          return {};
+        },
+      };
+
+      await submitBuyerOrder(catalog.publicToken, 'variant-price-override-regression', {
+        dataVersion: current.dataVersion,
+        lines: [{ variantId: 'gid://shopify/ProductVariant/2001', quantity: 1 }],
+        buyer: { businessName: 'Price Parity Buyer', email: 'price@example.com' },
+      }, mockClient as any);
+
+      expect(capturedInput.lineItems[0].priceOverride).toEqual({
+        amount: '199.99',
+        currencyCode: 'USD',
+      });
+      expect(capturedInput.lineItems[0].appliedDiscount).toBeUndefined();
     });
   });
 });

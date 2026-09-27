@@ -70,8 +70,13 @@ export enum CatalogSourceType {
 export const CatalogVariantConfigInputSchema = z.object({
   shopifyVariantId: z.string().min(1),
   enabled: z.boolean().default(true),
-  customPrice: z.number().min(0).max(999999).optional().nullable(),
-  overrideQuantityRules: z.boolean().optional().default(false),
+  customPrice: z.preprocess(
+    (val) => (typeof val === 'string' && val.trim() !== '' ? Number(val) : val),
+    z.number().min(0).max(999999).optional().nullable()
+  ),
+  // Omitted preserves legacy API behavior: populated rule fields imply an override.
+  // Explicit false resets the variant to catalog-level quantity rules.
+  overrideQuantityRules: z.boolean().optional(),
   minQty: z.number().int().min(1).max(10000).optional().nullable(),
   maxQty: z.number().int().min(1).max(100000).optional().nullable(),
   qtyIncrement: z.number().int().min(1).max(1000).optional().nullable(),
@@ -382,11 +387,17 @@ const optionalNullableInt = (minVal = 1, maxVal?: number) =>
     (maxVal ? z.number().int().min(minVal).max(maxVal) : z.number().int().min(minVal)).optional().nullable()
   );
 
+const numericInput = (schema: z.ZodNumber) =>
+  z.preprocess(
+    (val) => (typeof val === 'string' && val.trim() !== '' ? Number(val) : val),
+    schema
+  );
+
 export const CreateCatalogInputSchema = z.object({
   name: z.string().trim().min(1, 'Catalog name is required').max(100),
   priceMode: z.enum([PriceMode.SHOPIFY_PRICE, PriceMode.PERCENT_DISCOUNT, PriceMode.CUSTOM_PRICE]).default(PriceMode.SHOPIFY_PRICE),
-  discountPercent: z.number().min(0).max(90).optional().default(0),
-  customPriceAmount: z.number().min(0).max(999999).optional().nullable(),
+  discountPercent: numericInput(z.number().min(0).max(90)).optional().default(0),
+  customPriceAmount: numericInput(z.number().min(0).max(999999)).optional().nullable(),
   logoUrl: z.preprocess(
     (val) => (typeof val === 'string' && val.trim().length === 0 ? null : val),
     z.string().url('Logo must be a valid URL').optional().nullable()
@@ -407,8 +418,8 @@ export const CreateCatalogInputSchema = z.object({
 export const UpdateCatalogInputSchema = z.object({
   name: z.string().trim().min(1, 'Catalog name is required').max(100).optional(),
   priceMode: z.enum([PriceMode.SHOPIFY_PRICE, PriceMode.PERCENT_DISCOUNT, PriceMode.CUSTOM_PRICE]).optional(),
-  discountPercent: z.number().min(0).max(90).optional(),
-  customPriceAmount: z.number().min(0).max(999999).optional().nullable(),
+  discountPercent: numericInput(z.number().min(0).max(90)).optional(),
+  customPriceAmount: numericInput(z.number().min(0).max(999999)).optional().nullable(),
   logoUrl: z.preprocess(
     (val) => (typeof val === 'string' && val.trim().length === 0 ? null : val),
     z.string().url('Logo must be a valid URL').optional().nullable()
@@ -512,4 +523,3 @@ export type CatalogVariantConfigInput = z.input<typeof CatalogVariantConfigInput
 export type BuyerFormConfig = z.infer<typeof BuyerFormConfigSchema>;
 export type CreateOrderLinkInput = z.infer<typeof CreateOrderLinkInputSchema>;
 export type UpdateOrderLinkInput = z.infer<typeof UpdateOrderLinkInputSchema>;
-

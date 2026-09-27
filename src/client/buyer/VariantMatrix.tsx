@@ -158,7 +158,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
 
             return (
               <tr key={variant.shopifyVariantId} role="row">
-                <td>
+                <td data-label="Variant / Options">
                   <span style={{ fontWeight: 500 }}>{variant.title}</span>
                   {(variant.minQty || variant.maxQty || variant.qtyIncrement) && (
                     <div className="qty-rules-hint" style={{ fontSize: '0.75rem', color: '#64748b' }}>
@@ -169,12 +169,12 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                   )}
                 </td>
                 {showSku && (
-                  <td>
+                  <td data-label="SKU">
                     <span className="variant-sku">{variant.sku || '—'}</span>
                   </td>
                 )}
-                {inventoryMode !== 'HIDDEN' && <td>{renderStockBadge(variant, inventoryMode, inventoryCap)}</td>}
-                <td>
+                {inventoryMode !== 'HIDDEN' && <td data-label="Availability">{renderStockBadge(variant, inventoryMode, inventoryCap)}</td>}
+                <td data-label="Wholesale Price">
                   <div className="price-box">
                     <span className="display-price">
                       {variant.formattedPrice || `$${variant.displayPrice.toFixed(2)}`}
@@ -184,7 +184,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                     )}
                   </div>
                 </td>
-                <td style={{ textAlign: 'right' }}>
+                <td data-label="Quantity" style={{ textAlign: 'right' }}>
                   <div className="qty-control">
                     <button
                       type="button"

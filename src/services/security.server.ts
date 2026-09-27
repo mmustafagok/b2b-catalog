@@ -236,14 +236,18 @@ export function sanitizeErrorMessage(err: any): string {
     raw = err;
   } else if (!err) {
     return 'An unexpected error occurred';
+  } else if (Array.isArray(err.issues)) {
+    // ZodError extends Error and its default message is a raw JSON issue array.
+    // Prefer concise field-level text for every API/UI consumer.
+    raw = err.issues
+      .map((issue: any) => `${issue.path?.join('.') || 'field'}: ${issue.message}`)
+      .join(', ');
   } else if (err instanceof Error) {
     raw = err.message || 'An error occurred';
   } else if (typeof err === 'object') {
     if (typeof err.message === 'string') raw = err.message;
     else if (typeof err.error === 'string') raw = err.error;
-    else if (Array.isArray(err.issues)) {
-      raw = err.issues.map((i: any) => `${i.path?.join('.') || 'field'}: ${i.message}`).join(', ');
-    } else {
+    else {
       raw = 'An unexpected server error occurred. Please try again.';
     }
   } else {

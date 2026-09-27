@@ -31,6 +31,7 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [qrLoadingId, setQrLoadingId] = useState<string | null>(null);
 
   // New Link form state
   const [label, setLabel] = useState('');
@@ -128,6 +129,7 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
 
   const handleShowQr = async (link: OrderLink) => {
     try {
+      setQrLoadingId(link.id);
       const res = await authenticatedFetch(`/api/admin/catalogs/${catalog.id}/links/${link.id}/qr`);
       if (res.ok) {
         const data = await res.json();
@@ -137,9 +139,14 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
           label: link.label,
           hasPasscode: !!link.passcodeHash,
         });
+      } else {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.error || 'Failed to generate QR code');
       }
     } catch (err: any) {
       onToast(`Error fetching QR code: ${err.message}`);
+    } finally {
+      setQrLoadingId(null);
     }
   };
 
@@ -313,9 +320,10 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
                               type="button"
                               className="cf-btn cf-btn-sm cf-btn-secondary"
                               onClick={() => handleShowQr(link)}
+                              disabled={qrLoadingId === link.id}
                               title="Show and download QR code"
                             >
-                              📱 QR
+                              {qrLoadingId === link.id ? 'Generating…' : '📱 QR'}
                             </button>
                             <button
                               type="button"

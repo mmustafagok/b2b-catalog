@@ -161,9 +161,9 @@ export async function validateBuyerOrderLines(
 
     // Calculate display price
     let currentDisplayPrice: Prisma.Decimal;
-    if (vcfg?.customPrice) {
+    if (vcfg?.customPrice != null) {
       currentDisplayPrice = toDecimal(vcfg.customPrice);
-    } else if (catalog.priceMode === PriceMode.CUSTOM_PRICE && customPriceAmount) {
+    } else if (catalog.priceMode === PriceMode.CUSTOM_PRICE && customPriceAmount != null) {
       currentDisplayPrice = toDecimal(customPriceAmount);
     } else {
       currentDisplayPrice = calculateDisplayPrice(

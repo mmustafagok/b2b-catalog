@@ -882,6 +882,7 @@ body {
   .toggle-btn, .view-toggle-btn {
     justify-content: center;
     text-align: center;
+    min-height: 44px;
   }
 
   .cart-trigger-btn {
@@ -940,9 +941,56 @@ body {
     margin-right: 0.5rem;
   }
 
-  /* Variant matrix table responsiveness on mobile */
+  /* Variant matrix table becomes readable cards instead of overflowing the viewport. */
+  .variant-table,
+  .variant-table thead,
+  .variant-table tbody,
+  .variant-table th,
+  .variant-table td,
+  .variant-table tr {
+    display: block;
+  }
+
+  .variant-table thead {
+    display: none;
+  }
+
+  .variant-table tr {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .variant-table tr:last-child {
+    border-bottom: none;
+  }
+
   .variant-table td {
-    padding: 0.75rem 0.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: none;
+    text-align: right !important;
+    min-width: 0;
+  }
+
+  .variant-table td::before {
+    content: attr(data-label);
+    flex: 0 0 40%;
+    text-align: left;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .qty-btn,
+  .qty-input {
+    height: 44px;
+  }
+
+  .qty-btn {
+    width: 44px;
   }
 
   .sticky-order-bar, .sticky-summary-bar {

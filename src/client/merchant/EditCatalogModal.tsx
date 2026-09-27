@@ -49,7 +49,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
   const [formState, setFormState] = useState<CatalogFormState>({
     name: catalog.name || '',
     priceMode: (catalog.priceMode as any) || 'SHOPIFY_PRICE',
-    discountPercent: catalog.discountPercent || 10,
+    discountPercent: Number(catalog.discountPercent ?? 10),
     customPriceAmount: catalog.customPriceAmount ? String(catalog.customPriceAmount) : '',
     accentColor: catalog.accentColor || '#108043',
     showSku: catalog.showSku !== false,
@@ -92,7 +92,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
       const updates: Record<string, any> = {
         name: formState.name.trim(),
         priceMode: formState.priceMode,
-        discountPercent: formState.priceMode === 'PERCENT_DISCOUNT' ? formState.discountPercent : 0,
+        discountPercent: formState.priceMode === 'PERCENT_DISCOUNT' ? Number(formState.discountPercent) : 0,
         customPriceAmount:
           formState.priceMode === 'CUSTOM_PRICE' ? (parseFloat(formState.customPriceAmount) || null) : null,
         accentColor: formState.accentColor,

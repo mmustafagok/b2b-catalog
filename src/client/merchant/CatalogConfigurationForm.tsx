@@ -10,6 +10,7 @@ export interface CatalogFormState {
   accentColor: string;
   showSku: boolean;
   inventoryMode: 'STATUS_ONLY' | 'EXACT' | 'HIDDEN';
+  inventoryCap?: string;
   minQty: number;
   maxQty: string;
   qtyIncrement: number;
