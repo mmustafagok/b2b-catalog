@@ -150,14 +150,20 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
     }
   };
 
+  const defaultBuyerUrl = typeof window !== 'undefined' ? `${window.location.origin}/c/${catalog.publicToken}` : `/c/${catalog.publicToken}`;
+  const handleCopyDefaultLink = () => {
+    navigator.clipboard.writeText(defaultBuyerUrl);
+    onToast('Default buyer link copied to clipboard!');
+  };
+
   return (
     <div className="cf-modal-backdrop" onClick={onClose}>
       <div className="cf-modal cf-modal-xl" onClick={(e) => e.stopPropagation()}>
         <div className="cf-modal-header">
           <div>
-            <h3>Wholesale Order Links: {catalog.name}</h3>
+            <h3>Share Catalog: {catalog.name}</h3>
             <p style={{ fontSize: '0.825rem', color: '#64748b' }}>
-              Create targeted buyer URLs with optional passcodes, expiration dates, and conversion tracking.
+              Share direct buyer links or create tracked URLs with optional passcodes, expiration dates, and conversion tracking.
             </p>
           </div>
           <button type="button" className="cf-modal-close" onClick={onClose}>
@@ -166,21 +172,63 @@ export const OrderLinksModal: React.FC<OrderLinksModalProps> = ({
         </div>
 
         <div className="cf-modal-body" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Active Links ({links.length})</span>
+          {/* Default Buyer Link Section */}
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1.25rem', marginBottom: '1.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.75rem' }}>
+              <div>
+                <h4 style={{ margin: '0 0 0.25rem 0', fontSize: '0.95rem', fontWeight: 600, color: '#0f172a' }}>
+                  Default Buyer Link (Quick Share)
+                </h4>
+                <p style={{ margin: 0, fontSize: '0.82rem', color: '#64748b' }}>
+                  The direct, unrestricted catalog URL for quick sharing via email, WhatsApp, or messages.
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  className="cf-btn cf-btn-sm cf-btn-secondary"
+                  onClick={handleCopyDefaultLink}
+                >
+                  📋 Copy Link
+                </button>
+                <a
+                  href={`/c/${catalog.publicToken}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="cf-btn cf-btn-sm cf-btn-outline"
+                >
+                  Preview ↗
+                </a>
+              </div>
+            </div>
+            <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '0.45rem 0.75rem', fontSize: '0.82rem', fontFamily: 'monospace', color: '#334155', wordBreak: 'break-all' }}>
+              {defaultBuyerUrl}
+            </div>
+          </div>
+
+          {/* Tracked Order Links Section */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem', borderTop: '1px solid #e2e8f0', paddingTop: '1.25rem' }}>
+            <div>
+              <h4 style={{ margin: '0 0 0.25rem 0', fontSize: '0.95rem', fontWeight: 600, color: '#0f172a' }}>
+                Tracked Order Links ({links.length})
+              </h4>
+              <p style={{ margin: 0, fontSize: '0.82rem', color: '#64748b' }}>
+                Create dedicated links with source labels (e.g. VIP Accounts, Trade Show), optional passcodes, expiry dates, and separate conversion analytics.
+              </p>
+            </div>
             <button
               type="button"
               className="cf-btn cf-btn-sm cf-btn-primary"
               onClick={() => setShowCreateForm(!showCreateForm)}
             >
-              {showCreateForm ? 'Cancel' : '+ New Order Link'}
+              {showCreateForm ? 'Cancel' : '+ New Tracked Link'}
             </button>
           </div>
 
           {/* Create Link Form */}
           {showCreateForm && (
             <form onSubmit={handleCreateLink} style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1.25rem' }}>
-              <h4 style={{ fontSize: '0.925rem', marginBottom: '0.75rem', fontWeight: 600 }}>Create New Order Link</h4>
+              <h4 style={{ fontSize: '0.925rem', marginBottom: '0.75rem', fontWeight: 600 }}>Create New Tracked Order Link</h4>
               
               <div className="cf-form-group">
                 <label className="cf-label" htmlFor="link-label">Link Label / Buyer Tag *</label>

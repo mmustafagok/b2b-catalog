@@ -258,22 +258,21 @@ export function resetOrderLinkViewCache(): void {
  */
 export async function recordOrderLinkView(linkId: string, sessionIdentifier?: string): Promise<boolean> {
   const now = Date.now();
+  const effectiveSessionId = (sessionIdentifier || '').trim() || 'anonymous_session';
 
-  if (sessionIdentifier) {
-    const key = `${linkId}:${sessionIdentifier}`;
-    const lastView = sessionViewCache.get(key);
-    if (lastView && now - lastView < VIEW_DEDUPLICATION_WINDOW_MS) {
-      // Deduplicated within session window
-      return false;
-    }
-    sessionViewCache.set(key, now);
+  const key = `${linkId}:${effectiveSessionId}`;
+  const lastView = sessionViewCache.get(key);
+  if (lastView && now - lastView < VIEW_DEDUPLICATION_WINDOW_MS) {
+    // Deduplicated within session window
+    return false;
+  }
+  sessionViewCache.set(key, now);
 
-    // Prune stale cache entries if cache grows
-    if (sessionViewCache.size > 5000) {
-      for (const [k, ts] of sessionViewCache.entries()) {
-        if (now - ts >= VIEW_DEDUPLICATION_WINDOW_MS) {
-          sessionViewCache.delete(k);
-        }
+  // Prune stale cache entries if cache grows
+  if (sessionViewCache.size > 5000) {
+    for (const [k, ts] of sessionViewCache.entries()) {
+      if (now - ts >= VIEW_DEDUPLICATION_WINDOW_MS) {
+        sessionViewCache.delete(k);
       }
     }
   }

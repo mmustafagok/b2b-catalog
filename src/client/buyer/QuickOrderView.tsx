@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ProductItem, renderStockBadge, VariantItem } from './VariantMatrix.js';
+import { ProductItem, renderStockBadge, VariantItem, formatBuyerQuantityRule } from './VariantMatrix.js';
 import { nextValidQuantity, previousValidQuantity, normalizeQuantity, resolveVariantInventory } from '../../types/index.js';
 
 interface QuickOrderViewProps {
@@ -195,13 +195,14 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                     <td data-label="Product">
                       <div className="quick-order-product-title">{row.productTitle}</div>
                       <div className="quick-order-variant-title">{row.variantTitle}</div>
-                      {(row.minQty || row.maxQty || row.qtyIncrement) && (
-                        <div className="qty-rules-hint">
-                          {row.minQty && <span>Min: {row.minQty} </span>}
-                          {row.maxQty && <span>Max: {row.maxQty} </span>}
-                          {row.qtyIncrement && row.qtyIncrement > 1 && <span>Step: {row.qtyIncrement}</span>}
-                        </div>
-                      )}
+                      {(() => {
+                        const ruleHint = formatBuyerQuantityRule(row.minQty, row.qtyIncrement, row.maxQty);
+                        return ruleHint ? (
+                          <div className="qty-rules-hint" style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '2px' }}>
+                            {ruleHint}
+                          </div>
+                        ) : null;
+                      })()}
                     </td>
                     {showSku && (
                       <td data-label="SKU">
@@ -215,11 +216,16 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                     )}
                     <td data-label="Price">
                       <div className="price-box">
-                        <span className="display-price">
-                          {row.formattedPrice || `$${row.displayPrice.toFixed(2)}`}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '5px', flexWrap: 'wrap' }}>
+                          <span className="price-type-label" style={{ fontSize: '0.68rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.025em', fontWeight: 600 }}>Wholesale</span>
+                          <span className="display-price">
+                            {row.formattedPrice || `$${row.displayPrice.toFixed(2)}`}
+                          </span>
+                        </div>
                         {row.displayPrice < row.basePrice && (
-                          <span className="base-price-struck">${row.basePrice.toFixed(2)}</span>
+                          <span className="base-price-struck" style={{ fontSize: '0.78rem' }}>
+                            <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Retail </span>${row.basePrice.toFixed(2)}
+                          </span>
                         )}
                       </div>
                     </td>

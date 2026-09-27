@@ -183,4 +183,96 @@ describe('Production Fix: Order Link HTTP 500 & Quantity Rule Override Migration
     expect(res.status).toBe(200);
     expect(res.body.catalog.id).toBe(catalog.id);
   });
+
+  it('8. TEST 110: View count deduplication — browser refresh does not inflate view counter', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Deduplicated View Catalog',
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/8801' }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    const link = await createOrderLink(catalog.id, shop.id, { label: 'Tracked Link' });
+    expect(link.views).toBe(0);
+
+    // Initial visit from Session A
+    const res1 = await request(app)
+      .get(`/api/public/link/${link.token}`)
+      .set('X-Session-ID', 'sess_buyer_alpha');
+    expect(res1.status).toBe(200);
+
+    // Wait short tick for fire-and-forget DB update
+    await new Promise((r) => setTimeout(r, 50));
+
+    const check1 = await prisma.orderLink.findUnique({ where: { id: link.id } });
+    expect(check1?.views).toBe(1);
+
+    // Refresh 1: same session repeats request
+    const res2 = await request(app)
+      .get(`/api/public/link/${link.token}`)
+      .set('X-Session-ID', 'sess_buyer_alpha');
+    expect(res2.status).toBe(200);
+
+    // Refresh 2-5: simulated refresh spam in same session
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .get(`/api/public/link/${link.token}`)
+        .set('X-Session-ID', 'sess_buyer_alpha');
+    }
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const checkAfterRefreshes = await prisma.orderLink.findUnique({ where: { id: link.id } });
+    expect(checkAfterRefreshes?.views).toBe(1); // STILL 1, not inflated to 7!
+
+    // Distinct visitor: Session B arrives
+    const resB = await request(app)
+      .get(`/api/public/link/${link.token}`)
+      .set('X-Session-ID', 'sess_buyer_beta');
+    expect(resB.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const checkSessionB = await prisma.orderLink.findUnique({ where: { id: link.id } });
+    expect(checkSessionB?.views).toBe(2); // Exactly 2 real visitors
+
+    // Verify analytics events are also deduplicated
+    const viewEvents = await prisma.analyticsEvent.findMany({
+      where: { catalogId: catalog.id, eventName: 'catalog_viewed' },
+    });
+    expect(viewEvents.length).toBe(2);
+  });
+
+  it('9. TEST 110: Cookie-based deduplication — sets cf_b2b_session cookie and deduplicates without headers', async () => {
+    const catalog = await createCatalog(shop.id, {
+      name: 'Cookie Deduplicated Catalog',
+      sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/8801' }],
+    });
+    await publishCatalog(shop.id, catalog.id);
+
+    const link = await createOrderLink(catalog.id, shop.id, { label: 'Cookie Link' });
+
+    // Request 1 without session header: server sets cookie
+    const res1 = await request(app).get(`/api/public/link/${link.token}`);
+    const cookiesRaw = res1.headers['set-cookie'];
+    expect(cookiesRaw).toBeDefined();
+    const cookieList: string[] = Array.isArray(cookiesRaw) ? cookiesRaw : (cookiesRaw ? [cookiesRaw] : []);
+    const sessionCookie = cookieList.find((c) => c.startsWith('cf_b2b_session='));
+    expect(sessionCookie).toBeDefined();
+
+    const rawCookieVal = sessionCookie!.split(';')[0]; // cf_b2b_session=...
+
+    await new Promise((r) => setTimeout(r, 50));
+    const check1 = await prisma.orderLink.findUnique({ where: { id: link.id } });
+    expect(check1?.views).toBe(1);
+
+    // Browser refresh: sends back the cookie
+    const res2 = await request(app)
+      .get(`/api/public/link/${link.token}`)
+      .set('Cookie', [rawCookieVal]);
+    expect(res2.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 50));
+    const check2 = await prisma.orderLink.findUnique({ where: { id: link.id } });
+    expect(check2?.views).toBe(1); // STILL 1!
+  });
 });

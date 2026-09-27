@@ -146,6 +146,13 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
           onChange={(e) => onChange({ name: e.target.value })}
           required
         />
+        <span style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.25rem', display: 'block' }}>
+          This name is visible to buyers.
+        </span>
+      </div>
+
+      <div className="cf-defaults-banner" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.65rem 0.85rem', marginBottom: '1rem', fontSize: '0.825rem', color: '#475569' }}>
+        💡 <strong>Defaults are ready to use.</strong> Change these only if your wholesale workflow needs different rules.
       </div>
 
       {activeTab === 'sources' && (
@@ -360,7 +367,10 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
       {activeTab === 'pricing' && (
         <div className="cf-tab-pane">
           <div className="cf-form-group" style={{ marginBottom: '1.25rem' }}>
-            <label className="cf-label">Pricing Rule</label>
+            <label className="cf-label">Pricing Rule (Optional)</label>
+            <p className="cf-section-desc" style={{ marginBottom: '0.65rem' }}>
+              Choose how wholesale prices are calculated. Defaults to live Shopify retail prices.
+            </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.35rem' }}>
               <label className="cf-radio-card" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                 <input
@@ -512,14 +522,14 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
 
       {activeTab === 'rules' && (
         <div className="cf-tab-pane">
-          <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', fontWeight: 600 }}>Catalog Quantity Rules</h4>
+          <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', fontWeight: 600 }}>Catalog Quantity Rules (Optional)</h4>
           <p className="cf-section-desc" style={{ marginBottom: '1rem' }}>
-            Set order unit constraints across all variants in this catalog.
+            Set order unit constraints across all variants in this catalog. Defaults are ready to use (1 unit minimum with no maximum limit).
           </p>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '1rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem' }}>
             <div>
-              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Min Quantity</label>
+              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Minimum order quantity</label>
               <input
                 type="number"
                 min="1"
@@ -527,24 +537,11 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                 value={formState.minQty}
                 onChange={(e) => onChange({ minQty: Math.max(1, parseInt(e.target.value, 10) || 1) })}
               />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Minimum units required</span>
+              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Minimum units required per order</span>
             </div>
 
             <div>
-              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Max Quantity</label>
-              <input
-                type="number"
-                min="1"
-                className="cf-input"
-                placeholder="Optional"
-                value={formState.maxQty}
-                onChange={(e) => onChange({ maxQty: e.target.value })}
-              />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Optional ceiling per line</span>
-            </div>
-
-            <div>
-              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Step / Increment</label>
+              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Order in multiples of</label>
               <input
                 type="number"
                 min="1"
@@ -552,8 +549,25 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                 value={formState.qtyIncrement}
                 onChange={(e) => onChange({ qtyIncrement: Math.max(1, parseInt(e.target.value, 10) || 1) })}
               />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Pack size / multiplier</span>
+              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Pack size or order increment</span>
             </div>
+
+            <div>
+              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Maximum quantity (Optional)</label>
+              <input
+                type="number"
+                min="1"
+                className="cf-input"
+                placeholder="No limit"
+                value={formState.maxQty}
+                onChange={(e) => onChange({ maxQty: e.target.value })}
+              />
+              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Optional ceiling per line</span>
+            </div>
+          </div>
+
+          <div style={{ marginTop: '0.85rem', fontSize: '0.82rem', color: '#475569', background: '#f8fafc', padding: '0.6rem 0.85rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+            💡 <strong>Example:</strong> Buyers can order {formState.minQty}, {formState.minQty + formState.qtyIncrement}, {formState.minQty + 2 * formState.qtyIncrement}, {formState.minQty + 3 * formState.qtyIncrement}{formState.maxQty ? ` (up to ${formState.maxQty})` : ''}...
           </div>
 
           <hr style={{ border: 'none', borderTop: '1px solid #e2e8f0', margin: '1.25rem 0' }} />
@@ -596,44 +610,56 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
 
       {activeTab === 'form' && (
         <div className="cf-tab-pane">
-          <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', fontWeight: 600 }}>Buyer Order Form Fields</h4>
+          <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', fontWeight: 600 }}>Buyer Order Form Fields (Optional)</h4>
           <p className="cf-section-desc" style={{ marginBottom: '1rem' }}>
             Configure fields requested from wholesale buyers when submitting orders.
           </p>
 
+          <div style={{ marginBottom: '1rem', padding: '0.75rem', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0', fontSize: '0.84rem', color: '#475569' }}>
+            <span style={{ fontWeight: 600, color: '#0f172a' }}>Standard Required Fields:</span> Business Name and Email are always required from buyers to create draft orders in Shopify.
+          </div>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <div style={{ padding: '0.75rem', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>🔢 Purchase Order Number (PO)</div>
+              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>🔢 Purchase Order Number (PO) — Optional field</div>
               <div style={{ display: 'flex', gap: '1.25rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
                     checked={formState.buyerFormConfig.showPoNumber !== false}
                     onChange={(e) => updateBuyerForm('showPoNumber', e.target.checked)}
                   />
-                  Show Field
+                  Show Field to Buyer
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
                     checked={!!formState.buyerFormConfig.requirePoNumber}
                     onChange={(e) => updateBuyerForm('requirePoNumber', e.target.checked)}
                   />
-                  Require Field
+                  Require Field from Buyer
                 </label>
               </div>
             </div>
 
             <div style={{ padding: '0.75rem', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>📝 Order Notes & Special Instructions</div>
+              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>📝 Order Notes & Special Instructions — Optional field</div>
               <div style={{ display: 'flex', gap: '1.25rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
                     checked={formState.buyerFormConfig.showNote !== false}
                     onChange={(e) => updateBuyerForm('showNote', e.target.checked)}
                   />
-                  Show Field
+                  Show Field to Buyer
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!formState.buyerFormConfig.requireNote}
+                    onChange={(e) => updateBuyerForm('requireNote', e.target.checked)}
+                  />
+                  Require Field from Buyer
                 </label>
               </div>
             </div>

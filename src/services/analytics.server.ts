@@ -92,27 +92,56 @@ export async function recordAnalyticsEvent(
       }
     }
 
-    if (eventKey) {
-      await prisma.analyticsEvent.upsert({
-        where: { eventKey },
-        create: {
-          shopId,
-          catalogId: validCatalogId,
-          eventName,
-          eventKey,
-          metadataJson: sanitizedMetadataJson,
-        },
-        update: {}, // Deduplicated: no-op if already recorded
-      });
-    } else {
-      await prisma.analyticsEvent.create({
-        data: {
-          shopId,
-          catalogId: validCatalogId,
-          eventName,
-          metadataJson: sanitizedMetadataJson,
-        },
-      });
+    try {
+      if (eventKey) {
+        await prisma.analyticsEvent.upsert({
+          where: { eventKey },
+          create: {
+            shopId,
+            catalogId: validCatalogId,
+            eventName,
+            eventKey,
+            metadataJson: sanitizedMetadataJson,
+          },
+          update: {}, // Deduplicated: no-op if already recorded
+        });
+      } else {
+        await prisma.analyticsEvent.create({
+          data: {
+            shopId,
+            catalogId: validCatalogId,
+            eventName,
+            metadataJson: sanitizedMetadataJson,
+          },
+        });
+      }
+    } catch (dbErr: any) {
+      if (dbErr?.code === 'P2003' && validCatalogId) {
+        if (eventKey) {
+          await prisma.analyticsEvent.upsert({
+            where: { eventKey },
+            create: {
+              shopId,
+              catalogId: null,
+              eventName,
+              eventKey,
+              metadataJson: sanitizedMetadataJson,
+            },
+            update: {},
+          }).catch(() => {});
+        } else {
+          await prisma.analyticsEvent.create({
+            data: {
+              shopId,
+              catalogId: null,
+              eventName,
+              metadataJson: sanitizedMetadataJson,
+            },
+          }).catch(() => {});
+        }
+      } else {
+        throw dbErr;
+      }
     }
   } catch (err: any) {
     // Non-blocking log: analytics recording failure must never crash core order workflows

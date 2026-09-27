@@ -92,6 +92,20 @@ export const BuyerCatalogApp: React.FC = () => {
     };
   }, []);
 
+  const getSessionIdentifier = (): string => {
+    try {
+      const key = 'cf_b2b_session_id';
+      let sid = window.sessionStorage?.getItem(key);
+      if (!sid) {
+        sid = 'sess_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        window.sessionStorage?.setItem(key, sid);
+      }
+      return sid;
+    } catch {
+      return '';
+    }
+  };
+
   const fetchCatalogData = async (overrideAccessToken?: string | null) => {
     if (!routeToken) {
       setError('Missing catalog link in URL.');
@@ -105,6 +119,11 @@ export const BuyerCatalogApp: React.FC = () => {
 
       let url = '';
       const headers: Record<string, string> = {};
+
+      const sid = getSessionIdentifier();
+      if (sid) {
+        headers['X-Session-ID'] = sid;
+      }
 
       const tokenToUse = overrideAccessToken !== undefined ? overrideAccessToken : linkAccessToken;
       if (tokenToUse) {
@@ -312,9 +331,10 @@ export const BuyerCatalogApp: React.FC = () => {
       }
 
       clearBuyerIdempotencyKey(tokenKey);
+      const resolvedRef = json.referenceNumber || json.draftOrderName || (json.submissionId ? `CF-2026-${json.submissionId.slice(-4).toUpperCase()}` : 'CF-2026-ORDER');
       setSubmittedOrder({
         submissionId: json.submissionId,
-        reference: json.orderName || json.reference || 'SUBMITTED',
+        reference: resolvedRef,
         subtotal: subtotal,
       });
       setIsDrawerOpen(false);
@@ -364,8 +384,7 @@ export const BuyerCatalogApp: React.FC = () => {
           <h2>Wholesale Order Received!</h2>
           <p className="order-ref">Order Reference: <strong>{submittedOrder.reference}</strong></p>
           <p className="success-sub">
-            Thank you, <strong>{data.catalog.name}</strong> has received your order submission.
-            A confirmation and Shopify invoice will be issued shortly.
+            Your order request has been submitted. The seller will review it and send the next steps through Shopify.
           </p>
           <button
             type="button"

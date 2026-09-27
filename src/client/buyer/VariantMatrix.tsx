@@ -53,6 +53,31 @@ export function renderStockBadge(
   );
 }
 
+export function formatBuyerQuantityRule(
+  minQty?: number | null,
+  qtyIncrement?: number | null,
+  maxQty?: number | null
+): string | null {
+  const parts: string[] = [];
+  const min = minQty && minQty > 1 ? minQty : null;
+  const step = qtyIncrement && qtyIncrement > 1 ? qtyIncrement : null;
+  const max = maxQty && maxQty > 0 ? maxQty : null;
+
+  if (min && step) {
+    parts.push(`Minimum ${min} · Order in multiples of ${step}`);
+  } else if (min) {
+    parts.push(`Minimum order of ${min}`);
+  } else if (step) {
+    parts.push(`Order in multiples of ${step}`);
+  }
+
+  if (max) {
+    parts.push(`Max ${max}`);
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 export interface ProductItem {
   id: string;
   shopifyProductId: string;
@@ -160,13 +185,14 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
               <tr key={variant.shopifyVariantId} role="row">
                 <td data-label="Variant / Options">
                   <span style={{ fontWeight: 500 }}>{variant.title}</span>
-                  {(variant.minQty || variant.maxQty || variant.qtyIncrement) && (
-                    <div className="qty-rules-hint" style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                      {variant.minQty && <span>Min: {variant.minQty} </span>}
-                      {variant.maxQty && <span>Max: {variant.maxQty} </span>}
-                      {variant.qtyIncrement && variant.qtyIncrement > 1 && <span>Step: {variant.qtyIncrement}</span>}
-                    </div>
-                  )}
+                  {(() => {
+                    const ruleHint = formatBuyerQuantityRule(variant.minQty, variant.qtyIncrement, variant.maxQty);
+                    return ruleHint ? (
+                      <div className="qty-rules-hint" style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '2px' }}>
+                        {ruleHint}
+                      </div>
+                    ) : null;
+                  })()}
                 </td>
                 {showSku && (
                   <td data-label="SKU">
@@ -176,11 +202,16 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                 {inventoryMode !== 'HIDDEN' && <td data-label="Availability">{renderStockBadge(variant, inventoryMode, inventoryCap)}</td>}
                 <td data-label="Wholesale Price">
                   <div className="price-box">
-                    <span className="display-price">
-                      {variant.formattedPrice || `$${variant.displayPrice.toFixed(2)}`}
-                    </span>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: '5px', flexWrap: 'wrap' }}>
+                      <span className="price-type-label" style={{ fontSize: '0.68rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.025em', fontWeight: 600 }}>Wholesale</span>
+                      <span className="display-price">
+                        {variant.formattedPrice || `$${variant.displayPrice.toFixed(2)}`}
+                      </span>
+                    </div>
                     {hasDiscount && (
-                      <span className="base-price-struck">${variant.basePrice.toFixed(2)}</span>
+                      <span className="base-price-struck" style={{ fontSize: '0.78rem' }}>
+                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Retail </span>${variant.basePrice.toFixed(2)}
+                      </span>
                     )}
                   </div>
                 </td>

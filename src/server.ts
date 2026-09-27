@@ -259,6 +259,39 @@ app.post('/api/auth/token-exchange', async (req: Request, res: Response) => {
 // PUBLIC BUYER PORTAL API
 // ==========================================
 
+// Helper: Resolves and cookies privacy-safe buyer session identifier for view deduplication
+function resolveBuyerSessionIdentifier(req: Request, res: Response): string {
+  let sessionIdentifier = (
+    req.get('X-Session-ID') ||
+    req.get('x-session-id') ||
+    (req.cookies?.cf_b2b_session as string)
+  )?.trim();
+
+  if (!sessionIdentifier) {
+    const clientIp = (req.ip || req.socket.remoteAddress || '127.0.0.1').trim();
+    const userAgent = (req.get('user-agent') || '').trim();
+    sessionIdentifier = crypto
+      .createHash('sha256')
+      .update(`${clientIp}:${userAgent}`)
+      .digest('hex')
+      .slice(0, 32);
+  }
+
+  if (!req.cookies?.cf_b2b_session) {
+    try {
+      res.cookie('cf_b2b_session', sessionIdentifier, {
+        httpOnly: true,
+        sameSite: 'lax',
+        maxAge: 30 * 60 * 1000, // 30 minutes
+      });
+    } catch {
+      // ignore if headers already sent
+    }
+  }
+
+  return sessionIdentifier;
+}
+
 // 1. Get Public Catalog (M9.2 Tiered Rate Limiter)
 app.get('/api/public/catalog/:publicToken', publicCatalogGetLimiter, async (req: Request, res: Response) => {
   const requestId = (req.get('X-Request-ID') || req.get('x-request-id') || crypto.randomUUID()).trim();
@@ -277,9 +310,16 @@ app.get('/api/public/catalog/:publicToken', publicCatalogGetLimiter, async (req:
       return res.status(404).json({ error: 'Catalog not found, unpublished, or unavailable', requestId });
     }
 
-    // Safe non-blocking fire-and-forget analytics recording (never delays or breaks buyer load)
+    // Safe non-blocking fire-and-forget analytics recording (with session deduplication)
+    const sessionIdentifier = resolveBuyerSessionIdentifier(req, res);
     if (payload.shop && payload.shop.id) {
-      void recordAnalyticsEvent(payload.shop.id, ANALYTICS_EVENTS.CATALOG_VIEWED, payload.catalog.id);
+      void recordAnalyticsEvent(
+        payload.shop.id,
+        ANALYTICS_EVENTS.CATALOG_VIEWED,
+        payload.catalog.id,
+        undefined,
+        `cat_view:${payload.catalog.id}:${sessionIdentifier}:${Math.floor(Date.now() / (30 * 60 * 1000))}`
+      );
     }
 
     return res.status(200).json(payload);
@@ -587,14 +627,16 @@ app.get('/api/public/link/:linkToken', publicCatalogGetLimiter, async (req: Requ
     }
 
     // Session-based view deduplication (privacy-safe anonymous session window)
-    const sessionIdentifier = (
-      req.get('X-Session-ID') ||
-      req.cookies?.cf_b2b_session ||
-      (req.ip ? crypto.createHash('sha256').update(req.ip + (req.get('user-agent') || '')).digest('hex').slice(0, 32) : undefined)
-    );
-    void recordOrderLinkView(link.id, sessionIdentifier);
-    if (payload.shop && payload.shop.id) {
-      void recordAnalyticsEvent(payload.shop.id, ANALYTICS_EVENTS.CATALOG_VIEWED, payload.catalog.id);
+    const sessionIdentifier = resolveBuyerSessionIdentifier(req, res);
+    const isNewView = await recordOrderLinkView(link.id, sessionIdentifier);
+    if (isNewView && payload.shop && payload.shop.id) {
+      void recordAnalyticsEvent(
+        payload.shop.id,
+        ANALYTICS_EVENTS.CATALOG_VIEWED,
+        payload.catalog.id,
+        undefined,
+        `link_view:${link.id}:${sessionIdentifier}:${Math.floor(Date.now() / (30 * 60 * 1000))}`
+      );
     }
 
     return res.status(200).json({

@@ -194,8 +194,19 @@ export const VariantConfigsModal: React.FC<VariantConfigsModalProps> = ({
                         />
                       </td>
                       <td>
-                        <div style={{ fontWeight: 600 }}>{c.productTitle || 'Product'}</div>
-                        <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: 600 }}>{c.productTitle || 'Product'}</span>
+                          {c.overrideQuantityRules || (c.customPrice !== null && c.customPrice !== undefined) ? (
+                            <span className="cf-badge cf-badge-info" style={{ fontSize: '0.7rem', padding: '1px 5px', fontWeight: 600 }}>
+                              Custom settings
+                            </span>
+                          ) : (
+                            <span className="cf-badge cf-badge-outline" style={{ fontSize: '0.7rem', padding: '1px 5px', color: '#64748b' }}>
+                              Uses catalog defaults
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '2px' }}>
                           {c.variantTitle || c.shopifyVariantId} {c.sku ? `• SKU: ${c.sku}` : ''}
                         </div>
                       </td>

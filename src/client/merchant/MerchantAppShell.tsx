@@ -657,20 +657,32 @@ export const MerchantAppShell: React.FC = () => {
                 {/* 1. First-Use Primary Card */}
                 {catalogs.length === 0 ? (
                   <div className="cf-card cf-first-use-card" id="cf-first-use-card" style={{ marginBottom: '1.5rem', padding: '1.5rem' }}>
-                    <div style={{ maxWidth: '600px' }}>
+                    <div style={{ maxWidth: '640px' }}>
                       <h2 style={{ fontSize: '1.25rem', fontWeight: 600, margin: '0 0 0.5rem 0', color: '#202223' }}>
-                        Create your first wholesale catalog
+                        Create your first catalog
                       </h2>
-                      <p style={{ fontSize: '0.95rem', color: '#6d7175', margin: '0 0 1.25rem 0', lineHeight: '1.5' }}>
+                      <p style={{ fontSize: '0.95rem', color: '#6d7175', margin: '0 0 1rem 0', lineHeight: '1.5' }}>
                         Choose products, set wholesale pricing and quantity rules, then share a buyer link.
                       </p>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1.25rem', fontSize: '0.82rem', color: '#475569', background: '#f8fafc', padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                        <span style={{ fontWeight: 600, color: '#0f172a' }}>Progression:</span>
+                        <span>Create</span>
+                        <span>→</span>
+                        <span>Configure</span>
+                        <span>→</span>
+                        <span>Publish</span>
+                        <span>→</span>
+                        <span>Share</span>
+                        <span>→</span>
+                        <span>Receive orders</span>
+                      </div>
                       <button
                         type="button"
                         className="cf-btn cf-btn-primary"
                         onClick={openCreateWizard}
                         id="cf-first-use-create-btn"
                       >
-                        Create your first wholesale catalog
+                        Create your first catalog
                       </button>
                     </div>
                   </div>
@@ -935,14 +947,28 @@ export const MerchantAppShell: React.FC = () => {
 
                 {catalogs.length === 0 ? (
                   <div className="cf-empty-state">
-                    <h3>Create your first wholesale catalog</h3>
+                    <h3>Create your first catalog</h3>
                     <p>Choose products, set wholesale pricing and quantity rules, then share a buyer link.</p>
-                    <button
-                      className="cf-btn cf-btn-primary"
-                      onClick={openCreateWizard}
-                    >
-                      Create your first wholesale catalog
-                    </button>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', margin: '0.75rem 0 1.25rem 0', fontSize: '0.82rem', color: '#475569', background: '#f8fafc', padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontWeight: 600, color: '#0f172a' }}>Progression:</span>
+                      <span>Create</span>
+                      <span>→</span>
+                      <span>Configure</span>
+                      <span>→</span>
+                      <span>Publish</span>
+                      <span>→</span>
+                      <span>Share</span>
+                      <span>→</span>
+                      <span>Receive orders</span>
+                    </div>
+                    <div>
+                      <button
+                        className="cf-btn cf-btn-primary"
+                        onClick={openCreateWizard}
+                      >
+                        Create your first catalog
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="cf-table-container">
@@ -996,13 +1022,18 @@ export const MerchantAppShell: React.FC = () => {
                             </td>
                             <td>
                               {cat.status === 'PUBLISHED' ? (
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-outline"
-                                  onClick={() => handleCopyLink(cat.publicToken)}
-                                  title="Copy live buyer link to clipboard"
-                                >
-                                  📋 Copy Link
-                                </button>
+                                <div>
+                                  <button
+                                    className="cf-btn cf-btn-sm cf-btn-outline"
+                                    onClick={() => handleCopyLink(cat.publicToken)}
+                                    title="Copy live buyer link to clipboard"
+                                  >
+                                    📋 Copy Link
+                                  </button>
+                                  <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '3px' }}>
+                                    Default link
+                                  </div>
+                                </div>
                               ) : (
                                 <span className="cf-text-muted" style={{ fontSize: '0.82rem' }}>
                                   Draft (Unpublished)
@@ -1011,44 +1042,70 @@ export const MerchantAppShell: React.FC = () => {
                             </td>
                             <td>
                               <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                                {cat.status === 'PUBLISHED' && (
-                                  <a
-                                    href={`/c/${cat.publicToken}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="cf-btn cf-btn-sm cf-btn-primary"
-                                    title="Open catalog preview in new tab"
-                                  >
-                                    Preview ↗
-                                  </a>
+                                {cat.status === 'PUBLISHED' ? (
+                                  <>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-primary"
+                                      onClick={() => setLinksCatalog(cat)}
+                                      title="Share catalog & manage tracked buyer links"
+                                    >
+                                      🔗 Share catalog
+                                    </button>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-secondary"
+                                      onClick={() => setEditingCatalog(cat)}
+                                      title="Edit products and catalog configuration"
+                                    >
+                                      ✏️ Edit
+                                    </button>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-secondary"
+                                      onClick={() => setVariantConfigsCatalog(cat)}
+                                      title="Configure variant availability and overrides"
+                                    >
+                                      ⚙️ Variants
+                                    </button>
+                                    <a
+                                      href={`/c/${cat.publicToken}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="cf-btn cf-btn-sm cf-btn-secondary"
+                                      title="Open catalog preview in new tab"
+                                    >
+                                      Preview ↗
+                                    </a>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-outline"
+                                      onClick={() => handlePublishToggle(cat)}
+                                    >
+                                      Unpublish
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-primary"
+                                      onClick={() => handlePublishToggle(cat)}
+                                      title="Publish catalog to make it shareable"
+                                    >
+                                      Publish
+                                    </button>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-secondary"
+                                      onClick={() => setEditingCatalog(cat)}
+                                      title="Edit products and catalog configuration"
+                                    >
+                                      ✏️ Edit
+                                    </button>
+                                    <button
+                                      className="cf-btn cf-btn-sm cf-btn-secondary"
+                                      onClick={() => setVariantConfigsCatalog(cat)}
+                                      title="Configure variant availability and overrides"
+                                    >
+                                      ⚙️ Variants
+                                    </button>
+                                  </>
                                 )}
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-secondary"
-                                  onClick={() => setEditingCatalog(cat)}
-                                  title="Edit products and catalog configuration"
-                                >
-                                  ✏️ Edit
-                                </button>
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-secondary"
-                                  onClick={() => setVariantConfigsCatalog(cat)}
-                                  title="Configure variant availability and overrides"
-                                >
-                                  ⚙️ Variants
-                                </button>
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-secondary"
-                                  onClick={() => setLinksCatalog(cat)}
-                                  title="Manage order links & QR codes"
-                                >
-                                  🔗 Links
-                                </button>
-                                <button
-                                  className="cf-btn cf-btn-sm cf-btn-outline"
-                                  onClick={() => handlePublishToggle(cat)}
-                                >
-                                  {cat.status === 'PUBLISHED' ? 'Unpublish' : 'Publish'}
-                                </button>
                               </div>
                             </td>
                           </tr>
@@ -1070,6 +1127,13 @@ export const MerchantAppShell: React.FC = () => {
                       Every submission automatically creates a native Shopify Draft Order. No raw customer PII is stored locally.
                     </p>
                   </div>
+                </div>
+
+                <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px', padding: '0.75rem 1rem', marginBottom: '1.25rem', fontSize: '0.86rem', color: '#166534', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <span style={{ fontSize: '1.1rem' }}>💡</span>
+                  <span>
+                    <strong>Next step:</strong> Review the draft in Shopify, add shipping or address details if needed, then send the invoice.
+                  </span>
                 </div>
 
                 <div className="cf-filter-bar">
