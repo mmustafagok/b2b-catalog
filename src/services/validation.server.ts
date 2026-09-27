@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { BuyerValidateOrderSchema, resolveEffectiveQuantityRules } from '../types/index.js';
+import { BuyerValidateOrderSchema, resolveEffectiveQuantityRules, isValidQuantity } from '../types/index.js';
 import { calculateDisplayPrice, toDecimal, formatMoney } from './pricing.server.js';
 import { CatalogStatus, PriceMode } from '../types/index.js';
 import { Prisma } from '@prisma/client';
@@ -121,33 +121,16 @@ export async function validateBuyerOrderLines(
     // Quantity rule validation
     const { min: effectiveMin, max: effectiveMax, step: effectiveIncrement } = resolveEffectiveQuantityRules(catalog as any, vcfg);
 
-    if (line.quantity < effectiveMin) {
+    if (!isValidQuantity(line.quantity, effectiveMin, effectiveIncrement, effectiveMax)) {
+      let detail = `Quantity must be in multiples of ${effectiveIncrement}`;
+      if (effectiveMin > 1) detail += `, minimum ${effectiveMin}`;
+      if (effectiveMax !== null) detail += `, maximum ${effectiveMax}`;
       changedLines.push({
         variantId: line.variantId,
         productTitle: snapshot.product.title,
         variantTitle: snapshot.title,
         reason: 'QTY_RULE',
-        detail: `Minimum quantity is ${effectiveMin}`,
-      });
-      continue;
-    }
-    if (effectiveMax !== null && line.quantity > effectiveMax) {
-      changedLines.push({
-        variantId: line.variantId,
-        productTitle: snapshot.product.title,
-        variantTitle: snapshot.title,
-        reason: 'QTY_RULE',
-        detail: `Maximum quantity is ${effectiveMax}`,
-      });
-      continue;
-    }
-    if (effectiveIncrement > 1 && (line.quantity - effectiveMin) % effectiveIncrement !== 0) {
-      changedLines.push({
-        variantId: line.variantId,
-        productTitle: snapshot.product.title,
-        variantTitle: snapshot.title,
-        reason: 'QTY_RULE',
-        detail: `Quantity must be in increments of ${effectiveIncrement} starting from ${effectiveMin}`,
+        detail,
       });
       continue;
     }
@@ -161,6 +144,17 @@ export async function validateBuyerOrderLines(
         reason: 'OUT_OF_STOCK',
         available: false,
         detail: 'This item is currently unavailable',
+      });
+      continue;
+    }
+    if (snapshot.inventoryTracked && snapshot.inventoryPolicy !== 'CONTINUE' && line.quantity > snapshot.inventoryQuantity) {
+      changedLines.push({
+        variantId: line.variantId,
+        productTitle: snapshot.product.title,
+        variantTitle: snapshot.title,
+        reason: 'OUT_OF_STOCK',
+        available: false,
+        detail: `Only ${snapshot.inventoryQuantity} units available`,
       });
       continue;
     }

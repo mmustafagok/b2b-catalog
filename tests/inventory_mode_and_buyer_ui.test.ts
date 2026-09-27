@@ -171,16 +171,12 @@ describe('Inventory Display Mode & Quantity Rule Inheritance Suite', () => {
     expect(oosBadge?.props.children).toBe('Out of stock');
   });
 
-  it('6. CAPPED below cap', async () => {
+  it('6 & 7. legacy CAPPED mode normalizes to STATUS_ONLY badge ("In stock")', async () => {
     const cap = 50;
-    const lowBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 23, isCappedOverThreshold: false }, 'CAPPED', cap);
-    expect(lowBadge?.props.children).toBe('23 available');
-  });
-
-  it('7. CAPPED above cap', async () => {
-    const cap = 50;
-    const highBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 50, isCappedOverThreshold: true }, 'CAPPED', cap);
-    expect(highBadge?.props.children).toBe('50+ available');
+    const lowBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 23, isCappedOverThreshold: false }, 'CAPPED' as any, cap);
+    expect(lowBadge?.props.children).toBe('In stock');
+    const highBadge = renderStockBadge({ availableForSale: true, effectiveAvailable: 50, isCappedOverThreshold: true }, 'CAPPED' as any, cap);
+    expect(highBadge?.props.children).toBe('In stock');
   });
 
   it('8. HIDDEN mode rendering returns null', async () => {

@@ -378,6 +378,12 @@ body {
   border: 1px solid #fecaca;
 }
 
+.stock-tag.backorder {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+
 /* ── Quantity Controls ─────────────────────────────────────────────────────── */
 .qty-control {
   display: inline-flex;

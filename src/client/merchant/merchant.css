@@ -740,6 +740,12 @@ body {
   border: 1px solid #c1e2fc;
 }
 
+.cf-badge-deleted {
+  background: #f1f2f3;
+  color: #6d7175;
+  border: 1px solid #c9cccf;
+}
+
 /* Submissions Filter */
 .cf-filter-bar {
   display: flex;

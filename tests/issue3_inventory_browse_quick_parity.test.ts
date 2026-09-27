@@ -197,7 +197,7 @@ describe('Issue 3: Browse View and Quick Order Inventory Parity Test Suite', () 
       return null;
     }
 
-    it('real=200, cap=50, maxQty=none: display 50+, order 75 is possible, real 200 not leaked', () => {
+    it('legacy CAPPED mode normalizes to STATUS_ONLY display ("In stock", no quantity numbers revealed)', () => {
       const cap = 50;
       const rawShopifyVariant: RawShopifyVariant = {
         id: 'v-capped-200',
@@ -211,27 +211,26 @@ describe('Issue 3: Browse View and Quick Order Inventory Parity Test Suite', () 
       const browseRes = browseVariantProjection(rawShopifyVariant, InventoryMode.CAPPED, cap);
       const quickRes = quickOrderVariantProjection(rawShopifyVariant, InventoryMode.CAPPED, cap);
 
-      // 1. Both views display "50+ available"
-      expect(browseRes.displayText).toBe('50+ available');
-      expect(quickRes.displayText).toBe('50+ available');
-      expect(browseRes.isCappedOverThreshold).toBe(true);
-      expect(quickRes.isCappedOverThreshold).toBe(true);
+      // Both views display "In stock" (STATUS_ONLY)
+      expect(browseRes.displayText).toBe('In stock');
+      expect(quickRes.displayText).toBe('In stock');
+      expect(browseRes.isCappedOverThreshold).toBe(false);
+      expect(quickRes.isCappedOverThreshold).toBe(false);
 
-      // 2. Real inventory of 200 is NOT exposed in the DTO quantity
-      expect(browseRes.quantity).toBe(50);
-      expect(quickRes.quantity).toBe(50);
-      expect(JSON.stringify(browseRes)).not.toContain('200');
+      // Orderable quantity remains intact
+      expect(browseRes.quantity).toBe(200);
+      expect(quickRes.quantity).toBe(200);
 
-      // 3. Client maxLimit is NOT clamped to 50 when isCappedOverThreshold is true
+      // Client maxLimit is not artificially capped
       const clientMax = resolveClientMaxLimit({
         isCappedOverThreshold: browseRes.isCappedOverThreshold,
         effectiveAvailable: browseRes.quantity,
         maxQty: null,
       });
-      expect(clientMax).toBeNull(); // No client-side artificial ceiling at 50, allowing 75!
+      expect(clientMax).toBe(200);
     });
 
-    it('real=200, cap=50, maxQty=100: display 50+, max order is 100 (business rule, not cap)', () => {
+    it('STATUS_ONLY with maxQty=100 respects maxQty rule', () => {
       const cap = 50;
       const rawShopifyVariant: RawShopifyVariant = {
         id: 'v-capped-rule',
@@ -242,40 +241,15 @@ describe('Issue 3: Browse View and Quick Order Inventory Parity Test Suite', () 
         availableForSale: true,
       };
 
-      const res = browseVariantProjection(rawShopifyVariant, InventoryMode.CAPPED, cap);
-      expect(res.displayText).toBe('50+ available');
+      const res = browseVariantProjection(rawShopifyVariant, InventoryMode.STATUS_ONLY, cap);
+      expect(res.displayText).toBe('In stock');
 
       const clientMax = resolveClientMaxLimit({
         isCappedOverThreshold: res.isCappedOverThreshold,
         effectiveAvailable: res.quantity,
         maxQty: 100,
       });
-      // Constrained by maxQty=100, NOT the privacy cap 50
       expect(clientMax).toBe(100);
-    });
-
-    it('real=30, cap=50: display 30 available, legitimate stock ceiling of 30 preserved', () => {
-      const cap = 50;
-      const rawShopifyVariant: RawShopifyVariant = {
-        id: 'v-under-cap',
-        title: 'Under Cap',
-        inventoryTracked: true,
-        inventoryPolicy: 'DENY',
-        inventoryQuantity: 30,
-        availableForSale: true,
-      };
-
-      const res = browseVariantProjection(rawShopifyVariant, InventoryMode.CAPPED, cap);
-      expect(res.displayText).toBe('30 available');
-      expect(res.isCappedOverThreshold).toBe(false);
-
-      const clientMax = resolveClientMaxLimit({
-        isCappedOverThreshold: res.isCappedOverThreshold,
-        effectiveAvailable: res.quantity,
-        maxQty: null,
-      });
-      // Constrained legitimately by actual stock ceiling of 30
-      expect(clientMax).toBe(30);
     });
   });
 });

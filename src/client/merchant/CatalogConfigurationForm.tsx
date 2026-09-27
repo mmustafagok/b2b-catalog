@@ -9,8 +9,7 @@ export interface CatalogFormState {
   customPriceAmount: string;
   accentColor: string;
   showSku: boolean;
-  inventoryMode: 'STATUS_ONLY' | 'CAPPED' | 'EXACT' | 'HIDDEN';
-  inventoryCap: string;
+  inventoryMode: 'STATUS_ONLY' | 'EXACT' | 'HIDDEN';
   minQty: number;
   maxQty: string;
   qtyIncrement: number;
@@ -446,15 +445,16 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
           <hr style={{ border: 'none', borderTop: '1px solid #e2e8f0', margin: '1.25rem 0' }} />
 
           <div className="cf-form-group">
-            <label className="cf-label">Inventory Display Mode</label>
-            <p className="cf-section-desc" style={{ marginBottom: '0.5rem' }}>
-              Control how stock availability is presented to buyers in the public portal.
+            <label className="cf-label" style={{ fontWeight: 700, fontSize: '0.95rem' }}>Inventory Display</label>
+            <p className="cf-section-desc" style={{ marginBottom: '0.75rem' }}>
+              How should buyers see inventory? (Does not affect what they can actually order.)
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
               <label className="cf-radio-card" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem' }}>
                 <input
                   type="radio"
+                  id="inv-mode-status"
                   name="inventoryMode"
                   value="STATUS_ONLY"
                   checked={formState.inventoryMode === 'STATUS_ONLY'}
@@ -462,9 +462,9 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                   style={{ marginTop: '0.25rem' }}
                 />
                 <div>
-                  <strong>Status Only ("In stock" / "Out of stock")</strong>
+                  <strong>Availability only <span style={{ fontWeight: 400, fontSize: '0.78rem', color: '#059669', marginLeft: '0.4rem' }}>— Recommended</span></strong>
                   <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                    Displays stock status badge without leaking exact numerical inventory counts.
+                    Shows only "In stock" or "Out of stock". Doesn't reveal inventory quantities.
                   </div>
                 </div>
               </label>
@@ -472,37 +472,7 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
               <label className="cf-radio-card" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem' }}>
                 <input
                   type="radio"
-                  name="inventoryMode"
-                  value="CAPPED"
-                  checked={formState.inventoryMode === 'CAPPED'}
-                  onChange={() => onChange({ inventoryMode: 'CAPPED' })}
-                  style={{ marginTop: '0.25rem' }}
-                />
-                <div>
-                  <strong>Capped Threshold ("50+ available")</strong>
-                  <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                    Shows exact quantity when stock is under cap; displays "{formState.inventoryCap || '50'}+ available" for high inventory.
-                  </div>
-                </div>
-              </label>
-
-              {formState.inventoryMode === 'CAPPED' && (
-                <div style={{ marginLeft: '1.8rem', marginTop: '0.25rem' }}>
-                  <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>Maximum Inventory Cap Count</label>
-                  <input
-                    type="number"
-                    min="1"
-                    className="cf-input"
-                    style={{ width: '120px', marginTop: '0.2rem' }}
-                    value={formState.inventoryCap}
-                    onChange={(e) => onChange({ inventoryCap: e.target.value })}
-                  />
-                </div>
-              )}
-
-              <label className="cf-radio-card" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem' }}>
-                <input
-                  type="radio"
+                  id="inv-mode-exact"
                   name="inventoryMode"
                   value="EXACT"
                   checked={formState.inventoryMode === 'EXACT'}
@@ -510,9 +480,9 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                   style={{ marginTop: '0.25rem' }}
                 />
                 <div>
-                  <strong>Exact Stock Count ("23 in stock")</strong>
+                  <strong>Show exact quantity</strong>
                   <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                    Always displays exact live available inventory count.
+                    Shows the current available quantity, e.g. "23 available".
                   </div>
                 </div>
               </label>
@@ -520,6 +490,7 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
               <label className="cf-radio-card" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem' }}>
                 <input
                   type="radio"
+                  id="inv-mode-hidden"
                   name="inventoryMode"
                   value="HIDDEN"
                   checked={formState.inventoryMode === 'HIDDEN'}
@@ -527,9 +498,9 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
                   style={{ marginTop: '0.25rem' }}
                 />
                 <div>
-                  <strong>Hidden (No Inventory Badges)</strong>
+                  <strong>Hide inventory</strong>
                   <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                    Hides availability column and badges completely from the buyer portal.
+                    Shows no inventory information to buyers.
                   </div>
                 </div>
               </label>

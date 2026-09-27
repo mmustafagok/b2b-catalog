@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ProductItem } from './VariantMatrix.js';
-import { BuyerFormConfig, isValidQuantity } from '../../types/index.js';
+import { BuyerFormConfig, isValidQuantity, resolveVariantInventory } from '../../types/index.js';
+import { normalizeBuyerError } from './error-normalizer.js';
 
 interface OrderSummaryDrawerProps {
   isOpen: boolean;
@@ -11,6 +12,8 @@ interface OrderSummaryDrawerProps {
   totalItems: number;
   currency?: string;
   buyerFormConfig?: BuyerFormConfig;
+  inventoryMode?: string;
+  inventoryCap?: number | null;
   fieldErrors?: Record<string, string> | null;
   onSubmit: (buyerInfo: {
     businessName: string;
@@ -39,6 +42,8 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
   totalItems,
   currency = 'USD',
   buyerFormConfig = {},
+  inventoryMode = 'STATUS_ONLY',
+  inventoryCap,
   fieldErrors = null,
   onSubmit,
   isSubmitting,
@@ -111,24 +116,20 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             setClientError(`Invalid quantity for "${product.title} / ${variant.title}". Must be a positive integer.`);
             return;
           }
-          const canOrderBeyondReported =
-            Boolean(variant.isCappedOverThreshold) ||
-            variant.inventoryTracked === false ||
-            variant.inventoryPolicy === 'CONTINUE';
-
-          if (!canOrderBeyondReported && variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && qty > variant.effectiveAvailable) {
-            setClientError(`"${product.title} / ${variant.title}": The requested quantity exceeds available stock.`);
+          const resolvedInv = resolveVariantInventory(variant, inventoryMode, inventoryCap);
+          if (!resolvedInv.sellable) {
+            setClientError(`"${product.title} / ${variant.title}" is currently out of stock.`);
             return;
           }
-          if (!variant.availableForSale || (!canOrderBeyondReported && variant.effectiveAvailable === 0)) {
-            setClientError(`"${product.title} / ${variant.title}" is currently out of stock.`);
+          if (resolvedInv.quantity !== null && qty > resolvedInv.quantity) {
+            setClientError(`"${product.title} / ${variant.title}": The requested quantity (${qty}) exceeds available stock (${resolvedInv.quantity} available).`);
             return;
           }
           const min = variant.minQty || 1;
           const step = variant.qtyIncrement || 1;
           const max = variant.maxQty;
           if (!isValidQuantity(qty, min, step, max)) {
-            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} is invalid. Must be at least ${min}${max ? `, at most ${max}` : ''}, and in steps of ${step} from ${min}.`);
+            setClientError(`The quantity for "${product.title} / ${variant.title}" isn't valid. Order in multiples of ${step}${min > 1 ? ` (minimum ${min})` : ''}${max ? `, up to ${max}` : ''}.`);
             return;
           }
         }
@@ -277,20 +278,24 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             </div>
           )}
 
-          {(clientError || errorMessage) && (
-            <div
-              style={{
-                padding: '0.75rem',
-                borderRadius: '6px',
-                background: '#fee2e2',
-                color: '#b91c1c',
-                fontSize: '0.875rem',
-                marginBottom: '1rem',
-                whiteSpace: 'pre-line',
-              }}
-            >
-              <div>{clientError || errorMessage}</div>
-              {errorMessage && errorMessage.toLowerCase().includes('changed') && (
+          {(() => {
+            const rawError = clientError || errorMessage;
+            const displayError = rawError ? normalizeBuyerError(rawError).message : null;
+            if (!displayError) return null;
+            return (
+              <div
+                style={{
+                  padding: '0.75rem',
+                  borderRadius: '6px',
+                  background: '#fee2e2',
+                  color: '#b91c1c',
+                  fontSize: '0.875rem',
+                  marginBottom: '1rem',
+                  whiteSpace: 'pre-line',
+                }}
+              >
+                <div>{displayError}</div>
+                {displayError.toLowerCase().includes('changed') && (
                 <button
                   type="button"
                   onClick={() => window.location.reload()}
@@ -310,7 +315,8 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
                 </button>
               )}
             </div>
-          )}
+            );
+          })()}
 
           <button
             type="submit"

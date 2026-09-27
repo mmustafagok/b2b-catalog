@@ -38,8 +38,9 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
 
   const publicToken = generateOpaqueToken();
   const inventoryMode = validated.inventoryMode ?? (validated.showInventory ? InventoryMode.EXACT : InventoryMode.STATUS_ONLY);
-  const inventoryCap = inventoryMode === InventoryMode.CAPPED ? (validated.inventoryCap ?? null) : null;
-  const showInventory = inventoryMode !== InventoryMode.HIDDEN;
+  // Normalise legacy CAPPED to STATUS_ONLY (CAPPED is removed from new UI)
+  const effectiveInventoryMode = inventoryMode === InventoryMode.CAPPED ? InventoryMode.STATUS_ONLY : inventoryMode;
+  const showInventory = effectiveInventoryMode !== InventoryMode.HIDDEN;
 
   return prisma.$transaction(async (tx) => {
     const catalog = await tx.catalog.create({
@@ -59,8 +60,8 @@ export async function createCatalog(shopId: string, input: CreateCatalogInput) {
         accentColor: validated.accentColor || '#108043',
         showSku: validated.showSku ?? true,
         showInventory,
-        inventoryMode,
-        inventoryCap,
+        inventoryMode: effectiveInventoryMode,
+        inventoryCap: null,
         minQty: validated.minQty ?? 1,
         maxQty: validated.maxQty ?? null,
         qtyIncrement: validated.qtyIncrement ?? 1,
@@ -125,17 +126,14 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
         ? (validated.customPriceAmount ?? (existing.customPriceAmount ? Number(existing.customPriceAmount) : null))
         : null;
 
-    // Handle inventoryMode & inventoryCap consistency
-    const effectiveInventoryMode =
+    // Handle inventoryMode consistency — normalize legacy CAPPED to STATUS_ONLY
+    const rawInventoryMode =
       validated.inventoryMode ??
       (validated.showInventory !== undefined
         ? (validated.showInventory ? InventoryMode.EXACT : InventoryMode.STATUS_ONLY)
         : ((existing.inventoryMode as InventoryMode) ?? InventoryMode.STATUS_ONLY));
-
-    let effectiveInventoryCap: number | null = null;
-    if (effectiveInventoryMode === InventoryMode.CAPPED) {
-      effectiveInventoryCap = validated.inventoryCap !== undefined ? validated.inventoryCap : (existing.inventoryCap ?? 50);
-    }
+    // Normalize CAPPED to STATUS_ONLY (legacy compat)
+    const effectiveInventoryMode = rawInventoryMode === InventoryMode.CAPPED ? InventoryMode.STATUS_ONLY : rawInventoryMode;
     const effectiveShowInventory = effectiveInventoryMode !== InventoryMode.HIDDEN;
 
     const updated = await tx.catalog.update({
@@ -150,7 +148,7 @@ export async function updateCatalog(shopId: string, catalogId: string, input: Up
         ...(validated.showSku !== undefined && { showSku: validated.showSku }),
         showInventory: effectiveShowInventory,
         inventoryMode: effectiveInventoryMode,
-        inventoryCap: effectiveInventoryCap,
+        inventoryCap: null,
         ...(validated.minQty !== undefined && { minQty: validated.minQty }),
         ...(validated.maxQty !== undefined && { maxQty: validated.maxQty }),
         ...(validated.qtyIncrement !== undefined && { qtyIncrement: validated.qtyIncrement }),

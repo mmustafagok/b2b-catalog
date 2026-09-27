@@ -348,6 +348,7 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
           title: 'Standard',
           shopifyPrice: 100.0,
           availableForSale: true,
+          inventoryQuantity: 100,
         },
       });
 
@@ -422,6 +423,7 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
           title: 'Ergonomic',
           shopifyPrice: 50.0,
           availableForSale: true,
+          inventoryQuantity: 100,
         },
       });
 

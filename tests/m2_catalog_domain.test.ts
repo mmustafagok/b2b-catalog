@@ -189,7 +189,7 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
     expect(gids).not.toContain('gid://shopify/Product/2');
   });
 
-  it('should respect Inventory Display Modes (STATUS_ONLY, CAPPED, EXACT, HIDDEN) and maintain strict privacy', async () => {
+  it('should respect Inventory Display Modes (STATUS_ONLY, EXACT, HIDDEN) and maintain strict privacy', async () => {
     // 1. Create with STATUS_ONLY
     const statusCat = await createCatalog(shopA.id, {
       name: 'Status Only Catalog',
@@ -199,16 +199,14 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
     expect(statusCat.inventoryMode).toBe('STATUS_ONLY');
     expect(statusCat.showInventory).toBe(true);
 
-    // 2. Create with CAPPED
-    const cappedCat = await createCatalog(shopA.id, {
-      name: 'Capped Inventory Catalog',
-      inventoryMode: 'CAPPED' as any,
-      inventoryCap: 15,
+    // 2. Create with EXACT
+    const exactCat = await createCatalog(shopA.id, {
+      name: 'Exact Inventory Catalog',
+      inventoryMode: 'EXACT' as any,
       sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/101' }],
     });
-    expect(cappedCat.inventoryMode).toBe('CAPPED');
-    expect(cappedCat.inventoryCap).toBe(15);
-    expect(cappedCat.showInventory).toBe(true);
+    expect(exactCat.inventoryMode).toBe('EXACT');
+    expect(exactCat.showInventory).toBe(true);
 
     // 3. Create with HIDDEN
     const hiddenCat = await createCatalog(shopA.id, {
@@ -220,11 +218,11 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
     expect(hiddenCat.showInventory).toBe(false);
 
     // 4. Update to EXACT
-    const exactCat = await updateCatalog(shopA.id, statusCat.id, {
+    const updatedCat = await updateCatalog(shopA.id, statusCat.id, {
       inventoryMode: 'EXACT' as any,
     });
-    expect(exactCat.inventoryMode).toBe('EXACT');
-    expect(exactCat.showInventory).toBe(true);
+    expect(updatedCat.inventoryMode).toBe('EXACT');
+    expect(updatedCat.showInventory).toBe(true);
   });
 });
 

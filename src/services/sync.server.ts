@@ -286,7 +286,13 @@ export async function syncProductSnapshot(
         ? Boolean(v.inventory_tracked)
         : v.inventoryItem?.tracked !== undefined
         ? Boolean(v.inventoryItem.tracked)
-        : v.inventory_management !== null && v.inventory_management !== undefined && v.inventory_management !== '';
+        : (v.inventory_management !== null && v.inventory_management !== undefined && v.inventory_management !== '')
+        || v.inventory_quantity !== undefined
+        || v.inventoryQuantity !== undefined;
+
+      const availableForSale = (v as any).availableForSale !== undefined
+        ? Boolean((v as any).availableForSale)
+        : (v.available !== undefined ? Boolean(v.available) : true);
 
       await tx.variantSnapshot.upsert({
         where: {
@@ -303,7 +309,7 @@ export async function syncProductSnapshot(
           inventoryQuantity,
           inventoryPolicy,
           inventoryTracked,
-          availableForSale: v.available ?? true,
+          availableForSale,
           selectedOptionsJson: JSON.stringify(options),
           imageUrl: imageUrl,
           sourceUpdatedAt: new Date(),
@@ -320,7 +326,7 @@ export async function syncProductSnapshot(
           inventoryQuantity,
           inventoryPolicy,
           inventoryTracked,
-          availableForSale: v.available ?? true,
+          availableForSale,
           selectedOptionsJson: JSON.stringify(options),
           imageUrl: imageUrl,
           sourceUpdatedAt: new Date(),
@@ -994,6 +1000,14 @@ export async function executeFullShopSync(
     prodCursor = prodRes.products?.pageInfo?.endCursor || null;
   }
 
+  // 4. Reconcile Draft Orders to detect deleted draft orders in Shopify (Part 1)
+  try {
+    const { reconcileShopDraftOrders } = await import('./order.server.js');
+    await reconcileShopDraftOrders(shopId, client);
+  } catch (err: any) {
+    console.warn(`[executeFullShopSync] Draft order reconciliation skipped or failed: ${err?.message || err}`);
+  }
+
   return { collectionsSynced, productsSynced, variantsSynced };
 }
 
@@ -1465,32 +1479,18 @@ async function _buildCatalogPayload(
       }
 
       // Inventory qty to expose based on inventoryMode
+      const rawMode = catalog.inventoryMode ?? (catalog.showInventory ? 'EXACT' : 'STATUS_ONLY');
+      const effectiveInvMode = rawMode === 'CAPPED' ? 'STATUS_ONLY' : rawMode;
+
       let exposedQty: number | null | undefined = undefined;
       let exposedEffective: number | null | undefined = undefined;
-      let isCappedOverThreshold = false;
 
-      if (inventoryMode === 'EXACT' || (catalog.showInventory && inventoryMode !== 'HIDDEN' && inventoryMode !== 'CAPPED' && inventoryMode !== 'STATUS_ONLY')) {
+      if (effectiveInvMode === 'EXACT') {
+        // EXACT: expose real quantity numbers
         exposedQty = v.inventoryQuantity;
         exposedEffective = effectiveAvailable;
-      } else if (inventoryMode === 'CAPPED') {
-        const cap = inventoryCap ?? 50;
-        if (effectiveAvailable !== null) {
-          if (effectiveAvailable >= cap) {
-            exposedQty = cap;
-            exposedEffective = cap;
-            isCappedOverThreshold = true;
-          } else {
-            exposedQty = effectiveAvailable;
-            exposedEffective = effectiveAvailable;
-            isCappedOverThreshold = false;
-          }
-        } else {
-          exposedQty = null;
-          exposedEffective = null;
-          isCappedOverThreshold = true;
-        }
       } else {
-        // STATUS_ONLY or HIDDEN: never expose exact qty numbers
+        // STATUS_ONLY / HIDDEN (and legacy CAPPED): never expose exact qty numbers
         exposedQty = undefined;
         exposedEffective = undefined;
       }
@@ -1509,7 +1509,7 @@ async function _buildCatalogPayload(
         availableForSale: isAvailable,
         inventoryQuantity: exposedQty,
         effectiveAvailable: exposedEffective,
-        isCappedOverThreshold,
+        isCappedOverThreshold: false, // CAPPED mode removed; always false
         inventoryPolicy,
         inventoryTracked,
         selectedOptions,

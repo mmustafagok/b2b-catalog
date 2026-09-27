@@ -190,7 +190,7 @@ export const MerchantAppShell: React.FC = () => {
   const [newPriceMode, setNewPriceMode] = useState<'SHOPIFY_PRICE' | 'PERCENT_DISCOUNT' | 'CUSTOM_PRICE'>('SHOPIFY_PRICE');
   const [newDiscount, setNewDiscount] = useState<number>(10);
   const [newCustomPriceAmount, setNewCustomPriceAmount] = useState<string>('');
-  const [newInventoryMode, setNewInventoryMode] = useState<'STATUS_ONLY' | 'CAPPED' | 'EXACT' | 'HIDDEN'>('STATUS_ONLY');
+  const [newInventoryMode, setNewInventoryMode] = useState<'STATUS_ONLY' | 'EXACT' | 'HIDDEN'>('STATUS_ONLY');
   const [newInventoryCap, setNewInventoryCap] = useState<string>('50');
   const [newMinQty, setNewMinQty] = useState<number>(1);
   const [newMaxQty, setNewMaxQty] = useState<string>('');
@@ -514,7 +514,6 @@ export const MerchantAppShell: React.FC = () => {
         accentColor: createFormState.accentColor,
         showSku: createFormState.showSku,
         inventoryMode: createFormState.inventoryMode,
-        inventoryCap: createFormState.inventoryMode === 'CAPPED' ? (parseInt(createFormState.inventoryCap, 10) || 50) : null,
         minQty: Math.max(1, createFormState.minQty),
         maxQty: createFormState.maxQty ? parseInt(createFormState.maxQty, 10) : null,
         qtyIncrement: Math.max(1, createFormState.qtyIncrement),
@@ -656,14 +655,14 @@ export const MerchantAppShell: React.FC = () => {
             {activeTab === 'overview' && (
               <div className="cf-tab-content">
                 {/* 1. First-Use Primary Card */}
-                {onboardingState.shouldShowFirstUseCard && (
+                {catalogs.length === 0 ? (
                   <div className="cf-card cf-first-use-card" id="cf-first-use-card" style={{ marginBottom: '1.5rem', padding: '1.5rem' }}>
                     <div style={{ maxWidth: '600px' }}>
                       <h2 style={{ fontSize: '1.25rem', fontWeight: 600, margin: '0 0 0.5rem 0', color: '#202223' }}>
                         Create your first wholesale catalog
                       </h2>
                       <p style={{ fontSize: '0.95rem', color: '#6d7175', margin: '0 0 1.25rem 0', lineHeight: '1.5' }}>
-                        Choose products, set wholesale pricing, publish, and share your buyer link.
+                        Choose products, set wholesale pricing and quantity rules, then share a buyer link.
                       </p>
                       <button
                         type="button"
@@ -671,14 +670,11 @@ export const MerchantAppShell: React.FC = () => {
                         onClick={openCreateWizard}
                         id="cf-first-use-create-btn"
                       >
-                        Create Catalog
+                        Create your first wholesale catalog
                       </button>
                     </div>
                   </div>
-                )}
-
-                {/* 2. Small First-Order Progress Checklist */}
-                {onboardingState.shouldShowChecklist && (
+                ) : onboardingState.shouldShowChecklist && (
                   <div className="cf-card cf-onboarding-checklist-card" id="cf-onboarding-checklist" style={{ marginBottom: '1.5rem', padding: '1.25rem 1.5rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                       <h3 style={{ fontSize: '1rem', fontWeight: 600, margin: 0, color: '#202223' }}>
@@ -875,23 +871,29 @@ export const MerchantAppShell: React.FC = () => {
                               <td>{sub.itemCount} items ({sub.lineCount} lines)</td>
                               <td>{sub.formattedSubtotal}</td>
                               <td>
-                                <span
-                                  className={`cf-badge ${
-                                    sub.status === 'COMPLETED'
-                                      ? 'cf-badge-completed'
-                                      : sub.status === 'FAILED'
-                                      ? 'cf-badge-failed'
-                                      : sub.status === 'REQUIRES_RECONCILIATION'
-                                      ? 'cf-badge-reconciliation'
-                                      : 'cf-badge-creating'
-                                  }`}
-                                >
-                                  {sub.status || 'COMPLETED'}
-                                </span>
+                                {sub.status === 'DELETED_IN_SHOPIFY' ? (
+                                  <span className="cf-badge cf-badge-deleted">Deleted in Shopify</span>
+                                ) : (
+                                  <span
+                                    className={`cf-badge ${
+                                      sub.status === 'COMPLETED'
+                                        ? 'cf-badge-completed'
+                                        : sub.status === 'FAILED'
+                                        ? 'cf-badge-failed'
+                                        : sub.status === 'REQUIRES_RECONCILIATION'
+                                        ? 'cf-badge-reconciliation'
+                                        : 'cf-badge-creating'
+                                    }`}
+                                  >
+                                    {sub.status || 'COMPLETED'}
+                                  </span>
+                                )}
                               </td>
                               <td>{new Date(sub.createdAt).toLocaleDateString()}</td>
                               <td>
-                                {sub.draftOrderUrl ? (
+                                {sub.status === 'DELETED_IN_SHOPIFY' ? (
+                                  <span className="cf-text-muted">Draft no longer exists</span>
+                                ) : sub.draftOrderUrl ? (
                                   <a
                                     href={sub.draftOrderUrl}
                                     target="_blank"
@@ -933,12 +935,13 @@ export const MerchantAppShell: React.FC = () => {
 
                 {catalogs.length === 0 ? (
                   <div className="cf-empty-state">
-                    <p>Create your first wholesale catalog in under 10 minutes.</p>
+                    <h3>Create your first wholesale catalog</h3>
+                    <p>Choose products, set wholesale pricing and quantity rules, then share a buyer link.</p>
                     <button
                       className="cf-btn cf-btn-primary"
-                    onClick={openCreateWizard}
+                      onClick={openCreateWizard}
                     >
-                      Create Your First Catalog
+                      Create your first wholesale catalog
                     </button>
                   </div>
                 ) : (
@@ -1121,24 +1124,30 @@ export const MerchantAppShell: React.FC = () => {
                             <td>{sub.itemCount} items ({sub.lineCount} lines)</td>
                             <td>{sub.formattedSubtotal}</td>
                             <td>
-                              <span
-                                className={`cf-badge ${
-                                  sub.status === 'COMPLETED'
-                                    ? 'cf-badge-completed'
-                                    : sub.status === 'FAILED'
-                                    ? 'cf-badge-failed'
-                                    : sub.status === 'REQUIRES_RECONCILIATION'
-                                    ? 'cf-badge-reconciliation'
-                                    : 'cf-badge-creating'
-                                }`}
-                              >
-                                {sub.status || 'COMPLETED'}
-                              </span>
+                              {sub.status === 'DELETED_IN_SHOPIFY' ? (
+                                <span className="cf-badge cf-badge-deleted">Deleted in Shopify</span>
+                              ) : (
+                                <span
+                                  className={`cf-badge ${
+                                    sub.status === 'COMPLETED'
+                                      ? 'cf-badge-completed'
+                                      : sub.status === 'FAILED'
+                                      ? 'cf-badge-failed'
+                                      : sub.status === 'REQUIRES_RECONCILIATION'
+                                      ? 'cf-badge-reconciliation'
+                                      : 'cf-badge-creating'
+                                  }`}
+                                >
+                                  {sub.status || 'COMPLETED'}
+                                </span>
+                              )}
                             </td>
                             <td>{new Date(sub.createdAt).toLocaleString()}</td>
                             <td>
                               <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-                                {sub.draftOrderUrl ? (
+                                {sub.status === 'DELETED_IN_SHOPIFY' ? (
+                                  <span className="cf-text-muted">Draft no longer exists</span>
+                                ) : sub.draftOrderUrl ? (
                                   <a
                                     href={sub.draftOrderUrl}
                                     target="_blank"

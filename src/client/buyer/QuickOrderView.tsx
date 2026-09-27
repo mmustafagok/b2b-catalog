@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { ProductItem, renderStockBadge, VariantItem } from './VariantMatrix.js';
-import { nextValidQuantity, previousValidQuantity, normalizeQuantity } from '../../types/index.js';
+import { nextValidQuantity, previousValidQuantity, normalizeQuantity, resolveVariantInventory } from '../../types/index.js';
 
 interface QuickOrderViewProps {
   products: ProductItem[];
@@ -168,29 +168,18 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
             ) : (
               filteredRows.map((row) => {
                 const currentQty = quantities[row.variantId] || 0;
-                const canOrderBeyondReported =
-                  Boolean(row.isCappedOverThreshold) ||
-                  row.inventoryTracked === false ||
-                  row.inventoryPolicy === 'CONTINUE';
-
-                const isOutOfStock =
-                  !row.availableForSale ||
-                  (!canOrderBeyondReported &&
-                    row.effectiveAvailable !== null &&
-                    row.effectiveAvailable !== undefined &&
-                    row.effectiveAvailable <= 0);
+                const resolvedInv = resolveVariantInventory(row, inventoryMode, inventoryCap);
+                const isOutOfStock = !resolvedInv.sellable;
                 const min = row.minQty || 1;
                 const step = row.qtyIncrement || 1;
 
                 let max: number | null = null;
-                if (canOrderBeyondReported) {
-                  max = row.maxQty ?? null;
-                } else if (row.maxQty != null && row.effectiveAvailable != null) {
-                  max = Math.min(row.maxQty, row.effectiveAvailable);
+                if (resolvedInv.quantity !== null && row.maxQty != null) {
+                  max = Math.min(row.maxQty, resolvedInv.quantity);
                 } else if (row.maxQty != null) {
                   max = row.maxQty;
-                } else if (row.effectiveAvailable != null) {
-                  max = row.effectiveAvailable;
+                } else if (resolvedInv.quantity !== null) {
+                  max = resolvedInv.quantity;
                 }
                 const lineTotal = currentQty * row.displayPrice;
 
@@ -252,7 +241,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                           className="qty-input"
                           value={isOutOfStock ? '' : (currentQty === 0 ? '' : currentQty)}
                           placeholder="0"
-                          onChange={(e) => handleDirectInput(row.variantId, e.target.value, max ?? undefined)}
+                          onChange={(e) => handleDirectInput(row.variantId, e.target.value, min, step, max)}
                         />
                         <button
                           type="button"

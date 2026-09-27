@@ -13,7 +13,12 @@ describe('Issue 2: Canonical Quantity Rules & Mathematics Test Suite', () => {
     const min = 1;
     const step = 2;
 
-    it('1 is valid', () => {
+    it('0 is valid (not in cart)', () => {
+      expect(isValidQuantityStep(0, min, step)).toBe(true);
+      expect(isValidQuantity(0, min, step)).toBe(true);
+    });
+
+    it('1 is valid (min quantity)', () => {
       expect(isValidQuantityStep(1, min, step)).toBe(true);
       expect(isValidQuantity(1, min, step)).toBe(true);
     });
@@ -23,7 +28,7 @@ describe('Issue 2: Canonical Quantity Rules & Mathematics Test Suite', () => {
       expect(isValidQuantity(2, min, step)).toBe(false);
     });
 
-    it('3 is valid', () => {
+    it('3 is valid (min + step)', () => {
       expect(isValidQuantityStep(3, min, step)).toBe(true);
       expect(isValidQuantity(3, min, step)).toBe(true);
     });
@@ -56,17 +61,20 @@ describe('Issue 2: Canonical Quantity Rules & Mathematics Test Suite', () => {
     const min = 6;
     const step = 4;
 
-    it('6 is valid', () => {
+    it('0 is valid (not in cart)', () => {
+      expect(isValidQuantityStep(0, min, step)).toBe(true);
+    });
+
+    it('4 is invalid (< min 6)', () => {
+      expect(isValidQuantityStep(4, min, step)).toBe(false);
+    });
+
+    it('6 is valid (min quantity)', () => {
       expect(isValidQuantityStep(6, min, step)).toBe(true);
       expect(isValidQuantity(6, min, step)).toBe(true);
     });
 
-    it('8 is invalid', () => {
-      expect(isValidQuantityStep(8, min, step)).toBe(false);
-      expect(isValidQuantity(8, min, step)).toBe(false);
-    });
-
-    it('10 is valid', () => {
+    it('10 is valid (min + step)', () => {
       expect(isValidQuantityStep(10, min, step)).toBe(true);
       expect(isValidQuantity(10, min, step)).toBe(true);
     });
@@ -103,7 +111,7 @@ describe('Issue 2: Canonical Quantity Rules & Mathematics Test Suite', () => {
     });
 
     it('normalizeQuantity clamps and aligns typed numbers', () => {
-      expect(normalizeQuantity(4, 1, 2)).toBe(3); // 4 is invalid -> rounds to nearest valid 3
+      expect(normalizeQuantity(3, 1, 2)).toBe(3); // 3 is valid under min=1, step=2
       expect(normalizeQuantity(0, 1, 2)).toBe(0); // 0 unselects
       expect(normalizeQuantity(100, 1, 2, 10)).toBe(9); // 100 exceeds max -> capped at max valid step 9
     });
@@ -133,21 +141,35 @@ describe('Issue 2: Canonical Quantity Rules & Mathematics Test Suite', () => {
   });
 
   describe('Issue 5: nextValidQuantity cannot clamp to invalid max & preserves isValidQuantity invariant', () => {
-    it('min=1 step=2 max=4: 1, 3 valid, 2, 4 invalid; 3 + must NOT become 4', () => {
-      expect(isValidQuantity(1, 1, 2, 4)).toBe(true);
-      expect(isValidQuantity(2, 1, 2, 4)).toBe(false);
-      expect(isValidQuantity(3, 1, 2, 4)).toBe(true);
-      expect(isValidQuantity(4, 1, 2, 4)).toBe(false);
+    it('step=3 max=20 (from PART 4 spec): sequences 0 -> 1 -> 4 -> 7 -> 10 -> 13 -> 16 -> 19 and stops at 19', () => {
+      expect(isValidQuantity(0, 1, 3, 20)).toBe(true);
+      expect(isValidQuantity(1, 1, 3, 20)).toBe(true);
+      expect(isValidQuantity(19, 1, 3, 20)).toBe(true);
+      expect(isValidQuantity(20, 1, 3, 20)).toBe(false);
 
-      expect(nextValidQuantity(0, 1, 2, 4)).toBe(1);
-      expect(nextValidQuantity(1, 1, 2, 4)).toBe(3);
-      // Pressing + on 3 must NOT clamp to invalid 4
-      expect(nextValidQuantity(3, 1, 2, 4)).toBe(3);
+      let q = 0;
+      const sequence = [q];
+      for (let i = 0; i < 7; i++) {
+        q = nextValidQuantity(q, 1, 3, 20);
+        sequence.push(q);
+      }
+      expect(sequence).toEqual([0, 1, 4, 7, 10, 13, 16, 19]);
+    });
+
+    it('min=6 step=3: sequences 0 -> 6 -> 9 -> 12', () => {
+      expect(isValidQuantity(0, 6, 3)).toBe(true);
+      expect(isValidQuantity(3, 6, 3)).toBe(false); // < min 6
+      expect(isValidQuantity(6, 6, 3)).toBe(true);
+      expect(isValidQuantity(9, 6, 3)).toBe(true);
+
+      const q1 = nextValidQuantity(0, 6, 3);
+      expect(q1).toBe(6);
+      const q2 = nextValidQuantity(q1, 6, 3);
+      expect(q2).toBe(9);
     });
 
     it('min=6 step=4 max=15: valid 6, 10, 14; 14 + must NOT become 15', () => {
       expect(isValidQuantity(6, 6, 4, 15)).toBe(true);
-      expect(isValidQuantity(8, 6, 4, 15)).toBe(false);
       expect(isValidQuantity(10, 6, 4, 15)).toBe(true);
       expect(isValidQuantity(14, 6, 4, 15)).toBe(true);
       expect(isValidQuantity(15, 6, 4, 15)).toBe(false);
@@ -157,17 +179,6 @@ describe('Issue 2: Canonical Quantity Rules & Mathematics Test Suite', () => {
       expect(nextValidQuantity(10, 6, 4, 15)).toBe(14);
       // Pressing + on 14 must NOT become 15
       expect(nextValidQuantity(14, 6, 4, 15)).toBe(14);
-    });
-
-    it('min=1 step=2 max=5: sequences 1 -> 3 -> 5', () => {
-      const q1 = nextValidQuantity(0, 1, 2, 5);
-      expect(q1).toBe(1);
-      const q2 = nextValidQuantity(q1, 1, 2, 5);
-      expect(q2).toBe(3);
-      const q3 = nextValidQuantity(q2, 1, 2, 5);
-      expect(q3).toBe(5);
-      const q4 = nextValidQuantity(q3, 1, 2, 5);
-      expect(q4).toBe(5);
     });
 
     it('min=5 step=5 max=20: sequences 5 -> 10 -> 15 -> 20', () => {

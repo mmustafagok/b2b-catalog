@@ -6,6 +6,7 @@ import { OrderSummaryDrawer } from './OrderSummaryDrawer.js';
 import { parseBuyerRoute, BuyerRouteType } from '../routeUtils.js';
 import { getOrCreateBuyerIdempotencyKey, clearBuyerIdempotencyKey } from './idempotencySession.js';
 import { BuyerFormConfig } from '../../types/index.js';
+import { normalizeBuyerError } from './error-normalizer.js';
 import './buyer.css';
 
 interface CatalogData {
@@ -154,7 +155,7 @@ export const BuyerCatalogApp: React.FC = () => {
         document.documentElement.style.setProperty('--accent-color', json.catalog.accentColor);
       }
     } catch (err: any) {
-      setError(err.message || 'Network error loading catalog.');
+      setError(normalizeBuyerError(err, 'Network error loading catalog.').message);
     } finally {
       setLoading(false);
     }
@@ -178,7 +179,7 @@ export const BuyerCatalogApp: React.FC = () => {
 
       if (!unlockRes.ok) {
         const errJson = await unlockRes.json().catch(() => ({}));
-        setPasscodeError(errJson.error || 'Invalid passcode. Please try again.');
+        setPasscodeError(normalizeBuyerError(errJson, 'Invalid passcode. Please try again.').message);
         return;
       }
 
@@ -301,12 +302,13 @@ export const BuyerCatalogApp: React.FC = () => {
         body: JSON.stringify(payload),
       });
 
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (json.details?.fieldErrors) {
-          setFieldErrors(json.details.fieldErrors);
+        if (json.details?.fieldErrors || json.fields) {
+          setFieldErrors(json.details?.fieldErrors || json.fields);
         }
-        throw new Error(json.error || 'Failed to submit order');
+        const normalized = normalizeBuyerError(json);
+        throw new Error(normalized.message);
       }
 
       clearBuyerIdempotencyKey(tokenKey);
@@ -318,7 +320,8 @@ export const BuyerCatalogApp: React.FC = () => {
       setIsDrawerOpen(false);
       setQuantities({});
     } catch (err: any) {
-      setSubmitError(err.message || 'Submission failed');
+      const normalized = normalizeBuyerError(err, 'Submission failed');
+      setSubmitError(normalized.message);
     } finally {
       setIsSubmitting(false);
     }
@@ -518,6 +521,8 @@ export const BuyerCatalogApp: React.FC = () => {
         totalItems={totalItems}
         currency={data.shop.currency}
         buyerFormConfig={data.catalog.buyerFormConfig}
+        inventoryMode={data.catalog.inventoryMode}
+        inventoryCap={data.catalog.inventoryCap}
         onSubmit={handleSubmitOrder}
         isSubmitting={isSubmitting}
         errorMessage={submitError}

@@ -313,6 +313,8 @@ export async function submitBuyerOrder(
   const invalidVariants: string[] = [];
   const disabledVariants: string[] = [];
   const qtyRuleViolations: Array<{ variantId: string; detail: string }> = [];
+  const outOfStockVariants: Array<{ variantId: string; productTitle: string; variantTitle: string; detail: string }> = [];
+  const insufficientInventoryVariants: Array<{ variantId: string; productTitle: string; variantTitle: string; available: number; requested: number; detail: string }> = [];
 
   for (const line of validated.lines) {
     const snap = localSnapshotMap.get(line.variantId);
@@ -332,6 +334,29 @@ export async function submitBuyerOrder(
     const { min: effectiveMin, max: effectiveMax, step: effectiveIncrement } = resolveEffectiveQuantityRules(catalog as any, vcfg);
     if (!isValidQuantity(line.quantity, effectiveMin, effectiveIncrement, effectiveMax)) {
       qtyRuleViolations.push({ variantId: line.variantId, detail: `Quantity ${line.quantity} for ${snap.sku || line.variantId} is invalid (min: ${effectiveMin}${effectiveMax ? `, max: ${effectiveMax}` : ''}, step: ${effectiveIncrement})` });
+    }
+
+    // Server-side: live inventory check (do not trust stale browser inventory)
+    const isTracked = snap.inventoryTracked === true;
+    const policy = (snap.inventoryPolicy || 'DENY').toUpperCase();
+    if (isTracked && policy !== 'CONTINUE') {
+      if (!snap.availableForSale || snap.inventoryQuantity <= 0) {
+        outOfStockVariants.push({
+          variantId: line.variantId,
+          productTitle: snap.product.title,
+          variantTitle: snap.title,
+          detail: 'Item is no longer available in requested quantity or is out of stock.',
+        });
+      } else if (line.quantity > snap.inventoryQuantity) {
+        insufficientInventoryVariants.push({
+          variantId: line.variantId,
+          productTitle: snap.product.title,
+          variantTitle: snap.title,
+          available: snap.inventoryQuantity,
+          requested: line.quantity,
+          detail: `Only ${snap.inventoryQuantity} units available.`,
+        });
+      }
     }
   }
 
@@ -362,6 +387,26 @@ export async function submitBuyerOrder(
       422,
       'QTY_RULE_VIOLATION',
       { violations: qtyRuleViolations }
+    );
+  }
+
+  if (outOfStockVariants.length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'OUT_OF_STOCK');
+    throw new OrderSubmissionError(
+      'One or more items are out of stock.',
+      422,
+      'OUT_OF_STOCK',
+      { variants: outOfStockVariants }
+    );
+  }
+
+  if (insufficientInventoryVariants.length > 0) {
+    tracker.transition('SUBMISSION_FAILED', 'INSUFFICIENT_INVENTORY');
+    throw new OrderSubmissionError(
+      'Requested quantity exceeds available inventory for one or more items.',
+      422,
+      'INSUFFICIENT_INVENTORY',
+      { variants: insufficientInventoryVariants }
     );
   }
 
@@ -740,12 +785,11 @@ export async function submitBuyerOrder(
       const liveAvailable = Math.max(0, liveQty);
       if (line.quantity > liveAvailable) {
         const invMode = (catalog as any).inventoryMode || 'STATUS_ONLY';
-        const cap = (catalog as any).inventoryCap ?? null;
+        // Normalize legacy CAPPED to STATUS_ONLY for privacy
+        const effectiveMode = invMode === 'CAPPED' ? 'STATUS_ONLY' : invMode;
         let reportedAvailable = liveAvailable;
-        if (invMode === 'STATUS_ONLY' || invMode === 'HIDDEN') {
+        if (effectiveMode === 'STATUS_ONLY' || effectiveMode === 'HIDDEN') {
           reportedAvailable = 0;
-        } else if (invMode === 'CAPPED' && cap !== null) {
-          reportedAvailable = Math.min(liveAvailable, cap);
         }
         inventoryChangedItems.push({
           variantId: line.variantId,
@@ -808,25 +852,19 @@ export async function submitBuyerOrder(
     tracker.transition('SUBMISSION_FAILED', 'INVENTORY_CHANGED');
 
     const invMode = (catalog as any).inventoryMode || 'STATUS_ONLY';
-    const invCap = (catalog as any).inventoryCap ?? null;
+    // Normalize legacy CAPPED to STATUS_ONLY for privacy
+    const effectiveInvMode = invMode === 'CAPPED' ? 'STATUS_ONLY' : invMode;
 
     let errorMessage = 'Requested quantity exceeds currently available inventory. Please review and update your order.';
     let sanitizedDetails = inventoryChangedItems;
 
-    if (invMode === 'STATUS_ONLY' || invMode === 'HIDDEN') {
+    if (effectiveInvMode === 'STATUS_ONLY' || effectiveInvMode === 'HIDDEN') {
       errorMessage = 'The requested quantity is no longer available.';
       sanitizedDetails = inventoryChangedItems.map((item) => ({
         variantId: item.variantId,
         title: item.title,
         requested: item.requested,
         available: 0,
-      }));
-    } else if (invMode === 'CAPPED' && invCap !== null) {
-      sanitizedDetails = inventoryChangedItems.map((item) => ({
-        variantId: item.variantId,
-        title: item.title,
-        requested: item.requested,
-        available: Math.min(item.available, invCap),
       }));
     }
 
@@ -1350,13 +1388,13 @@ export async function getSubmissionsByShop(
 
   const statusFilter = options?.status && options.status !== 'ALL'
     ? options.status
-    : options?.status === 'ALL'
-      ? undefined
-      : 'COMPLETED';
+    : undefined;
 
   const whereClause: Prisma.OrderSubmissionWhereInput = {
     shopId,
-    ...(statusFilter ? { status: statusFilter } : {}),
+    ...(statusFilter
+      ? { status: statusFilter }
+      : { status: { in: ['COMPLETED', 'DELETED_IN_SHOPIFY', 'REQUIRES_RECONCILIATION', 'FAILED'] } }),
     ...(options?.catalogId ? { catalogId: options.catalogId } : {}),
   };
 
@@ -1388,7 +1426,7 @@ export async function getSubmissionsByShop(
   const formattedSubmissions = submissions.map((sub) => {
     const match = sub.draftOrderId ? sub.draftOrderId.match(/\/DraftOrder\/(\d+)/) : null;
     const numericId = match ? match[1] : '';
-    const draftOrderUrl = numericId && shopDomain
+    const draftOrderUrl = (sub.status !== 'DELETED_IN_SHOPIFY' && numericId && shopDomain)
       ? `https://${shopDomain}/admin/draft_orders/${numericId}`
       : '';
 
@@ -1554,13 +1592,77 @@ export async function reconcileSubmission(
     throw new OrderSubmissionError('Submission not found or unauthorized', 404, 'NOT_FOUND');
   }
 
+  if (submission.status === 'DELETED_IN_SHOPIFY') {
+    return {
+      reconciled: true,
+      status: 'DELETED_IN_SHOPIFY',
+      draftOrderId: submission.draftOrderId,
+      draftOrderName: submission.draftOrderName,
+      message: 'Draft order no longer exists in Shopify.',
+    };
+  }
+
+  const shop = submission.catalog.shop;
+  const client = customClient || new ShopifyAdminClient({ shopId: shop.id, shopDomain: shop.shopDomain });
+
   if (submission.status === 'COMPLETED') {
+    if (!submission.draftOrderId) {
+      return {
+        reconciled: true,
+        status: 'COMPLETED',
+        draftOrderId: null,
+        draftOrderName: submission.draftOrderName,
+        message: 'Submission is completed.',
+      };
+    }
+
+    const checkQuery = `
+      query checkSingleDraftOrder($id: ID!) {
+        node(id: $id) {
+          ... on DraftOrder {
+            id
+            name
+            status
+          }
+        }
+      }
+    `;
+
+    try {
+      const checkRes: any = await client.request(checkQuery, { id: submission.draftOrderId });
+      if (!checkRes?.node || checkRes.node.id !== submission.draftOrderId) {
+        await prisma.orderSubmission.update({
+          where: { id: submission.id },
+          data: {
+            status: 'DELETED_IN_SHOPIFY',
+            lastError: 'Shopify Draft Order was deleted or no longer exists in Shopify.',
+          },
+        });
+        return {
+          reconciled: true,
+          status: 'DELETED_IN_SHOPIFY',
+          draftOrderId: submission.draftOrderId,
+          draftOrderName: submission.draftOrderName,
+          message: 'Draft order was deleted from Shopify. Marked as deleted in Shopify.',
+        };
+      }
+    } catch (err: any) {
+      // Rule 8: Do NOT turn temporary Shopify API failures into "deleted".
+      return {
+        reconciled: true,
+        status: 'COMPLETED',
+        draftOrderId: submission.draftOrderId,
+        draftOrderName: submission.draftOrderName,
+        message: 'Submission is completed. (Shopify verification temporarily unavailable)',
+      };
+    }
+
     return {
       reconciled: true,
       status: 'COMPLETED',
       draftOrderId: submission.draftOrderId,
       draftOrderName: submission.draftOrderName,
-      message: 'Submission is already completed.',
+      message: 'Draft order is active and verified in Shopify.',
     };
   }
 
@@ -1571,9 +1673,6 @@ export async function reconcileSubmission(
       'INVALID_STATUS'
     );
   }
-
-  const shop = submission.catalog.shop;
-  const client = customClient || new ShopifyAdminClient({ shopId: shop.id, shopDomain: shop.shopDomain });
   const correlationTag =
     submission.correlationRef ||
     (submission.idempotencyKeyHash
@@ -1682,3 +1781,93 @@ export async function reconcileSubmission(
     message: 'Draft order not yet found in Shopify. Mutation may still be in transit or was rejected upstream.',
   };
 }
+
+/**
+ * Reconciles shop draft orders with Shopify (Part 1).
+ * Detects when previously-created Draft Orders no longer exist in Shopify.
+ * Only marks missing when Shopify definitively reports that the Draft Order does not exist.
+ * Does NOT mark as deleted on transient network/API failures.
+ */
+export async function reconcileShopDraftOrders(
+  shopId: string,
+  customClient?: ShopifyAdminClient
+): Promise<{ checked: number; deleted: number; retained: number }> {
+  const shop = await prisma.shop.findUnique({
+    where: { id: shopId },
+    select: { id: true, shopDomain: true },
+  });
+  if (!shop) return { checked: 0, deleted: 0, retained: 0 };
+
+  const activeSubmissions = await prisma.orderSubmission.findMany({
+    where: {
+      shopId,
+      status: { in: ['COMPLETED', 'REQUIRES_RECONCILIATION'] },
+      draftOrderId: { not: null },
+    },
+    select: {
+      id: true,
+      draftOrderId: true,
+      status: true,
+    },
+    take: 100,
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (activeSubmissions.length === 0) {
+    return { checked: 0, deleted: 0, retained: 0 };
+  }
+
+  const client = customClient || new ShopifyAdminClient({ shopId: shop.id, shopDomain: shop.shopDomain });
+  let deletedCount = 0;
+  let retainedCount = 0;
+
+  // Process in small batches (up to 25 GIDs per batch) using GraphQL nodes query
+  const batchSize = 25;
+  for (let i = 0; i < activeSubmissions.length; i += batchSize) {
+    const batch = activeSubmissions.slice(i, i + batchSize);
+    const validGidBatch = batch.filter((s) => s.draftOrderId && isShopifyDraftOrderGid(s.draftOrderId));
+    if (validGidBatch.length === 0) continue;
+
+    const ids = validGidBatch.map((s) => s.draftOrderId!);
+    const query = `
+      query checkDraftOrdersBatch($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on DraftOrder {
+            id
+            status
+          }
+        }
+      }
+    `;
+
+    try {
+      const res: any = await client.request(query, { ids });
+      const nodes: Array<any> = res?.nodes || [];
+
+      for (let j = 0; j < validGidBatch.length; j++) {
+        const sub = validGidBatch[j];
+        const node = nodes[j];
+
+        // Definitive check: Shopify returned response successfully, and node is null
+        if (!node || node.id !== sub.draftOrderId) {
+          await prisma.orderSubmission.update({
+            where: { id: sub.id },
+            data: {
+              status: 'DELETED_IN_SHOPIFY',
+              lastError: 'Shopify Draft Order was deleted or no longer exists in Shopify.',
+            },
+          });
+          deletedCount++;
+        } else {
+          retainedCount++;
+        }
+      }
+    } catch (err: any) {
+      // PART 1 Rule 8: Do NOT turn temporary Shopify API failures into "deleted".
+      console.warn(`[reconcileShopDraftOrders] Batch verification failed: ${err?.message || err}`);
+    }
+  }
+
+  return { checked: activeSubmissions.length, deleted: deletedCount, retained: retainedCount };
+}
+

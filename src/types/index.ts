@@ -54,9 +54,10 @@ export enum PriceMode {
 
 export enum InventoryMode {
   STATUS_ONLY = 'STATUS_ONLY', // "In stock" / "Out of stock" — no qty number
-  CAPPED = 'CAPPED',           // Show qty but cap at inventoryCap ("50+ available")
   EXACT = 'EXACT',             // Show exact qty always
   HIDDEN = 'HIDDEN',           // No inventory information shown at all
+  /** @deprecated Legacy value — normalised to STATUS_ONLY at read time. Do not use in new code. */
+  CAPPED = 'CAPPED',
 }
 
 export enum CatalogSourceType {
@@ -103,12 +104,25 @@ export function resolveEffectiveQuantityRules(
 }
 
 /**
- * Validates if quantity satisfies min + n * step (n >= 0) and <= max limit.
+ * Validates if quantity satisfies the pack/increment model (min, step, max)
+ * or is 0 (special "not in cart" state).
+ *
+ * Model: the first valid positive quantity is `min`. Subsequent valid values
+ * are `min + step`, `min + 2*step`, etc. In other words:
+ *   (quantity - min) % step === 0  AND  quantity >= min  AND  quantity <= max (if set)
+ *
+ * This is the relative-to-min model and is used for both client and server
+ * validation to ensure parity.
  */
 export function isValidQuantity(quantity: number, min: number, step: number, max: number | null = null): boolean {
-  if (!Number.isInteger(quantity) || quantity < min) return false;
+  if (!Number.isInteger(quantity)) return false;
+  if (quantity === 0) return true; // Special "not in cart" state
+  const effectiveMin = Math.max(1, min);
+  const effectiveStep = Math.max(1, step);
+  if (quantity < effectiveMin) return false;
   if (max !== null && quantity > max) return false;
-  return (quantity - min) % step === 0;
+
+  return (quantity - effectiveMin) % effectiveStep === 0;
 }
 
 export function isValidQuantityStep(quantity: number, min: number, step: number, max: number | null = null): boolean {
@@ -116,35 +130,26 @@ export function isValidQuantityStep(quantity: number, min: number, step: number,
 }
 
 /**
- * Computes the next valid quantity for increment (+).
- * From 0 -> min.
- * From currentQty >= min -> min + (n + 1) * step (capped at max if set).
+ * Computes the next valid quantity for increment (+) using unified pack step model.
  */
 export function nextValidQuantity(currentQty: number, min: number, step: number, max: number | null = null): number {
   const effectiveMin = Math.max(1, min);
   const effectiveStep = Math.max(1, step);
 
-  if (currentQty <= 0) {
-    if (max !== null && effectiveMin > max) return 0;
-    return effectiveMin;
-  }
-
-  if (currentQty < effectiveMin) {
-    if (max !== null && effectiveMin > max) return currentQty;
+  if (currentQty <= 0 || currentQty < effectiveMin) {
+    if (max !== null && effectiveMin > max) return currentQty <= 0 ? 0 : currentQty;
     return effectiveMin;
   }
 
   const offset = (currentQty - effectiveMin) % effectiveStep;
   let next: number;
-  if (offset !== 0) {
-    next = currentQty + (effectiveStep - offset);
-  } else {
+  if (offset === 0) {
     next = currentQty + effectiveStep;
+  } else {
+    next = currentQty + (effectiveStep - offset);
   }
 
   if (max !== null && next > max) {
-    // If next valid step exceeds max, we MUST NOT clamp to an invalid max.
-    // Invariant: isValidQuantity(nextValidQuantity(...)) === true.
     return currentQty;
   }
 
@@ -152,9 +157,7 @@ export function nextValidQuantity(currentQty: number, min: number, step: number,
 }
 
 /**
- * Computes the previous valid quantity for decrement (-).
- * From <= min -> 0 (remove from cart).
- * From currentQty > min -> step down by step aligned with min.
+ * Computes the previous valid quantity for decrement (-) using unified pack step model.
  */
 export function previousValidQuantity(currentQty: number, min: number, step: number): number {
   const effectiveMin = Math.max(1, min);
@@ -166,17 +169,21 @@ export function previousValidQuantity(currentQty: number, min: number, step: num
 
   const offset = (currentQty - effectiveMin) % effectiveStep;
   let prev: number;
-  if (offset !== 0) {
-    prev = currentQty - offset;
-  } else {
+  if (offset === 0) {
     prev = currentQty - effectiveStep;
+  } else {
+    prev = currentQty - offset;
   }
 
-  return Math.max(0, prev);
+  if (prev < effectiveMin) {
+    return 0;
+  }
+
+  return prev;
 }
 
 /**
- * Normalizes an arbitrary quantity input to the nearest valid step at or above min.
+ * Normalizes an arbitrary quantity input to nearest valid step.
  */
 export function normalizeQuantity(quantity: number, min: number, step: number, max: number | null = null): number {
   if (quantity <= 0) return 0;
@@ -186,30 +193,44 @@ export function normalizeQuantity(quantity: number, min: number, step: number, m
   if (quantity < effectiveMin) return effectiveMin;
 
   const offset = (quantity - effectiveMin) % effectiveStep;
-  let normalized = offset === 0 ? quantity : quantity - offset;
-
-  if (max !== null && normalized > max) {
-    const maxOffset = (max - effectiveMin) % effectiveStep;
-    normalized = max - maxOffset;
-    if (normalized < effectiveMin) return 0;
+  let normalized: number;
+  if (offset === 0) {
+    normalized = quantity;
+  } else if (offset >= effectiveStep / 2) {
+    normalized = quantity + (effectiveStep - offset);
+  } else {
+    normalized = quantity - offset;
   }
 
-  return Math.max(effectiveMin, normalized);
+  if (normalized < effectiveMin) normalized = effectiveMin;
+
+  if (max !== null && normalized > max) {
+    let maxValid = Math.floor((max - effectiveMin) / effectiveStep) * effectiveStep + effectiveMin;
+    if (maxValid < effectiveMin) return 0;
+    return maxValid;
+  }
+
+  return normalized;
 }
 
 // ─── Central Variant Inventory Resolver ────────────────────────────────────────
 
-export type InventoryDisplayState = 'IN_STOCK' | 'OUT_OF_STOCK' | 'EXACT' | 'CAPPED' | 'UNTRACKED' | 'HIDDEN';
+export type InventoryDisplayState = 'IN_STOCK' | 'OUT_OF_STOCK' | 'BACKORDER' | 'EXACT' | 'UNTRACKED' | 'HIDDEN';
 
 export interface ResolvedVariantInventory {
   tracked: boolean;
-  quantity: number | null;
-  sellable: boolean;
+  quantity: number | null; // Effective stock ceiling for ordering (null if untracked or continue)
+  sellable: boolean;       // Canonical purchasability state
   displayState: InventoryDisplayState;
   displayText: string | null;
   isCappedOverThreshold?: boolean;
 }
 
+/**
+ * Canonical derivation of inventory purchasability and display mode.
+ * Strictly separates purchasability from display formatting.
+ * Never coerces undefined/missing inventory to 0 in STATUS_ONLY/HIDDEN modes.
+ */
 export function resolveVariantInventory(
   variant: {
     inventoryTracked?: boolean | null;
@@ -224,27 +245,44 @@ export function resolveVariantInventory(
 ): ResolvedVariantInventory {
   const tracked = variant.inventoryTracked !== false;
   const policy = (variant.inventoryPolicy || 'DENY').toUpperCase();
-  const rawQty = variant.inventoryQuantity ?? variant.effectiveAvailable ?? null;
+  const isContinue = policy === 'CONTINUE';
+  const isAvailableForSale = variant.availableForSale !== false;
 
-  const isUntracked = !tracked || policy === 'CONTINUE';
+  const hasExactStock = typeof variant.inventoryQuantity === 'number' || typeof variant.effectiveAvailable === 'number';
+  const rawStock = variant.inventoryQuantity ?? variant.effectiveAvailable ?? null;
+  const numericStock = rawStock !== null ? Math.max(0, rawStock) : null;
 
-  let sellable = Boolean(variant.availableForSale ?? true);
-  let effectiveQty: number | null = null;
+  // 1. Purchasability State
+  let sellable = false;
+  let isBackorderable = false;
+  let orderableCeiling: number | null = null; // null means no local stock ceiling
 
-  if (isUntracked) {
-    effectiveQty = null;
-    sellable = true;
+  if (!tracked) {
+    // Untracked inventory is orderable (never 0-stock) unless availableForSale is false
+    sellable = isAvailableForSale;
+    orderableCeiling = null;
+  } else if (isContinue) {
+    // Tracked + CONTINUE: orderable/backorderable even if stock <= 0
+    sellable = isAvailableForSale;
+    isBackorderable = (numericStock !== null && numericStock <= 0);
+    orderableCeiling = null;
   } else {
-    effectiveQty = Math.max(0, rawQty ?? 0);
-    sellable = sellable && effectiveQty > 0;
+    // Tracked + DENY:
+    if (hasExactStock) {
+      sellable = isAvailableForSale && numericStock! > 0;
+      orderableCeiling = numericStock;
+    } else {
+      // Exact stock hidden for privacy (STATUS_ONLY / HIDDEN) — trust availableForSale
+      sellable = isAvailableForSale;
+      orderableCeiling = null;
+    }
   }
 
-  const isOutOfStock = !sellable;
-
+  // 2. Display Mode
   if (inventoryMode === 'HIDDEN') {
     return {
-      tracked: !isUntracked,
-      quantity: effectiveQty,
+      tracked: tracked && !isContinue,
+      quantity: orderableCeiling,
       sellable,
       displayState: 'HIDDEN',
       displayText: null,
@@ -252,10 +290,10 @@ export function resolveVariantInventory(
     };
   }
 
-  if (isOutOfStock) {
+  if (!sellable) {
     return {
-      tracked: !isUntracked,
-      quantity: effectiveQty,
+      tracked: tracked && !isContinue,
+      quantity: 0,
       sellable: false,
       displayState: 'OUT_OF_STOCK',
       displayText: 'Out of stock',
@@ -263,10 +301,21 @@ export function resolveVariantInventory(
     };
   }
 
+  if (isBackorderable) {
+    return {
+      tracked: true,
+      quantity: orderableCeiling,
+      sellable: true,
+      displayState: 'BACKORDER',
+      displayText: 'Available for backorder',
+      isCappedOverThreshold: false,
+    };
+  }
+
   if (inventoryMode === 'STATUS_ONLY') {
     return {
-      tracked: !isUntracked,
-      quantity: effectiveQty,
+      tracked: tracked && !isContinue,
+      quantity: orderableCeiling,
       sellable: true,
       displayState: 'IN_STOCK',
       displayText: 'In stock',
@@ -275,19 +324,19 @@ export function resolveVariantInventory(
   }
 
   if (inventoryMode === 'EXACT') {
-    if (effectiveQty !== null) {
+    if (numericStock !== null && tracked && !isContinue) {
       return {
         tracked: true,
-        quantity: effectiveQty,
+        quantity: orderableCeiling,
         sellable: true,
         displayState: 'EXACT',
-        displayText: `${effectiveQty} available`,
+        displayText: `${numericStock} available`,
         isCappedOverThreshold: false,
       };
     }
     return {
       tracked: false,
-      quantity: null,
+      quantity: orderableCeiling,
       sellable: true,
       displayState: 'UNTRACKED',
       displayText: 'In stock',
@@ -295,32 +344,14 @@ export function resolveVariantInventory(
     };
   }
 
-  if (inventoryMode === 'CAPPED') {
-    const cap = inventoryCap ?? 50;
-    if (effectiveQty !== null) {
-      const overCap = Boolean(variant.isCappedOverThreshold || effectiveQty >= cap);
-      return {
-        tracked: true,
-        quantity: Math.min(effectiveQty, cap),
-        sellable: true,
-        displayState: overCap ? 'CAPPED' : 'EXACT',
-        displayText: overCap ? `${cap}+ available` : `${effectiveQty} available`,
-        isCappedOverThreshold: overCap,
-      };
-    }
-    return {
-      tracked: false,
-      quantity: null,
-      sellable: true,
-      displayState: 'UNTRACKED',
-      displayText: `${cap}+ available`,
-      isCappedOverThreshold: true,
-    };
-  }
+  // Legacy CAPPED mode is normalised to STATUS_ONLY at display time.
+  // (Backward-compat: existing catalogs with inventoryMode=CAPPED are treated as STATUS_ONLY.)
+  // Fall through to STATUS_ONLY display below.
 
+  // STATUS_ONLY (default) or any unknown/legacy mode:
   return {
-    tracked: !isUntracked,
-    quantity: effectiveQty,
+    tracked: tracked && !isContinue,
+    quantity: orderableCeiling,
     sellable: true,
     displayState: 'IN_STOCK',
     displayText: 'In stock',
@@ -362,23 +393,15 @@ export const CreateCatalogInputSchema = z.object({
   ),
   accentColor: z.string().regex(/^#([0-9a-fA-F]{3}){1,2}$/, 'Valid hex color required').optional().default('#108043'),
   showSku: z.boolean().default(true),
-  showInventory: z.boolean().default(false),
-  inventoryMode: z.enum([InventoryMode.STATUS_ONLY, InventoryMode.CAPPED, InventoryMode.EXACT, InventoryMode.HIDDEN]).optional(),
-  inventoryCap: optionalNullableInt(1),
+  showInventory: z.boolean().optional(),
+  inventoryMode: z.enum([InventoryMode.STATUS_ONLY, InventoryMode.EXACT, InventoryMode.HIDDEN, 'CAPPED' as any]).optional(),
+  inventoryCap: optionalNullableInt(1, 100000),
   minQty: z.number().int().min(1).max(10000).optional().default(1),
   maxQty: optionalNullableInt(1, 100000),
   qtyIncrement: z.number().int().min(1).max(1000).optional().default(1),
   buyerFormConfig: z.union([z.string(), BuyerFormConfigSchema]).optional(),
   sources: z.array(CatalogSourceSchema).min(1, 'At least one collection or product source is required'),
   variantConfigs: z.array(CatalogVariantConfigInputSchema).optional(),
-}).superRefine((data, ctx) => {
-  if (data.inventoryMode === InventoryMode.CAPPED && (!data.inventoryCap || data.inventoryCap < 1)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'Inventory cap is required and must be at least 1 when Inventory Display Mode is CAPPED',
-      path: ['inventoryCap'],
-    });
-  }
 });
 
 export const UpdateCatalogInputSchema = z.object({
@@ -393,22 +416,14 @@ export const UpdateCatalogInputSchema = z.object({
   accentColor: z.string().regex(/^#([0-9a-fA-F]{3}){1,2}$/, 'Valid hex color required').optional(),
   showSku: z.boolean().optional(),
   showInventory: z.boolean().optional(),
-  inventoryMode: z.enum([InventoryMode.STATUS_ONLY, InventoryMode.CAPPED, InventoryMode.EXACT, InventoryMode.HIDDEN]).optional(),
-  inventoryCap: optionalNullableInt(1),
+  inventoryMode: z.enum([InventoryMode.STATUS_ONLY, InventoryMode.EXACT, InventoryMode.HIDDEN, 'CAPPED' as any]).optional(),
+  inventoryCap: optionalNullableInt(1, 100000),
   minQty: z.number().int().min(1).max(10000).optional(),
   maxQty: optionalNullableInt(1, 100000),
   qtyIncrement: z.number().int().min(1).max(1000).optional(),
   buyerFormConfig: z.union([z.string(), BuyerFormConfigSchema]).optional(),
   sources: z.array(CatalogSourceSchema).min(1, 'At least one collection or product source is required').optional(),
   variantConfigs: z.array(CatalogVariantConfigInputSchema).optional(),
-}).superRefine((data, ctx) => {
-  if (data.inventoryMode === InventoryMode.CAPPED && (!data.inventoryCap || data.inventoryCap < 1)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'Inventory cap is required and must be at least 1 when Inventory Display Mode is CAPPED',
-      path: ['inventoryCap'],
-    });
-  }
 });
 
 // ─── Order Link schemas ────────────────────────────────────────────────────────

@@ -39,7 +39,13 @@ export function renderStockBadge(
     return null;
   }
 
-  const className = resolved.displayState === 'OUT_OF_STOCK' ? 'stock-tag out-of-stock' : 'stock-tag in-stock';
+  let className = 'stock-tag in-stock';
+  if (resolved.displayState === 'OUT_OF_STOCK') {
+    className = 'stock-tag out-of-stock';
+  } else if (resolved.displayState === 'BACKORDER') {
+    className = 'stock-tag backorder';
+  }
+
   return (
     <span className={className}>
       {resolved.displayText}
@@ -135,30 +141,19 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
           {product.variants.map((variant) => {
             const currentQty = quantities[variant.shopifyVariantId] || 0;
             const hasDiscount = variant.displayPrice < variant.basePrice;
-            const canOrderBeyondReported =
-              Boolean(variant.isCappedOverThreshold) ||
-              variant.inventoryTracked === false ||
-              variant.inventoryPolicy === 'CONTINUE';
-
-            const isOutOfStock =
-              !variant.availableForSale ||
-              (!canOrderBeyondReported &&
-                variant.effectiveAvailable !== null &&
-                variant.effectiveAvailable !== undefined &&
-                variant.effectiveAvailable <= 0);
-
             const min = variant.minQty || 1;
             const step = variant.qtyIncrement || 1;
 
+            const resolvedInv = resolveVariantInventory(variant, inventoryMode, inventoryCap);
+            const isOutOfStock = !resolvedInv.sellable;
+
             let maxLimit: number | null = null;
-            if (canOrderBeyondReported) {
-              maxLimit = variant.maxQty ?? null;
-            } else if (variant.maxQty != null && variant.effectiveAvailable != null) {
-              maxLimit = Math.min(variant.maxQty, variant.effectiveAvailable);
+            if (resolvedInv.quantity !== null && variant.maxQty != null) {
+              maxLimit = Math.min(variant.maxQty, resolvedInv.quantity);
             } else if (variant.maxQty != null) {
               maxLimit = variant.maxQty;
-            } else if (variant.effectiveAvailable != null) {
-              maxLimit = variant.effectiveAvailable;
+            } else if (resolvedInv.quantity !== null) {
+              maxLimit = resolvedInv.quantity;
             }
 
             return (

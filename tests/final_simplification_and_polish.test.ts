@@ -237,20 +237,19 @@ describe('Final Product Simplification, Quantity Inheritance, Inventory & Featur
       expect(vIn?.inventoryQuantity).toBe(45);
     });
 
-    it('13 & 14. CAPPED mode caps at inventoryCap when stock exceeds cap', async () => {
+    it('13 & 14. legacy CAPPED mode normalizes to STATUS_ONLY (effectiveAvailable null, no privacy leak)', async () => {
       const catalog = await createCatalog(shop.id, {
-        name: 'Capped Catalog',
-        inventoryMode: InventoryMode.CAPPED,
-        inventoryCap: 20,
+        name: 'Legacy Capped Catalog',
+        inventoryMode: 'CAPPED' as any,
         sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/9001' }],
       });
       await publishCatalog(shop.id, catalog.id);
 
       const payload = await getPublicCatalogPayload(catalog.publicToken);
       const vIn = payload!.products[0]!.variants.find((v) => v.shopifyVariantId === 'gid://shopify/ProductVariant/10001');
-      // Real stock is 45, cap is 20 -> capped to 20
-      expect(vIn?.effectiveAvailable).toBe(20);
-      expect(vIn?.isCappedOverThreshold).toBe(true);
+      // Legacy CAPPED normalizes to STATUS_ONLY: no exact numbers exposed
+      expect(vIn?.effectiveAvailable).toBeFalsy();
+      expect(vIn?.isCappedOverThreshold).toBe(false);
     });
 
     it('15. HIDDEN mode omits inventory quantity and sets showInventory false', async () => {

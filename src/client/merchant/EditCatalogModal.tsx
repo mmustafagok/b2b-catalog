@@ -13,7 +13,7 @@ export interface CatalogSummary {
   accentColor: string;
   showSku: boolean;
   showInventory: boolean;
-  inventoryMode?: 'STATUS_ONLY' | 'CAPPED' | 'EXACT' | 'HIDDEN';
+  inventoryMode?: 'STATUS_ONLY' | 'EXACT' | 'HIDDEN';
   inventoryCap?: number | null;
   minQty?: number;
   maxQty?: number | null;
@@ -53,8 +53,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
     customPriceAmount: catalog.customPriceAmount ? String(catalog.customPriceAmount) : '',
     accentColor: catalog.accentColor || '#108043',
     showSku: catalog.showSku !== false,
-    inventoryMode: catalog.inventoryMode || 'STATUS_ONLY',
-    inventoryCap: catalog.inventoryCap ? String(catalog.inventoryCap) : '50',
+    inventoryMode: (catalog.inventoryMode as any) === 'CAPPED' ? 'STATUS_ONLY' : (catalog.inventoryMode || 'STATUS_ONLY'),
     minQty: catalog.minQty || 1,
     maxQty: catalog.maxQty ? String(catalog.maxQty) : '',
     qtyIncrement: catalog.qtyIncrement || 1,
@@ -99,7 +98,6 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
         accentColor: formState.accentColor,
         showSku: formState.showSku,
         inventoryMode: formState.inventoryMode,
-        inventoryCap: formState.inventoryMode === 'CAPPED' ? (parseInt(formState.inventoryCap, 10) || 50) : null,
         minQty: Math.max(1, formState.minQty),
         maxQty: formState.maxQty ? parseInt(formState.maxQty, 10) : null,
         qtyIncrement: Math.max(1, formState.qtyIncrement),

@@ -107,44 +107,27 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       expect(updated.inventoryMode).toBe(InventoryMode.HIDDEN);
     });
 
-    it('4. CAPPED saves with valid positive cap', async () => {
+    it('4. legacy CAPPED mode normalizes to STATUS_ONLY', async () => {
       const catalog = await createCatalog(shop.id, {
         name: 'Capped Mode Catalog',
-        inventoryMode: InventoryMode.CAPPED,
-        inventoryCap: 25,
+        inventoryMode: 'CAPPED' as any,
         sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1001' }],
       });
-      expect(catalog.inventoryMode).toBe(InventoryMode.CAPPED);
-      expect(catalog.inventoryCap).toBe(25);
+      expect(catalog.inventoryMode).toBe('STATUS_ONLY');
 
       const updated = await updateCatalog(shop.id, catalog.id, {
-        inventoryMode: InventoryMode.CAPPED,
-        inventoryCap: 75,
+        inventoryMode: 'EXACT' as any,
       });
-      expect(updated.inventoryMode).toBe(InventoryMode.CAPPED);
-      expect(updated.inventoryCap).toBe(75);
+      expect(updated.inventoryMode).toBe('EXACT');
     });
 
-    it('5. CAPPED rejects missing or invalid cap with useful validation error', async () => {
-      // Missing inventoryCap on CAPPED mode creation
-      expect(() =>
-        CreateCatalogInputSchema.parse({
-          name: 'Invalid Capped Catalog',
-          inventoryMode: InventoryMode.CAPPED,
-          inventoryCap: null,
-          sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1001' }],
-        })
-      ).toThrow(/inventory cap is required/i);
-
-      // Invalid 0 cap
-      expect(() =>
-        CreateCatalogInputSchema.parse({
-          name: 'Zero Capped Catalog',
-          inventoryMode: InventoryMode.CAPPED,
-          inventoryCap: 0,
-          sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1001' }],
-        })
-      ).toThrow();
+    it('5. STATUS_ONLY saves and functions cleanly without cap', async () => {
+      const catalog = await createCatalog(shop.id, {
+        name: 'Status Only Catalog',
+        inventoryMode: InventoryMode.STATUS_ONLY,
+        sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/1001' }],
+      });
+      expect(catalog.inventoryMode).toBe(InventoryMode.STATUS_ONLY);
     });
   });
 
@@ -538,8 +521,7 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
         name: 'Full Parity Catalog',
         priceMode: PriceMode.PERCENT_DISCOUNT,
         discountPercent: 15,
-        inventoryMode: InventoryMode.CAPPED,
-        inventoryCap: 40,
+        inventoryMode: InventoryMode.STATUS_ONLY,
         minQty: 3,
         maxQty: 500,
         qtyIncrement: 3,
@@ -551,8 +533,7 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       expect(created.name).toBe('Full Parity Catalog');
       expect(created.priceMode).toBe(PriceMode.PERCENT_DISCOUNT);
       expect(Number(created.discountPercent)).toBe(15);
-      expect(created.inventoryMode).toBe(InventoryMode.CAPPED);
-      expect(created.inventoryCap).toBe(40);
+      expect(created.inventoryMode).toBe(InventoryMode.STATUS_ONLY);
       expect(created.minQty).toBe(3);
       expect(created.maxQty).toBe(500);
       expect(created.qtyIncrement).toBe(3);
