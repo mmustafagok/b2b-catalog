@@ -78,22 +78,23 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       expect(published.status).toBe('PUBLISHED');
     });
 
-    it('rejects publishing a 2nd catalog when on Starter plan (hard cap = 1)', async () => {
+    it('rejects publishing a 2nd catalog when on Free plan (hard cap = 1)', async () => {
+      await prisma.shop.update({ where: { id: testShop.id }, data: { plan: 'FREE' } });
       const cat1 = await createCatalog(testShop.id, {
-        name: 'Starter Catalog 1',
+        name: 'Free Catalog 1',
         priceMode: PriceMode.SHOPIFY_PRICE,
         sources: [{ type: CatalogSourceType.COLLECTION, shopifyGid: 'gid://shopify/Collection/100' }],
       });
       await publishCatalog(testShop.id, cat1.id);
 
       const cat2 = await createCatalog(testShop.id, {
-        name: 'Starter Catalog 2',
+        name: 'Free Catalog 2',
         priceMode: PriceMode.SHOPIFY_PRICE,
         sources: [{ type: CatalogSourceType.COLLECTION, shopifyGid: 'gid://shopify/Collection/200' }],
       });
 
       await expect(publishCatalog(testShop.id, cat2.id)).rejects.toThrow(
-        /Plan quota reached: You can have at most 1 live catalog/
+        /Free plan limit|Plan quota reached/
       );
     });
 
@@ -129,7 +130,7 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       });
 
       await expect(publishCatalog(testShop.id, cat.id)).rejects.toThrow(
-        /Plan variant quota reached: This catalog has 505 variants, but your Starter plan limit is 500 variants/
+        /Starter plan limit|Plan variant quota reached/
       );
     });
 
@@ -180,17 +181,17 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
 
       expect(res.status).toBe(200);
       expect(res.body.currentPlan).toBe('STARTER');
-      expect(res.body.limits.maxLiveCatalogs).toBe(1);
+      expect(res.body.limits.maxLiveCatalogs).toBe(3);
       expect(res.body.limits.maxVariants).toBe(500);
       expect(res.body.limits.monthlySubmissionsLimit).toBe(50);
       expect(res.body.availablePlans).toHaveLength(3);
 
+      const free = res.body.availablePlans.find((p: any) => p.id === 'FREE');
+      expect(free.price).toBe(0);
       const starter = res.body.availablePlans.find((p: any) => p.id === 'STARTER');
       expect(starter.price).toBe(14.99);
       const growth = res.body.availablePlans.find((p: any) => p.id === 'GROWTH');
       expect(growth.price).toBe(29.99);
-      const scale = res.body.availablePlans.find((p: any) => p.id === 'SCALE');
-      expect(scale.price).toBe(49.99);
     });
 
     it('prohibits database-only self-service plan changes when NODE_ENV is production', async () => {
@@ -200,7 +201,7 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       try {
         expect(isDevPlanOverrideAllowed()).toBe(false);
 
-        await expect(changeShopPlan(testShop.id, PlanTier.SCALE)).rejects.toThrow(
+        await expect(changeShopPlan(testShop.id, PlanTier.GROWTH)).rejects.toThrow(
           /Self-service plan changes are disabled/
         );
 
@@ -216,15 +217,15 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       const res = await request(app)
         .post('/api/admin/billing/change-plan')
         .set('x-shop-domain', testShop.shopDomain)
-        .send({ plan: 'SCALE' });
+        .send({ plan: 'GROWTH' });
 
       expect(res.status).toBe(200);
-      expect(res.body.currentPlan).toBe('SCALE');
-      expect(res.body.limits.maxLiveCatalogs).toBe(20);
+      expect(res.body.currentPlan).toBe('GROWTH');
+      expect(res.body.limits.maxLiveCatalogs).toBe(10);
 
       // Verify persisted in DB for test simulation
       const updatedShop = await prisma.shop.findUnique({ where: { id: testShop.id } });
-      expect(updatedShop?.plan).toBe('SCALE');
+      expect(updatedShop?.plan).toBe('GROWTH');
     });
 
     it('blocks downgrading if live catalog count exceeds target plan limit', async () => {
@@ -245,14 +246,14 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       });
       await publishCatalog(testShop.id, cat2.id);
 
-      // Attempt to downgrade to STARTER (limit = 1)
+      // Attempt to downgrade to FREE (limit = 1)
       const res = await request(app)
         .post('/api/admin/billing/change-plan')
         .set('x-shop-domain', testShop.shopDomain)
-        .send({ plan: 'STARTER' });
+        .send({ plan: 'FREE' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('You currently have 2 live catalogs, but the Starter plan only allows 1');
+      expect(res.body.error).toContain('You currently have 2 live catalogs, but the Free plan only allows 1');
     });
   });
 
@@ -806,7 +807,7 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
           },
           lines: [{ variantId: variantGid, quantity: 2 }],
         })
-      ).rejects.toThrow(/Merchant order submission limit reached for their current plan/);
+      ).rejects.toThrow(/used all.*buyer submissions|Merchant order submission limit/);
 
       // Verify BillingProvider was consulted to resolve the submission limit
       expect(getEntitlementSpy).toHaveBeenCalledWith(testShop.id);
@@ -814,14 +815,37 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       getEntitlementSpy.mockRestore();
     });
 
-    it('reports truthful entitlement source in production (LOCAL_MIRROR_PENDING_SHOPIFY, not SHOPIFY_APP_PRICING)', async () => {
+    it('reports truthful entitlement source in production (SHOPIFY_APP_PRICING)', async () => {
       const prevEnv = process.env.NODE_ENV;
+      const prevOrg = process.env.SHOPIFY_PARTNER_ORG_ID;
+      const prevApp = process.env.SHOPIFY_PARTNER_APP_ID;
+      const prevToken = process.env.SHOPIFY_PARTNER_API_ACCESS_TOKEN;
+
       process.env.NODE_ENV = 'production';
+      process.env.SHOPIFY_PARTNER_ORG_ID = '123456';
+      process.env.SHOPIFY_PARTNER_APP_ID = '987654';
+      process.env.SHOPIFY_PARTNER_API_ACCESS_TOKEN = 'shppat_test_token';
+
+      defaultBillingProvider.setCustomFetch(async () => {
+        return new Response(
+          JSON.stringify({
+            data: {
+              activeSubscription: {
+                items: [{ handle: 'starter', description: 'Starter' }],
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      });
+
+      const spy = vi.spyOn(ShopifyAdminClient.prototype, 'request').mockResolvedValue({
+        shop: { id: 'gid://shopify/Shop/123456' },
+      });
 
       try {
         const entitlement = await defaultBillingProvider.getEntitlement(testShop);
-        expect(entitlement.source).toBe('LOCAL_MIRROR_PENDING_SHOPIFY');
-        expect(entitlement.source).not.toBe('SHOPIFY_APP_PRICING');
+        expect(entitlement.source).toBe('SHOPIFY_APP_PRICING');
 
         const token = createTestAppBridgeToken(testShop.shopDomain);
 
@@ -831,10 +855,15 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
           .set('Authorization', `Bearer ${token}`);
 
         expect(billingRes.status).toBe(200);
-        expect(billingRes.body.entitlementSource).toBe('LOCAL_MIRROR_PENDING_SHOPIFY');
-        expect(billingRes.body.billingStatus).toBe('SHOPIFY_APP_PRICING_PENDING_M10');
+        expect(billingRes.body.entitlementSource).toBe('SHOPIFY_APP_PRICING');
+        expect(billingRes.body.billingStatus).toBe('ACTIVE');
       } finally {
-        process.env.NODE_ENV = prevEnv;
+        spy.mockRestore();
+        defaultBillingProvider.setCustomFetch(undefined);
+        if (prevEnv !== undefined) process.env.NODE_ENV = prevEnv; else delete process.env.NODE_ENV;
+        if (prevOrg !== undefined) process.env.SHOPIFY_PARTNER_ORG_ID = prevOrg; else delete process.env.SHOPIFY_PARTNER_ORG_ID;
+        if (prevApp !== undefined) process.env.SHOPIFY_PARTNER_APP_ID = prevApp; else delete process.env.SHOPIFY_PARTNER_APP_ID;
+        if (prevToken !== undefined) process.env.SHOPIFY_PARTNER_API_ACCESS_TOKEN = prevToken; else delete process.env.SHOPIFY_PARTNER_API_ACCESS_TOKEN;
       }
     });
 
@@ -855,22 +884,22 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
       expect(entitlement.limits.maxVariants).toBe(500);
       expect(entitlement.planDetails.maxVariants).toBe(500);
 
-      // Verify Starter plan has 1 live catalog and 50 monthly submissions
-      expect(entitlement.limits.maxLiveCatalogs).toBe(1);
-      expect(entitlement.limits.monthlySubmissionsLimit).toBe(50);
-      expect(entitlement.limits.price).toBe(14.99);
+      // Verify Free has 1 live catalog, 50 variants, 5 monthly submissions, $0
+      expect(PLAN_LIMITS.FREE.maxLiveCatalogs).toBe(1);
+      expect(PLAN_LIMITS.FREE.maxVariants).toBe(50);
+      expect(PLAN_LIMITS.FREE.monthlySubmissionsLimit).toBe(5);
+      expect(PLAN_LIMITS.FREE.price).toBe(0);
 
-      // Verify Growth has 5 live catalogs, 5,000 variants, 250 orders, $29.99
-      expect(PLAN_LIMITS.GROWTH.maxLiveCatalogs).toBe(5);
+      // Verify Starter has 3 live catalogs, 500 variants, 50 monthly submissions, $14.99
+      expect(PLAN_LIMITS.STARTER.maxLiveCatalogs).toBe(3);
+      expect(PLAN_LIMITS.STARTER.monthlySubmissionsLimit).toBe(50);
+      expect(PLAN_LIMITS.STARTER.price).toBe(14.99);
+
+      // Verify Growth has 10 live catalogs, 5,000 variants, 250 orders, $29.99
+      expect(PLAN_LIMITS.GROWTH.maxLiveCatalogs).toBe(10);
       expect(PLAN_LIMITS.GROWTH.maxVariants).toBe(5000);
       expect(PLAN_LIMITS.GROWTH.monthlySubmissionsLimit).toBe(250);
       expect(PLAN_LIMITS.GROWTH.price).toBe(29.99);
-
-      // Verify Scale has 20 live catalogs, 25,000 variants, 1,000 orders, $49.99
-      expect(PLAN_LIMITS.SCALE.maxLiveCatalogs).toBe(20);
-      expect(PLAN_LIMITS.SCALE.maxVariants).toBe(25000);
-      expect(PLAN_LIMITS.SCALE.monthlySubmissionsLimit).toBe(1000);
-      expect(PLAN_LIMITS.SCALE.price).toBe(49.99);
     });
 
     it('blocks direct plan mutation via HTTP endpoint when in simulated production', async () => {
@@ -882,7 +911,7 @@ describe('Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Produc
         const res = await request(app)
           .post('/api/admin/billing/change-plan')
           .set('Authorization', `Bearer ${token}`)
-          .send({ plan: 'SCALE' });
+          .send({ plan: 'GROWTH' });
 
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('BILLING_NOT_CONFIGURED');

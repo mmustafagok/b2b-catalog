@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { sanitizeErrorMessage } from './security.server.js';
 
 export const ANALYTICS_EVENTS = {
   CATALOG_VIEWED: 'catalog_viewed',
@@ -115,7 +116,7 @@ export async function recordAnalyticsEvent(
     }
   } catch (err: any) {
     // Non-blocking log: analytics recording failure must never crash core order workflows
-    console.error(`[Analytics] Failed to record event ${eventName}:`, err.message);
+    console.error(`[Analytics] Failed to record event ${eventName}:`, sanitizeErrorMessage(err));
   }
 }
 
@@ -154,7 +155,7 @@ export async function getShopAnalyticsSummary(
   });
 
   let catalogViews = 0;
-  let orderSummariesStarted = 0;
+  let orderSummariesStartedRaw = 0;
   let ordersSubmitted = 0;
   let draftOrdersCreated = 0;
 
@@ -162,13 +163,16 @@ export async function getShopAnalyticsSummary(
     if (ev.eventName === ANALYTICS_EVENTS.CATALOG_VIEWED) {
       catalogViews++;
     } else if (ev.eventName === ANALYTICS_EVENTS.ORDER_SUMMARY_STARTED) {
-      orderSummariesStarted++;
+      orderSummariesStartedRaw++;
     } else if (ev.eventName === ANALYTICS_EVENTS.ORDER_SUBMITTED) {
       ordersSubmitted++;
     } else if (ev.eventName === ANALYTICS_EVENTS.DRAFT_ORDER_CREATED) {
       draftOrdersCreated++;
     }
   }
+
+  // Logical consistency: an order submission or draft order creation implies cart engagement
+  const orderSummariesStarted = Math.max(orderSummariesStartedRaw, ordersSubmitted, draftOrdersCreated);
 
   const roundPct = (num: number) => Math.round(num * 100) / 100;
 

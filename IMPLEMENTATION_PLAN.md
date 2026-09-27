@@ -156,7 +156,7 @@ $$\text{Shopify Products} \longrightarrow \text{Live Wholesale Catalog Link} \lo
   - Production invariant: `Shop.plan` is an entitlement mirror/cache, not a merchant-controlled source of truth.
   - Production self-service plan changes blocked with `403 BILLING_NOT_CONFIGURED`; dev/test override strictly isolated.
   - Shopify App Pricing live integration: **PENDING M10** (source explicitly marked `LOCAL_MIRROR_PENDING_SHOPIFY` until M10 Partner Dashboard setup).
-  - Commercial Plan Tiers: Starter ($14.99, 1 catalog, 500 variants, 50 orders/mo), Growth ($29.99, 5 catalogs, 5,000 variants, 250 orders/mo), Scale ($49.99, 20 catalogs, 25,000 variants, 1,000 orders/mo). 7-day trial in Shopify App Pricing; zero overage, no permanent free tier.
+  - Commercial Plan Tiers: Free ($0/mo, 1 catalog, 50 variants, 5 orders/mo), Starter ($14.99/mo or $119.99/yr, 3 catalogs, 500 variants, 50 orders/mo), Growth ($29.99/mo or $239.99/yr, 10 catalogs, 5,000 variants, 250 orders/mo). Zero overage, hard caps only, complete feature parity across all plans.
   - Strict analytics metadata privacy allowlist (`ORDER_SUMMARY_STARTED`: `itemCount`, `lineCount`; Server order events: `submissionId`, `itemCount`, `lineCount`, `subtotal`, `currency`). All PII and unknown keys discarded.
   - Accurate North Star event (`draft_order_created_from_buyer_submission`) recorded idempotently once across normal completion and reconciliation via deterministic `eventKey`.
   - Non-blocking buyer catalog analytics (`void recordAnalyticsEvent(...)`) and bounded query validation (`1 <= days <= 90`).

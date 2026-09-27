@@ -1320,3 +1320,28 @@ body {
   background: #fafafa;
   flex-shrink: 0;
 }
+
+/* ── Lightweight Onboarding System ─────────────────────────────────── */
+.cf-first-use-card {
+  border-left: 4px solid var(--cf-primary);
+  background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%);
+}
+
+.cf-onboarding-checklist-card {
+  border: 1px solid #e1e3e5;
+  background: #ffffff;
+}
+
+.cf-checklist-step {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  transition: all 0.2s ease;
+}
+
+.cf-checklist-step.completed {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+

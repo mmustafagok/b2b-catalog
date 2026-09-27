@@ -217,7 +217,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
                   fontSize: '0.9rem',
                 }}
               >
-                ⚙️ Quantity Rules & Branding
+                ⚙️ Quantity & Appearance
               </button>
               <button
                 type="button"
@@ -234,7 +234,7 @@ export const EditCatalogModal: React.FC<EditCatalogModalProps> = ({
                   fontSize: '0.9rem',
                 }}
               >
-                📋 Buyer Checkout Form
+                📋 Buyer Order Form
               </button>
             </div>
 

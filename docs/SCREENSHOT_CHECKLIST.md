@@ -52,5 +52,5 @@
 
 ### 9. Predictable Billing & Commercial Quotas
 - **Location:** Merchant Admin $\rightarrow$ Billing & Plans Tab
-- **Visual:** Commercial plan comparison cards (Starter, Growth, Scale), quota utilization bars, and hard-cap predictability.
-- **Key Caption:** "Predictable wholesale plans with 7-day trials, hard caps, and zero surprise overages."
+- **Visual:** Commercial plan comparison cards (Free, Starter, Growth), quota utilization bars, and hard-cap predictability.
+- **Key Caption:** "Predictable wholesale plans with hard caps, complete feature parity, and zero surprise overages."

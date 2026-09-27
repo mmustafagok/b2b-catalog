@@ -71,7 +71,9 @@ import {
   getShopBillingInfo,
   changeShopPlan,
   BillingError,
+  defaultBillingProvider,
 } from './services/billing.server.js';
+import { PlanTier } from './types/index.js';
 import {
   getActiveShopByDomain,
   installOrUpdateShop,
@@ -98,6 +100,7 @@ import {
 import { validateEnvironment } from './services/env.server.js';
 import { sanitizeShopifySearchQuery } from './services/shopify-search.server.js';
 import { enqueueJob, JobType } from './services/job-queue.server.js';
+import { recordPcdAccessAudit, PCD_AUDIT_ACTIONS } from './services/pcd-audit.server.js';
 import { runWorkerOnce } from './worker.js';
 import dotenv from 'dotenv';
 
@@ -1123,6 +1126,15 @@ app.post('/api/webhooks/compliance/customers-data-request', async (req: any, res
     return res.status(401).send('HMAC verification failed');
   }
 
+  const shopDomain = req.get('X-Shopify-Shop-Domain') || req.body?.shop_domain || 'unknown-shop';
+
+  await recordPcdAccessAudit({
+    shopId: shopDomain,
+    action: PCD_AUDIT_ACTIONS.CUSTOMERS_DATA_REQUEST_RECEIVED,
+    purpose: 'Shopify customers/data_request compliance webhook received (no customer PII stored)',
+    actorType: 'SHOPIFY_WEBHOOK',
+  }).catch(() => {});
+
   // CatalogFlow stores NO raw buyer customer records
   return res.status(200).json({ message: 'No customer PII stored' });
 });
@@ -1135,13 +1147,22 @@ app.post('/api/webhooks/compliance/customers-redact', async (req: any, res: Resp
     return res.status(401).send('HMAC verification failed');
   }
 
+  const shopDomain = req.get('X-Shopify-Shop-Domain') || req.body?.shop_domain || 'unknown-shop';
+
+  await recordPcdAccessAudit({
+    shopId: shopDomain,
+    action: PCD_AUDIT_ACTIONS.CUSTOMERS_REDACT_RECEIVED,
+    purpose: 'Shopify customers/redact compliance webhook received (no customer PII retained)',
+    actorType: 'SHOPIFY_WEBHOOK',
+  }).catch(() => {});
+
   // No customer PII retained in application DB
   return res.status(200).json({ message: 'No customer PII to redact' });
 });
 
 app.post('/api/webhooks/compliance/shop-redact', async (req: any, res: Response) => {
   const hmacHeader = req.get('X-Shopify-Hmac-Sha256') || '';
-  const shopDomain = req.get('X-Shopify-Shop-Domain') || req.body.shop_domain || '';
+  const shopDomain = req.get('X-Shopify-Shop-Domain') || req.body?.shop_domain || '';
   const secret = process.env.SHOPIFY_API_SECRET;
 
   if (!secret || !verifyShopifyWebhookHmac(req.rawBody, hmacHeader, secret)) {
@@ -1150,6 +1171,13 @@ app.post('/api/webhooks/compliance/shop-redact', async (req: any, res: Response)
 
   try {
     if (shopDomain) {
+      await recordPcdAccessAudit({
+        shopId: shopDomain,
+        action: PCD_AUDIT_ACTIONS.SHOP_REDACT_RECEIVED,
+        purpose: 'Shopify shop/redact compliance webhook received',
+        actorType: 'SHOPIFY_WEBHOOK',
+      }).catch(() => {});
+
       await redactShopData(shopDomain);
     }
     return res.status(200).json({ message: 'Shop data redacted successfully' });
@@ -1569,12 +1597,24 @@ app.get('/api/admin/catalogs/:id/links/:linkId/qr', adminAuthMiddleware, async (
 // Billing & Quotas (M8)
 app.get('/api/admin/billing', adminAuthMiddleware, async (req: any, res: Response) => {
   try {
-    const billingInfo = await getShopBillingInfo(req.shop.id);
+    const planHandle = req.query.plan_handle ? String(req.query.plan_handle) : undefined;
+    const billingInfo = await getShopBillingInfo(req.shop.id, { planHandle });
     return res.status(200).json(billingInfo);
   } catch (err: any) {
     if (err instanceof BillingError) {
       return res.status(err.statusCode).json({ error: err.message, code: err.code });
     }
+    return res.status(500).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Billing Destination Route (Shopify App Pricing redirect URL)
+app.get('/api/admin/billing/destination', adminAuthMiddleware, async (req: any, res: Response) => {
+  try {
+    const targetPlan = (req.query.plan as PlanTier) || PlanTier.FREE;
+    const destination = await defaultBillingProvider.getPlanSelectionDestination(targetPlan, req.shop.shopDomain);
+    return res.status(200).json(destination);
+  } catch (err: any) {
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }
 });
@@ -1590,7 +1630,11 @@ app.post('/api/admin/billing/change-plan', adminAuthMiddleware, async (req: any,
     return res.status(200).json(updatedBilling);
   } catch (err: any) {
     if (err instanceof BillingError) {
-      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      return res.status(err.statusCode).json({
+        error: err.message,
+        code: err.code,
+        destinationUrl: (err as any).destinationUrl || null,
+      });
     }
     return res.status(500).json({ error: sanitizeErrorMessage(err) });
   }
@@ -1674,7 +1718,7 @@ function legalPageHtml(title: string, body: string): string {
       <p class="updated">Last updated: September 2026</p>
     </header>
     ${body}
-    <footer>© 2026 CatalogFlow &nbsp;·&nbsp; <a href="/privacy">Privacy</a> &nbsp;·&nbsp; <a href="/terms">Terms</a> &nbsp;·&nbsp; <a href="/support">Support</a></footer>
+    <footer>© 2026 CatalogFlow &nbsp;·&nbsp; <a href="/privacy">Privacy</a> &nbsp;·&nbsp; <a href="/data-processing">Data Processing</a> &nbsp;·&nbsp; <a href="/terms">Terms</a> &nbsp;·&nbsp; <a href="/support">Support</a></footer>
   </div>
 </body>
 </html>`;
@@ -1682,40 +1726,93 @@ function legalPageHtml(title: string, body: string): string {
 
 app.get('/privacy', (_req: Request, res: Response) => {
   const body = `
-    <h2>1. What We Collect</h2>
-    <p>CatalogFlow collects only the Shopify store data required to operate the app: product and collection snapshots from your Shopify catalogue, order submissions made by your wholesale buyers (business name, email, PO number, note, and ordered line items), and usage metadata required for billing entitlement and quota enforcement.</p>
-    <p>We do <strong>not</strong> collect end-consumer payment card data. Payment and financial data is handled exclusively by Shopify.</p>
-
-    <h2>2. How We Use Your Data</h2>
+    <h2>1. Data Minimization & Protected Customer Data</h2>
+    <p>CatalogFlow strictly implements data minimization principles for wholesale catalog ordering under Shopify's Protected Customer Data Level 2 requirements. CatalogFlow requests strictly <strong>one</strong> protected customer field: <strong>Buyer Email Address</strong>.</p>
+    <p>The buyer wholesale order form collects exclusively:</p>
     <ul>
-      <li>Product and collection snapshots are stored locally to build live wholesale catalog pages for your buyers without querying Shopify on every page load.</li>
-      <li>Buyer order submission data (name, email, line items) is forwarded to Shopify as a Draft Order and retained in the app database for order history and reconciliation.</li>
-      <li>Usage metrics (submissions count, catalog count, variant count) are used to enforce plan quota limits.</li>
+      <li><strong>Buyer Email Address</strong> (Protected Customer Data, processed transiently only)</li>
+      <li><strong>Business Name</strong> (for wholesale identification)</li>
+      <li><strong>Purchase Order (PO) Number</strong> (optional, for merchant reconciliation)</li>
+      <li><strong>Order Notes</strong> (optional instructions)</li>
+    </ul>
+    <p>CatalogFlow does <strong>not</strong> collect, request, or store buyer personal names (first/last), phone numbers, physical addresses, shipping addresses, or billing addresses.</p>
+
+    <h2>2. Purpose of Processing & Zero-PII Storage Architecture</h2>
+    <p>Buyer form data is processed solely for stated, legitimate business purposes:</p>
+    <ul>
+      <li>To transmit wholesale order lines and buyer contact email to the merchant's Shopify store via the official Shopify Draft Order API for merchant invoicing and fulfillment.</li>
+      <li>To protect against duplicate order creation and reconcile draft orders with idempotent submission references.</li>
+      <li>To record non-PII operational submission counts and totals for merchant quota tracking.</li>
+    </ul>
+    <p><strong>Zero Persistent DB Retention:</strong> Raw buyer email addresses, business names, PO numbers, and buyer notes are <strong>never stored at rest</strong> in CatalogFlow's database. Buyer data is held transiently in server memory solely during the lifecycle of the request to dispatch the Shopify Draft Order mutation.</p>
+
+    <h2>3. Automated Decision-Making, Advertising & Data Sale</h2>
+    <p>CatalogFlow does <strong>not</strong> sell, rent, or trade personal data. CatalogFlow does <strong>not</strong> use buyer data for advertising, profiling, behavioral tracking, or marketing. CatalogFlow does <strong>not</strong> perform automated decision-making that produces legal or similarly significant effects.</p>
+
+    <h2>4. Service Providers & Third-Party Infrastructure</h2>
+    <p>We disclose and process data strictly as necessary to deliver CatalogFlow services:</p>
+    <ul>
+      <li><strong>Shopify Inc.:</strong> Destination platform where merchant catalogs reside and where native Draft Orders are created via official Shopify Admin APIs.</li>
+      <li><strong>Application Infrastructure & Cloud Hosting Providers:</strong> Secure hosting, serverless compute, and database infrastructure processors (e.g. Hostless) operating within modern, access-controlled data centers under encrypted transit (TLS 1.3/1.2).</li>
     </ul>
 
-    <h2>3. Data Retention</h2>
-    <p>Buyer order submission inputs (email, business name, PO number, notes) are transmitted securely to Shopify to create the Draft Order and are not stored as customer records in the application database. Only order metadata (line item count, subtotal amount, status, Shopify Draft Order ID) is retained for reconciliation. Product snapshots are refreshed via Shopify webhooks and are removed when a product or collection is deleted in Shopify. When you uninstall CatalogFlow, all shop data is scheduled for deletion within 48 hours, in compliance with Shopify GDPR webhook requirements (<code>shop/redact</code>, <code>customers/redact</code>).</p>
+    <h2>5. Merchant Uninstall & Data Redaction</h2>
+    <p>When a merchant uninstalls CatalogFlow from their Shopify Admin:</p>
+    <ul>
+      <li>The <code>app/uninstalled</code> webhook immediately revokes merchant and public buyer access to all shop catalogs.</li>
+      <li>In accordance with Shopify's platform architecture, Shopify sends the mandatory <code>shop/redact</code> compliance webhook approximately 48 hours following app uninstallation.</li>
+      <li>Upon receiving and verifying a valid <code>shop/redact</code> webhook, CatalogFlow permanently purges all retained merchant records, catalog configurations, and operational logs.</li>
+    </ul>
 
-    <h2>4. Data Sharing</h2>
-    <p>We do not sell, rent, or share your data with third parties for marketing purposes. Data is shared only as required to operate the service: with Shopify (to create Draft Orders on your behalf) and with our SOC 2 compliant cloud infrastructure provider for application hosting.</p>
+    <h2>6. Security Controls & Access Logging</h2>
+    <p>All merchant offline access tokens are encrypted at rest using AES-256-GCM. All HTTP traffic is secured via TLS. Data Loss Prevention (DLP) redaction strips emails, tokens, and secrets from all logs and error records. Dedicated zero-PII audit logs (<code>PcdAccessAudit</code>) record operational proof of protected customer data access with an automated 90-day retention cutoff.</p>
 
-    <h2>5. Security</h2>
-    <p>All Shopify access tokens are encrypted at rest using AES-256-GCM before database storage. Data in transit is protected by TLS 1.2+. We apply rate limiting on all public endpoints and enforce strict per-shop tenant isolation to prevent cross-merchant data access.</p>
-
-    <h2>6. Your Rights</h2>
-    <p>You may request data export or deletion at any time by contacting us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>. Uninstalling the app from your Shopify Admin automatically triggers our GDPR data deletion workflow.</p>
-
-    <h2>7. Contact</h2>
-    <p>For privacy inquiries: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>
+    <h2>7. Data Subject Rights & Contact</h2>
+    <p>Merchants or buyers may exercise privacy rights or submit data inquiries under GDPR/CCPA by contacting our privacy contact at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
   `;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.status(200).send(legalPageHtml('Privacy Policy', body));
 });
 
+app.get('/data-processing', (_req: Request, res: Response) => {
+  const body = `
+    <h2>1. Overview & Parties</h2>
+    <p>This Data Processing Agreement ("DPA") governs the processing of personal data in connection with the CatalogFlow application ("the Service").</p>
+    <ul>
+      <li><strong>Merchant ("Data Controller"):</strong> The business entity operating the Shopify store determining the purposes and means of processing customer orders.</li>
+      <li><strong>CatalogFlow ("Data Processor"):</strong> The service provider processing data exclusively on behalf of the Merchant, pursuant to Merchant instructions and Shopify platform requirements.</li>
+    </ul>
+
+    <h2>2. Scope, Categories of Data & Stated Purposes</h2>
+    <p><strong>Categories of Data:</strong> Buyer Email Address (Protected Customer Data, processed transiently), Business Name, optional PO Number, optional Order Notes, and store product/collection catalog metadata.</p>
+    <p><strong>Purposes:</strong> Generating B2B wholesale order submissions, dispatching Shopify Draft Orders for merchant invoicing, enforcing submission idempotency, and compiling aggregated, non-PII merchant usage analytics.</p>
+
+    <h2>3. Processor Obligations</h2>
+    <ul>
+      <li>Process data strictly in accordance with Merchant instructions and applicable data protection laws.</li>
+      <li>Implement zero-persistence architecture for buyer email and form fields in the local database.</li>
+      <li>Apply AES-256-GCM encryption for stored merchant credentials and TLS 1.3/1.2 in transit.</li>
+      <li>Enforce strict tenant isolation across all merchant databases and API boundaries.</li>
+      <li>Maintain automated bounded data retention for operational logs and audit trails.</li>
+    </ul>
+
+    <h2>4. Subprocessors</h2>
+    <p>Merchant authorizes CatalogFlow to engage third-party service providers essential to app operation, including Shopify Inc. (destination platform) and secure cloud infrastructure hosting providers (e.g. Hostless). Processors are bound by equivalent confidentiality and data protection obligations.</p>
+
+    <h2>5. Compliance Webhooks & Deletion</h2>
+    <p>CatalogFlow implements automated handling of all mandatory Shopify privacy compliance webhooks (<code>customers/data_request</code>, <code>customers/redact</code>, and <code>shop/redact</code>). When a merchant uninstalls the App and Shopify dispatches <code>shop/redact</code>, all retained merchant data is permanently erased.</p>
+
+    <h2>6. Inquiries</h2>
+    <p>For data protection agreements or privacy inquiries: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>
+  `;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(legalPageHtml('Data Processing Agreement', body));
+});
+
 app.get('/terms', (_req: Request, res: Response) => {
   const body = `
-    <h2>1. Acceptance</h2>
-    <p>By installing or using CatalogFlow ("the App"), you agree to these Terms of Service. If you do not agree, please uninstall the App from your Shopify Admin.</p>
+    <h2>1. Acceptance & Incorporation</h2>
+    <p>By installing or using CatalogFlow ("the App"), you agree to these Terms of Service. These Terms expressly incorporate our <a href="/privacy">Privacy Policy</a> and <a href="/data-processing">Data Processing Agreement</a>. If you do not agree, please uninstall the App from your Shopify Admin.</p>
 
     <h2>2. Description of Service</h2>
     <p>CatalogFlow enables Shopify merchants to create wholesale product catalogs and accept bulk variant orders from B2B buyers. Buyer submissions are created as Shopify Draft Orders in the merchant's Shopify Admin. The App does not process payments; all payment and fulfillment remain under Shopify's control.</p>
@@ -1723,11 +1820,11 @@ app.get('/terms', (_req: Request, res: Response) => {
     <h2>3. Subscription and Billing</h2>
     <p>CatalogFlow is offered on a subscription basis through Shopify App Pricing. Your plan determines the number of live catalogs, maximum variants per catalog, and monthly order submission limits. Billing, upgrades, and cancellations are managed through your Shopify account under Shopify's standard billing terms.</p>
 
-    <h2>4. Acceptable Use</h2>
+    <h2>4. Acceptable Use & Merchant Responsibilities</h2>
     <ul>
       <li>You must not use the App to create catalogs or solicit orders for products that violate Shopify's Acceptable Use Policy.</li>
       <li>You must not attempt to circumvent plan quota limits, rate limiting, or authentication mechanisms.</li>
-      <li>You are responsible for ensuring product pricing, availability, and descriptions in your Shopify store are accurate.</li>
+      <li>As Data Controller, you are responsible for ensuring that wholesale orders and customer communications comply with applicable commercial and data privacy regulations.</li>
     </ul>
 
     <h2>5. Intellectual Property</h2>
@@ -1736,8 +1833,8 @@ app.get('/terms', (_req: Request, res: Response) => {
     <h2>6. Limitation of Liability</h2>
     <p>To the maximum extent permitted by law, the App is provided "as is" without warranties of any kind. We are not liable for lost orders, buyer disputes, revenue impacts, or data loss arising from App downtime, data synchronization delays, or Shopify API outages.</p>
 
-    <h2>7. Termination</h2>
-    <p>Either party may terminate this agreement at any time. You may uninstall the App from your Shopify Admin. We may suspend access for violations of these Terms.</p>
+    <h2>7. Termination & Data Purge</h2>
+    <p>Either party may terminate this agreement at any time. You may uninstall the App from your Shopify Admin. Uninstallation immediately revokes app access, and retained shop data is permanently purged upon receipt of Shopify's <code>shop/redact</code> compliance webhook.</p>
 
     <h2>8. Changes to Terms</h2>
     <p>We may update these Terms with reasonable advance notice. Continued use of the App after changes take effect constitutes acceptance of the updated Terms.</p>
@@ -1764,7 +1861,7 @@ app.get('/support', (_req: Request, res: Response) => {
       <li><strong>How do buyers place orders?</strong> — Share your catalog link with buyers. They browse products, select variants and quantities, fill in their business details, and submit. The order appears as a Shopify Draft Order in your Shopify Admin.</li>
       <li><strong>How do I upgrade my plan?</strong> — Go to the Billing &amp; Quotas tab in CatalogFlow. Plan changes are handled through Shopify App Pricing in your existing Shopify account.</li>
       <li><strong>Why is my order showing as "Requires Reconciliation"?</strong> — This means the order was submitted but Shopify confirmation could not be verified immediately. Use the Reconcile button in the Submissions tab to check the order status. Contact support if reconciliation fails repeatedly.</li>
-      <li><strong>How do I delete my data?</strong> — Uninstall the App from your Shopify Admin. All data is deleted within 48 hours per our Privacy Policy. You may also email us to request earlier deletion.</li>
+      <li><strong>How do I delete my data?</strong> — Uninstall the App from your Shopify Admin. Uninstallation immediately revokes app access, and CatalogFlow permanently purges all retained shop data when Shopify sends the verified shop/redact compliance webhook (approximately 48 hours after uninstall).</li>
     </ul>
 
     <h2>🌐 App Information</h2>
@@ -1819,13 +1916,13 @@ if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
       }
     });
   } catch (err) {
-    console.warn('Vite dev middleware initialization skipped:', err);
+    console.warn('Vite dev middleware initialization skipped:', sanitizeErrorMessage(err));
   }
 }
 
-// Serve Buyer portal SPA for /c/:publicToken, /l/:linkToken, /reorder/:intentToken (MUST NOT include or initialize Shopify App Bridge)
-app.get(['/c/:publicToken', '/l/:linkToken', '/reorder/:intentToken'], (req: Request, res: Response) => {
-  const { publicToken, linkToken, intentToken } = req.params;
+// Serve Buyer portal SPA for /c/:publicToken, /l/:linkToken (MUST NOT include or initialize Shopify App Bridge)
+app.get(['/c/:publicToken', '/l/:linkToken'], (req: Request, res: Response) => {
+  const { publicToken, linkToken } = req.params;
   if (publicToken && !isValidPublicToken(publicToken)) {
     return res.status(400).send('Invalid catalog URL format');
   }

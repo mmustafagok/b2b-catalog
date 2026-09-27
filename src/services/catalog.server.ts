@@ -5,6 +5,7 @@ import {
   CatalogStatus,
   PriceMode,
   InventoryMode,
+  PlanTier,
   type CatalogVariantConfigInput,
 } from '../types/index.js';
 import { generateOpaqueToken } from './auth.server.js';
@@ -305,6 +306,69 @@ export async function upsertCatalogVariantConfigs(
 
 // ─── Publish / Unpublish / Archive / Delete ───────────────────────────────────
 
+/**
+ * Canonical function for effective active variant counting in a catalog.
+ * Defines the ONE authoritative source of truth for:
+ * - catalog variant quota enforcement during publish
+ * - catalog summaries (getCatalogsByShop, getCatalogById)
+ * - billing & quotas metrics (maxVariantsInPublishedCatalogs)
+ * - plan downgrade eligibility checks
+ *
+ * Rules:
+ * - Variant must belong to resolved active product/collection sources.
+ * - Product must have status === 'ACTIVE'.
+ * - Variant must NOT be explicitly disabled via CatalogVariantConfig (enabled === false).
+ * - Each Shopify variant is counted at most ONCE per catalog (deduplicated across overlapping sources).
+ */
+export async function countActiveVariantsForCatalog(
+  shopId: string,
+  catalogId: string,
+  sources?: Array<{ type: string; shopifyGid: string }>
+): Promise<number> {
+  let catalogSources = sources;
+  if (!catalogSources) {
+    const cat = await prisma.catalog.findFirst({
+      where: { id: catalogId, shopId },
+      include: { sources: true },
+    });
+    if (!cat) return 0;
+    catalogSources = cat.sources;
+  }
+
+  const allowedProductGids = await resolveCatalogAllowedProductGids(shopId, catalogSources);
+  if (allowedProductGids.size === 0) return 0;
+
+  // 1. Fetch all variants belonging to active products within allowed sources
+  const variants = await prisma.variantSnapshot.findMany({
+    where: {
+      shopId,
+      shopifyProductId: { in: Array.from(allowedProductGids) },
+      product: { status: 'ACTIVE' },
+    },
+    select: { shopifyVariantId: true },
+  });
+
+  if (variants.length === 0) return 0;
+
+  // 2. Deduplicate Shopify variant IDs across sources (product sources + collection sources)
+  const uniqueVariantIds = Array.from(new Set(variants.map((v) => v.shopifyVariantId)));
+
+  // 3. Fetch explicitly disabled variant configs for this catalog
+  const disabledConfigs = await prisma.catalogVariantConfig.findMany({
+    where: {
+      catalogId,
+      enabled: false,
+    },
+    select: { shopifyVariantId: true },
+  });
+
+  const disabledSet = new Set(disabledConfigs.map((c) => c.shopifyVariantId));
+
+  // 4. Count unique variants that are not explicitly disabled
+  const activeCount = uniqueVariantIds.filter((vId) => !disabledSet.has(vId)).length;
+  return activeCount;
+}
+
 export async function publishCatalog(shopId: string, catalogId: string) {
   const shop = await prisma.shop.findFirst({
     where: { id: shopId, uninstalledAt: null },
@@ -338,32 +402,24 @@ export async function publishCatalog(shopId: string, catalogId: string) {
   });
 
   if (activePublishedCount >= entitlement.limits.maxLiveCatalogs) {
-    throw new CatalogError(
-      `Plan quota reached: You can have at most ${entitlement.limits.maxLiveCatalogs} live catalog(s) on the ${entitlement.limits.name} plan. Please upgrade to publish more.`,
-      403,
-      'QUOTA_EXCEEDED'
-    );
+    const planName = entitlement.planTier === PlanTier.FREE ? 'Free' : entitlement.limits.name;
+    const msg =
+      entitlement.planTier === PlanTier.FREE
+        ? "You've reached the Free plan limit of 1 live catalog."
+        : `You've reached the ${planName} plan limit of ${entitlement.limits.maxLiveCatalogs} live catalog(s).`;
+    throw new CatalogError(msg, 403, 'QUOTA_EXCEEDED');
   }
 
-  // Check plan variant quota limits across all active products in this catalog
-  const allowedProductGids = await resolveCatalogAllowedProductGids(catalog.shopId, catalog.sources);
-  const variantCount =
-    allowedProductGids.size > 0
-      ? await prisma.variantSnapshot.count({
-          where: {
-            shopId,
-            shopifyProductId: { in: Array.from(allowedProductGids) },
-            product: { status: 'ACTIVE' },
-          },
-        })
-      : 0;
+  // Check plan variant quota limits across active, enabled variants in this catalog
+  const variantCount = await countActiveVariantsForCatalog(shopId, catalog.id, catalog.sources);
 
   if (variantCount > entitlement.limits.maxVariants) {
-    throw new CatalogError(
-      `Plan variant quota reached: This catalog has ${variantCount} variants, but your ${entitlement.limits.name} plan limit is ${entitlement.limits.maxVariants} variants. Please upgrade to publish this catalog.`,
-      403,
-      'QUOTA_EXCEEDED'
-    );
+    const planName = entitlement.planTier === PlanTier.FREE ? 'Free' : entitlement.limits.name;
+    const msg =
+      entitlement.planTier === PlanTier.FREE
+        ? 'This catalog exceeds the Free plan limit of 50 active variants.'
+        : `This catalog exceeds the ${planName} plan limit of ${entitlement.limits.maxVariants} active variants.`;
+    throw new CatalogError(msg, 403, 'QUOTA_EXCEEDED');
   }
 
   return prisma.$transaction(async (tx) => {
@@ -514,21 +570,12 @@ export async function getCatalogsByShop(shopId: string) {
 
   return Promise.all(
     catalogs.map(async (cat) => {
-      const [allowedGids, enrichedSources] = await Promise.all([
+      const [allowedGids, enrichedSources, variantCount] = await Promise.all([
         resolveCatalogAllowedProductGids(shopId, cat.sources),
         _enrichSources(shopId, cat.sources),
+        countActiveVariantsForCatalog(shopId, cat.id, cat.sources),
       ]);
       const productCount = allowedGids.size;
-      const variantCount =
-        productCount > 0
-          ? await prisma.variantSnapshot.count({
-              where: {
-                shopId,
-                shopifyProductId: { in: Array.from(allowedGids) },
-                product: { status: 'ACTIVE' },
-              },
-            })
-          : 0;
 
       return {
         ...cat,
@@ -560,21 +607,12 @@ export async function getCatalogById(shopId: string, catalogId: string) {
     throw new CatalogError('Catalog not found or unauthorized', 404, 'NOT_FOUND');
   }
 
-  const [allowedGids, enrichedSources] = await Promise.all([
+  const [allowedGids, enrichedSources, variantCount] = await Promise.all([
     resolveCatalogAllowedProductGids(shopId, catalog.sources),
     _enrichSources(shopId, catalog.sources),
+    countActiveVariantsForCatalog(shopId, catalog.id, catalog.sources),
   ]);
   const productCount = allowedGids.size;
-  const variantCount =
-    productCount > 0
-      ? await prisma.variantSnapshot.count({
-          where: {
-            shopId,
-            shopifyProductId: { in: Array.from(allowedGids) },
-            product: { status: 'ACTIVE' },
-          },
-        })
-      : 0;
 
   return {
     ...catalog,

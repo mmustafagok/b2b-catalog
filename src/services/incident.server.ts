@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { sanitizeForLogging } from './security.server.js';
+import { sanitizeForLogging, redactSensitiveString } from './security.server.js';
 
 export interface IncidentRecordInput {
   type: string;
@@ -18,12 +18,7 @@ export interface IncidentRecordInput {
  */
 function sanitizeIncidentMessage(msg: string): string {
   if (!msg || typeof msg !== 'string') return '';
-  return msg
-    .replace(/shpat_[a-zA-Z0-9]+/g, '[REDACTED_TOKEN]')
-    .replace(/shpss_[a-zA-Z0-9]+/g, '[REDACTED_SECRET]')
-    .replace(/Bearer\s+[a-zA-Z0-9._-]+/gi, 'Bearer [REDACTED]')
-    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]')
-    .slice(0, 1000);
+  return redactSensitiveString(msg).slice(0, 1000);
 }
 
 /**

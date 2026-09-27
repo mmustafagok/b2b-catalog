@@ -5,7 +5,7 @@ export function verifyShopifyWebhookHmac(
   hmacHeader: string,
   secret: string
 ): boolean {
-  if (!hmacHeader || !secret) {
+  if (!rawBody || !hmacHeader || !secret) {
     return false;
   }
 

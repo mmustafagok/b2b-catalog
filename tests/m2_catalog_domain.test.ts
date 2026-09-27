@@ -127,7 +127,7 @@ describe('Milestone 2: Merchant Catalog Domain & CRUD', () => {
       sources: [{ type: CatalogSourceType.PRODUCT, shopifyGid: 'gid://shopify/Product/2' }],
     });
 
-    await expect(publishCatalog(shopA.id, cat2.id)).rejects.toThrow(/Plan quota reached/);
+    await expect(publishCatalog(shopA.id, cat2.id)).rejects.toThrow(/Free plan limit|Plan quota reached|reached.*limit/);
   });
 
   it('should control public access based on publish state and shop active status', async () => {

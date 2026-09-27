@@ -1,32 +1,35 @@
 import { z } from 'zod';
 
 export enum PlanTier {
+  FREE = 'FREE',
   STARTER = 'STARTER',
   GROWTH = 'GROWTH',
-  SCALE = 'SCALE',
 }
 
 export const PLAN_LIMITS = {
+  [PlanTier.FREE]: {
+    name: 'Free',
+    price: 0,
+    annualPrice: 0,
+    maxLiveCatalogs: 1,
+    maxVariants: 50,
+    monthlySubmissionsLimit: 5,
+  },
   [PlanTier.STARTER]: {
     name: 'Starter',
     price: 14.99,
-    maxLiveCatalogs: 1,
+    annualPrice: 119.99,
+    maxLiveCatalogs: 3,
     maxVariants: 500,
     monthlySubmissionsLimit: 50,
   },
   [PlanTier.GROWTH]: {
     name: 'Growth',
     price: 29.99,
-    maxLiveCatalogs: 5,
+    annualPrice: 239.99,
+    maxLiveCatalogs: 10,
     maxVariants: 5000,
     monthlySubmissionsLimit: 250,
-  },
-  [PlanTier.SCALE]: {
-    name: 'Scale',
-    price: 49.99,
-    maxLiveCatalogs: 20,
-    maxVariants: 25000,
-    monthlySubmissionsLimit: 1000,
   },
 } as const;
 
@@ -74,7 +77,7 @@ export const CatalogVariantConfigInputSchema = z.object({
   position: z.number().int().min(0).optional().default(0),
 });
 
-// ─── Quantity rule resolution ──────────────────────────────────────────────────
+// ─── Quantity rule resolution & Canonical Mathematics ──────────────────────────
 
 export interface EffectiveQuantityRules {
   min: number;
@@ -99,10 +102,99 @@ export function resolveEffectiveQuantityRules(
   };
 }
 
-export function isValidQuantityStep(quantity: number, min: number, step: number, max: number | null = null): boolean {
-  if (quantity < min) return false;
+/**
+ * Validates if quantity satisfies min + n * step (n >= 0) and <= max limit.
+ */
+export function isValidQuantity(quantity: number, min: number, step: number, max: number | null = null): boolean {
+  if (!Number.isInteger(quantity) || quantity < min) return false;
   if (max !== null && quantity > max) return false;
   return (quantity - min) % step === 0;
+}
+
+export function isValidQuantityStep(quantity: number, min: number, step: number, max: number | null = null): boolean {
+  return isValidQuantity(quantity, min, step, max);
+}
+
+/**
+ * Computes the next valid quantity for increment (+).
+ * From 0 -> min.
+ * From currentQty >= min -> min + (n + 1) * step (capped at max if set).
+ */
+export function nextValidQuantity(currentQty: number, min: number, step: number, max: number | null = null): number {
+  const effectiveMin = Math.max(1, min);
+  const effectiveStep = Math.max(1, step);
+
+  if (currentQty <= 0) {
+    if (max !== null && effectiveMin > max) return 0;
+    return effectiveMin;
+  }
+
+  if (currentQty < effectiveMin) {
+    if (max !== null && effectiveMin > max) return currentQty;
+    return effectiveMin;
+  }
+
+  const offset = (currentQty - effectiveMin) % effectiveStep;
+  let next: number;
+  if (offset !== 0) {
+    next = currentQty + (effectiveStep - offset);
+  } else {
+    next = currentQty + effectiveStep;
+  }
+
+  if (max !== null && next > max) {
+    // If next valid step exceeds max, we MUST NOT clamp to an invalid max.
+    // Invariant: isValidQuantity(nextValidQuantity(...)) === true.
+    return currentQty;
+  }
+
+  return next;
+}
+
+/**
+ * Computes the previous valid quantity for decrement (-).
+ * From <= min -> 0 (remove from cart).
+ * From currentQty > min -> step down by step aligned with min.
+ */
+export function previousValidQuantity(currentQty: number, min: number, step: number): number {
+  const effectiveMin = Math.max(1, min);
+  const effectiveStep = Math.max(1, step);
+
+  if (currentQty <= effectiveMin) {
+    return 0;
+  }
+
+  const offset = (currentQty - effectiveMin) % effectiveStep;
+  let prev: number;
+  if (offset !== 0) {
+    prev = currentQty - offset;
+  } else {
+    prev = currentQty - effectiveStep;
+  }
+
+  return Math.max(0, prev);
+}
+
+/**
+ * Normalizes an arbitrary quantity input to the nearest valid step at or above min.
+ */
+export function normalizeQuantity(quantity: number, min: number, step: number, max: number | null = null): number {
+  if (quantity <= 0) return 0;
+  const effectiveMin = Math.max(1, min);
+  const effectiveStep = Math.max(1, step);
+
+  if (quantity < effectiveMin) return effectiveMin;
+
+  const offset = (quantity - effectiveMin) % effectiveStep;
+  let normalized = offset === 0 ? quantity : quantity - offset;
+
+  if (max !== null && normalized > max) {
+    const maxOffset = (max - effectiveMin) % effectiveStep;
+    normalized = max - maxOffset;
+    if (normalized < effectiveMin) return 0;
+  }
+
+  return Math.max(effectiveMin, normalized);
 }
 
 // ─── Central Variant Inventory Resolver ────────────────────────────────────────
@@ -239,12 +331,6 @@ export function resolveVariantInventory(
 // ─── Buyer form config ────────────────────────────────────────────────────────
 
 export const BuyerFormConfigSchema = z.object({
-  showBuyerName: z.boolean().optional().default(true),
-  requireBuyerName: z.boolean().optional().default(false),
-  showPhone: z.boolean().optional().default(false),
-  requirePhone: z.boolean().optional().default(false),
-  showTaxId: z.boolean().optional().default(false),
-  requireTaxId: z.boolean().optional().default(false),
   showPoNumber: z.boolean().optional().default(true),
   requirePoNumber: z.boolean().optional().default(false),
   showNote: z.boolean().optional().default(true),
@@ -354,9 +440,6 @@ const optionalTrimmedString = (maxLength: number, customMessage?: string) =>
 export const BuyerInfoSchema = z.object({
   businessName: z.string().trim().min(1, 'Business name is required').max(150, 'Business name exceeds maximum length'),
   email: z.string().trim().email('Valid buyer email is required').max(150, 'Email exceeds maximum length'),
-  buyerName: optionalTrimmedString(100),
-  phone: optionalTrimmedString(30),
-  taxId: optionalTrimmedString(50),
   poNumber: optionalTrimmedString(50, 'PO number exceeds maximum length'),
   note: optionalTrimmedString(1000, 'Note exceeds maximum length'),
 });

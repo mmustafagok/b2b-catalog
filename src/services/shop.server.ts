@@ -49,7 +49,7 @@ export async function installOrUpdateShop(data: {
       refreshTokenExpiresAt: data.refreshTokenExpiresAt || null,
       scopes: data.scopes || null,
       currency: data.currency || 'USD',
-      plan: data.plan || PlanTier.STARTER,
+      plan: data.plan || PlanTier.FREE,
       billingCycleAnchor: new Date(),
       monthlySubmissionsCount: 0,
       initialSyncAt: data.initialSyncAt || null,
@@ -295,20 +295,41 @@ export async function incrementSubmissionCount(shopId: string) {
 
 /**
  * Compliance redaction: completely erases a shop and all associated data.
+ * Permanently removes all records identifiable to that shop, including
+ * non-FK operational tables (WebhookReceipt, RuntimeIncident, PcdAccessAudit).
  */
-export async function redactShopData(shopDomain: string) {
+export async function redactShopData(shopDomain: string): Promise<boolean> {
+  if (!shopDomain || typeof shopDomain !== 'string') {
+    return false;
+  }
+
+  // Obtain internal shop.id and shop.shopDomain
   const shop = await prisma.shop.findUnique({
     where: { shopDomain },
   });
 
-  if (!shop) {
-    return false;
+  const shopId = shop?.id;
+
+  // Build list of delete operations
+  // 1. WebhookReceipt by shopDomain (no FK cascade)
+  // 2. RuntimeIncident by shopDomain (no FK cascade)
+  // 3. PcdAccessAudit by shopId and shopDomain (no FK cascade)
+  const deleteOperations: any[] = [
+    prisma.webhookReceipt.deleteMany({ where: { shopDomain } }),
+    prisma.runtimeIncident.deleteMany({ where: { shopDomain } }),
+    prisma.pcdAccessAudit.deleteMany({
+      where: shopId
+        ? { shopId: { in: [shopId, shopDomain] } }
+        : { shopId: shopDomain },
+    }),
+  ];
+
+  // 4. Delete Shop itself (triggers FK cascade for catalogs, submissions, snapshots,
+  // analyticsEvents, backgroundJobs, syncRuns, orderLinks, reorderIntents)
+  if (shopId) {
+    deleteOperations.push(prisma.shop.delete({ where: { id: shopId } }));
   }
 
-  // Cascade delete handles catalogs, products, snapshots, submissions
-  await prisma.shop.delete({
-    where: { id: shop.id },
-  });
-
+  await prisma.$transaction(deleteOperations);
   return true;
 }

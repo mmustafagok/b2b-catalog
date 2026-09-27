@@ -173,10 +173,10 @@ npm run prisma:migrate
 - **Production Change-Plan Protection:** `POST /api/admin/billing/change-plan` returns `403 BILLING_NOT_CONFIGURED` in production. Dev/test overrides are strictly isolated (`NODE_ENV === 'test'`).
 - **Shopify App Pricing Status:** Live integration pending M10 Partner Dashboard setup (`LOCAL_MIRROR_PENDING_SHOPIFY`).
 - **Normalized Plan Tiers:**
-  - **Starter ($14.99/mo):** 1 live catalog, 500 variants / catalog, 50 orders / month, 7-day trial.
-  - **Growth ($29.99/mo):** 5 live catalogs, 5,000 variants / catalog, 250 orders / month, 7-day trial.
-  - **Scale ($49.99/mo):** 20 live catalogs, 25,000 variants / catalog, 1,000 orders / month, 7-day trial.
-  - *Hard caps only; no overage billing; no permanent free tier.*
+  - **Free ($0/mo):** 1 live catalog, 50 active variants / catalog, 5 orders / month.
+  - **Starter ($14.99/mo or $119.99/yr):** 3 live catalogs, 500 active variants / catalog, 50 orders / month.
+  - **Growth ($29.99/mo or $239.99/yr):** 10 live catalogs, 5,000 active variants / catalog, 250 orders / month.
+  - *Hard caps only; zero usage-based surprise overages; full feature parity across all plans.*
 - **Strict Analytics Privacy:** Metadata allowlist strictly discards all PII, buyer notes, company names, and arbitrary nested JSON.
 - **Accurate & Idempotent North Star:** `draft_order_created_from_buyer_submission` is recorded exactly once across normal and reconciled orders using a deterministic `eventKey`.
 - **Non-Blocking Buyer Analytics:** Catalog view analytics are fire-and-forget, ensuring zero latency impact on buyer portal loads.

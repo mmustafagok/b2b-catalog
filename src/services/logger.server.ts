@@ -14,59 +14,74 @@ export interface LogContext {
 
 export const logger = {
   info(message: string, context?: LogContext) {
+    const sanitizedMessage = typeof message === 'string' ? sanitizeForLogging(message) : message;
     const sanitizedContext = context ? sanitizeForLogging(context) : undefined;
     if (process.env.NODE_ENV === 'production') {
       console.log(
         JSON.stringify({
           level: 'INFO',
           timestamp: new Date().toISOString(),
-          message,
+          message: sanitizedMessage,
           ...sanitizedContext,
         })
       );
     } else {
-      console.log(`[INFO] ${message}`, sanitizedContext || '');
+      console.log(`[INFO] ${sanitizedMessage}`, sanitizedContext || '');
     }
   },
 
   warn(message: string, context?: LogContext) {
+    const sanitizedMessage = typeof message === 'string' ? sanitizeForLogging(message) : message;
     const sanitizedContext = context ? sanitizeForLogging(context) : undefined;
     if (process.env.NODE_ENV === 'production') {
       console.warn(
         JSON.stringify({
           level: 'WARN',
           timestamp: new Date().toISOString(),
-          message,
+          message: sanitizedMessage,
           ...sanitizedContext,
         })
       );
     } else {
-      console.warn(`[WARN] ${message}`, sanitizedContext || '');
+      console.warn(`[WARN] ${sanitizedMessage}`, sanitizedContext || '');
     }
   },
 
   error(message: string, error?: any, context?: LogContext) {
+    const sanitizedMessage = typeof message === 'string' ? sanitizeForLogging(message) : message;
     const sanitizedContext = context ? sanitizeForLogging(context) : {};
-    const errorDetails = error
-      ? {
-          errorMessage: error?.message || String(error),
-          errorCode: error?.code,
-          errorStatus: error?.statusCode || error?.status,
-        }
-      : {};
+
+    let errorDetails: Record<string, any> = {};
+    if (error) {
+      if (typeof error === 'string') {
+        errorDetails = { errorMessage: sanitizeForLogging(error) };
+      } else if (error instanceof Error) {
+        errorDetails = {
+          errorMessage: sanitizeForLogging(error.message),
+          errorCode: (error as any).code,
+          errorStatus: (error as any).statusCode || (error as any).status,
+          errorStack: error.stack ? sanitizeForLogging(error.stack) : undefined,
+          errorCause: (error as any).cause ? sanitizeForLogging((error as any).cause) : undefined,
+        };
+      } else if (typeof error === 'object') {
+        errorDetails = sanitizeForLogging(error);
+      } else {
+        errorDetails = { errorMessage: sanitizeForLogging(String(error)) };
+      }
+    }
 
     if (process.env.NODE_ENV === 'production') {
       console.error(
         JSON.stringify({
           level: 'ERROR',
           timestamp: new Date().toISOString(),
-          message,
+          message: sanitizedMessage,
           ...errorDetails,
           ...sanitizedContext,
         })
       );
     } else {
-      console.error(`[ERROR] ${message}`, errorDetails, sanitizedContext);
+      console.error(`[ERROR] ${sanitizedMessage}`, errorDetails, sanitizedContext);
     }
   },
 };

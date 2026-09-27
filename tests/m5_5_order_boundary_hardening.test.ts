@@ -5,7 +5,7 @@ import { prisma } from '../src/db.js';
 import { installOrUpdateShop } from '../src/services/shop.server.js';
 import { createCatalog, publishCatalog } from '../src/services/catalog.server.js';
 import { syncProductSnapshot } from '../src/services/sync.server.js';
-import { CatalogSourceType, PriceMode } from '../src/types/index.js';
+import { CatalogSourceType, PriceMode, PlanTier } from '../src/types/index.js';
 import { ShopifyAdminClient } from '../src/services/shopify-client.server.js';
 
 describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () => {
@@ -25,6 +25,7 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
     shop = await installOrUpdateShop({
       shopDomain: 'hardening-test.myshopify.com',
       accessToken: 'token_hardening_test',
+      plan: PlanTier.GROWTH,
     });
 
     // Product 1: In Catalog A
@@ -472,10 +473,10 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
   });
 
   it('49/50 quota + two concurrent distinct submissions → exactly one succeeds, one gets 403', async () => {
-    // Set usage to 49 on Starter plan (limit 50)
+    // Set plan to Starter (limit 50) and usage to 49
     await prisma.shop.update({
       where: { id: shop.id },
-      data: { monthlySubmissionsCount: 49 },
+      data: { plan: 'STARTER', monthlySubmissionsCount: 49 },
     });
 
     let shopifyOrderCount = 0;
@@ -951,7 +952,7 @@ describe('Milestone 5.5: Order Boundary Hardening & Concurrency Guarantees', () 
     // Another successful order occupies the last slot -> usage becomes 50
     await prisma.shop.update({
       where: { id: shop.id },
-      data: { monthlySubmissionsCount: 50 },
+      data: { plan: 'STARTER', monthlySubmissionsCount: 50 },
     });
 
     // Reset spy flag to observe retry

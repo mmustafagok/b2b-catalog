@@ -16,7 +16,7 @@ model Shop {
   refreshTokenExpiresAt   DateTime?
   scopes                  String?
   currency                String            @default("USD")
-  plan                    String            @default("STARTER") // STARTER, GROWTH, SCALE
+  plan                    String            @default("FREE") // FREE, STARTER, GROWTH
   billingCycleAnchor      DateTime          @default(now())
   monthlySubmissionsCount Int               @default(0)
   initialSyncAt           DateTime?
@@ -58,7 +58,7 @@ model Catalog {
   minQty            Int                   @default(1)
   maxQty            Int?
   qtyIncrement      Int                   @default(1)
-  buyerFormConfig   String                @default("{}") // JSON: {showPhone, requirePhone, showTaxId, requireTaxId, showPoNumber, requirePoNumber, showNote}
+  buyerFormConfig   String                @default("{}") // JSON: {showPoNumber, requirePoNumber, showNote, requireNote}
   dataVersion       Int                   @default(1)
   publishedAt       DateTime?
   createdAt         DateTime              @default(now())
@@ -278,9 +278,6 @@ model OrderSubmission {
   currency            String    @default("USD")
   lastError           String?
   orderLinkId         String?   // FK to OrderLink (nullable for legacy submissions)
-  buyerName           String?
-  buyerPhone          String?
-  taxId               String?
   reorderIntentId     String?   // If submitted via a ReorderIntent
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @default(now()) @updatedAt
@@ -384,4 +381,23 @@ model RuntimeIncident {
   @@index([shopDomain])
   @@index([type])
   @@index([requestId])
+}
+
+/// Shopify Protected Customer Data Level 2 Access Audit Log.
+/// Retains zero-PII audit trail proving protected customer data operations occurred
+/// (e.g. buyer email processed transiently for Shopify Draft Order creation,
+/// compliance webhook requests, data purges). 90-day retention.
+model PcdAccessAudit {
+  id        String   @id @default(uuid())
+  shopId    String
+  catalogId String?
+  requestId String?
+  action    String   // BUYER_EMAIL_PROCESSED_FOR_DRAFT_ORDER, CUSTOMERS_DATA_REQUEST_RECEIVED, CUSTOMERS_REDACT_RECEIVED, SHOP_REDACT_RECEIVED, SHOP_DATA_PURGED
+  purpose   String
+  actorType String   // BUYER, SHOPIFY_WEBHOOK, SYSTEM
+  createdAt DateTime @default(now())
+
+  @@index([shopId])
+  @@index([createdAt])
+  @@index([shopId, createdAt])
 }

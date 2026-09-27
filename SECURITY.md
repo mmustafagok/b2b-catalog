@@ -163,3 +163,69 @@ Embedded Admin requests require a Bearer token issued by Shopify App Bridge. The
   - In `NODE_ENV === 'production'`: Validates `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, and `HOST`/`SHOPIFY_APP_URL`.
 - Any missing or invalid production requirement aborts initialization immediately.
 
+---
+
+## 15. Shopify Protected Customer Data (PCD) Level 2 Compliance
+
+### A. Data Minimization & Zero-Persistence Architecture
+CatalogFlow requests strictly **one** protected customer field: **`email`**. CatalogFlow has **no runtime dependency** on and never requests buyer names, phone numbers, physical addresses, shipping addresses, or billing addresses.
+- **Zero Persistent DB Retention:** Raw buyer email addresses, business names, PO numbers, and buyer notes are **never persisted at rest** in CatalogFlow's PostgreSQL database.
+- **Transient Processing:** Buyer form inputs exist in server memory solely during the lifecycle of the HTTP request to dispatch the Shopify Admin `draftOrderCreate` mutation.
+- **Operational Records Only:** Database records in `OrderSubmission`, `AnalyticsEvent`, `BackgroundJob`, `WebhookReceipt`, and `RuntimeIncident` store non-PII operational numbers and references only.
+
+### B. Automated Data Retention Schedule
+Enforced automatically by `src/services/retention.server.ts` and scheduled to run every 24 hours via the background worker:
+- **Raw Buyer PCD (Email, Business Name, PO, Notes):** 0 days (transient in-memory only).
+- **RuntimeIncident Records:** 30-day retention cutoff.
+- **WebhookReceipt Records:** 30-day retention cutoff.
+- **BackgroundJob (Terminal states: COMPLETED / FAILED):** 14-day retention cutoff.
+- **AnalyticsEvent Records:** 90-day retention cutoff.
+- **PcdAccessAudit Records:** 90-day retention cutoff.
+- **OrderSubmission & Snapshots:** Retained during active merchant installation as operational history (zero buyer PII).
+- **Complete Shop Purge:** Executed permanently upon receipt of verified `shop/redact` webhook.
+
+### C. Data Loss Prevention (DLP) & Deep Redaction
+- Centralized in `src/services/security.server.ts` via `redactSensitiveString()` and `sanitizeForLogging()`.
+- Strips email addresses, Bearer tokens, Shopify access tokens (`shpat_`, `shppat_`, `shpca_`, etc.), database credentials, PO numbers, passwords, and secrets across all logging streams (`logger.info`, `logger.warn`, `logger.error`), error messages (`sanitizeErrorMessage()`), and incident storage.
+- Logger prevents raw `error.message`, `error.stack`, or `error.cause` from bypassing redaction.
+
+### D. PCD Access Audit Logging
+- Dedicated `PcdAccessAudit` model preserves a zero-PII chronological audit trail of all protected customer data access operations:
+  - `BUYER_EMAIL_PROCESSED_FOR_DRAFT_ORDER`: Recorded at the server-side point of Draft Order mutation dispatch.
+  - `CUSTOMERS_DATA_REQUEST_RECEIVED`: Recorded upon receiving Shopify compliance webhook.
+  - `CUSTOMERS_REDACT_RECEIVED`: Recorded upon receiving Shopify compliance webhook.
+  - `SHOP_REDACT_RECEIVED` & `SHOP_DATA_PURGED`: Recorded upon receiving and completing store data erasure.
+- Indexed by `[shopId]`, `[createdAt]`, and `[shopId, createdAt]` with automated 90-day retention.
+
+### E. Test & Production Environment Isolation
+- `src/db.ts` enforces `validateDatabaseEnvironmentForContext()`:
+  - Supports `TEST_DATABASE_URL` for isolated test databases.
+  - Rejects tests attempting to execute against a designated production database (`PRODUCTION_DATABASE_URL` or `PRODUCTION_DB_HOST`).
+  - Production and test encryption secrets are strictly separated.
+
+### F. Encrypted Backup Architecture & Security Policy
+- **Architectural Property:** Because buyer PCD is never stored at rest, raw buyer PCD never enters database backups.
+- **SafeMerge-Adapted Encrypted Backup Architecture:**
+  - **Connection:** TLS-secured connection directly to Hostless PostgreSQL using `DATABASE_BACKUP_URL` (strictly refuses fallback to `DATABASE_URL`).
+  - **Execution:** Scheduled via GitHub Actions (`.github/workflows/database-backup.yml`) running daily at 00:00 UTC and on-demand via `workflow_dispatch`.
+  - **Custom Dump:** Executes `pg_dump --format=custom --no-owner --no-privileges` to temporary storage (`RUNNER_TEMP`).
+  - **AES-256-GCM Authenticated Encryption:** Encrypts dump using a 32-byte Base64 key (`BACKUP_ENCRYPTION_KEY`), generating a cryptographically random 12-byte IV per backup, an authenticated 16-byte tag, and a structured envelope (`scripts/backup-crypto.ts`).
+  - **Guaranteed Plaintext Cleanup:** Plaintext dump is deleted in a `finally` block under all circumstances (success, encryption failure, or pg_dump crash). Plaintext dumps never enter artifact storage.
+  - **Private Artifact Storage:** GitHub Actions uploads exclusively `*.dump.enc` artifacts with a 14-day retention cutoff.
+  - **Safe Decryption & Restore (`scripts/restore-database.ts`):** Requires `RESTORE_DATABASE_URL` (never falls back to production URLs) and `BACKUP_ENCRYPTION_KEY`. Authenticates the envelope before executing `pg_restore`. Enforces a production safety guard requiring explicit `ALLOW_PRODUCTION_RESTORE=true` to prevent accidental overwrites. Plaintext decrypted dumps are immediately deleted in a `finally` block.
+  - **Operational Status:** Operational readiness requires: (1) GitHub secrets `DATABASE_BACKUP_URL` and `BACKUP_ENCRYPTION_KEY` configured in repository, (2) successful test workflow run producing an encrypted artifact, (3) verified restore test of an encrypted artifact into a non-production test database.
+
+### G. Staff Access & Least Privilege Policy
+- Production database and infrastructure access is strictly restricted to authorized primary operator(s).
+- Shared accounts are strictly prohibited.
+- Support staff do not browse buyer PII because buyer PII is not stored.
+- Production data must never be downloaded to local developer workstations.
+- Production data must never be shared in external AI prompts, public issues, or screenshots.
+
+### H. Strong Authentication & MFA Policy
+- All operators accessing the Shopify Partner Dashboard, Hostless hosting, Git repositories, and production email must use unique passwords of at least 16 characters managed by a password manager.
+- Multi-Factor Authentication (MFA / passkey / TOTP) is mandatory across all administrative accounts.
+
+### I. Security Incident Response
+- Formal procedures for triage, containment, token revocation, forensic preservation, and Shopify/merchant notifications are documented in [SECURITY_INCIDENT_RESPONSE.md](file:///d:/b2b-catalog/SECURITY_INCIDENT_RESPONSE.md).
+

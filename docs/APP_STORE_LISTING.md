@@ -1,75 +1,37 @@
-# CatalogFlow — Shopify App Store Listing
+# CatalogFlow: B2B Order Catalog — App Store Listing Copy
 
 ## App Name
 **CatalogFlow: B2B Order Catalog**
 
-## Subtitle (max 62 characters)
-**Turn Shopify products into live wholesale ordering catalogs.**
+## Tagline
+**Wholesale Order Links for Shopify**
 
-## Primary Value Proposition
-Share live wholesale catalogs with B2B buyers and automatically convert bulk variant and quantity orders directly into Shopify Draft Orders.
-
----
-
-## Detailed Description
-
-### Wholesale Ordering Made Effortless for Shopify Merchants
-CatalogFlow eliminates friction from wholesale transactions. Instead of sending outdated PDF line sheets, manually taking email orders, or wrestling with complex spreadsheets, CatalogFlow empowers you to generate branded, shareable wholesale catalog links in seconds.
-
-Wholesale buyers open your secure, unlisted link without needing an account or password. They can search by title, SKU, or vendor, browse organized variant matrices, input bulk quantities across dozens of items simultaneously, and submit orders with PO numbers and delivery instructions.
-
-Every submitted order automatically arrives in your Shopify Admin as a native **Shopify Draft Order**—with accurate product variants, applied wholesale discounts, customer notes, and correlation tags ready for review and invoicing.
-
-### Key Benefits & Core Features
-- **Instant Wholesale Catalogs:** Curate catalogs from explicit products, entire collections, or mixed rule sets.
-- **High-Velocity Variant Matrix:** Wholesale buyers enter quantities across size/color matrices with rapid keyboard navigation.
-- **Native Shopify Draft Orders:** Orders sync directly into Shopify Admin with line-item pricing, discounts, and PO numbers.
-- **Zero Login Friction for Buyers:** Tokenized, opaque buyer links allow wholesale partners to order without password resets or account setups.
-- **Real-Time Price & Inventory Protection:** Stale prices or out-of-stock items are automatically revalidated before order creation, preventing underpriced orders.
-- **Commercial Funnel Analytics:** Track catalog views, summary starts, submissions, and Draft Order conversion rates directly in your dashboard.
-- **Reliable Background Sync:** Automated background webhooks keep your catalog snapshot perfectly aligned with your active Shopify inventory.
+## Core Promise
+Turn wholesale inquiries into Shopify Draft Orders with a private order link — no buyer account, no theme changes, no manual order entry.
 
 ---
 
-## Key Feature Bullets
-1. **3-Step Catalog Creation Wizard:** Build catalogs in three guided steps — search and select Shopify collections or products, choose a pricing mode, then name and publish. No raw IDs or technical setup required.
-2. **Share Live Wholesale Catalogs:** Share custom wholesale catalog links with buyers via email or messaging without requiring a buyer login.
-3. **Bulk Variant Grid Ordering:** Allow wholesale clients to enter quantities across multiple variants, colors, and sizes in a fast matrix view.
-4. **Automated Shopify Draft Orders:** Turn buyer submissions immediately into Shopify Draft Orders with applied discounts and custom PO metadata.
-5. **Automated Inventory & Price Sync:** Automatically synchronize product titles, prices, variants, and collection changes via background workers.
-6. **Idempotency & Stale Price Shield:** Prevent duplicate submissions and reject stale catalog data before Shopify mutations occur.
-7. **Commercial Funnel & Quota Analytics:** Monitor catalog views, order conversion rates, monthly draft order quotas, and sync health.
+## Key Features
+
+1. **Private Wholesale Order Links**:
+   Generate shareable, direct wholesale catalog links with optional passcode protection and expiration dates.
+2. **Instant Quick Ordering**:
+   Buyers browse clean variant matrix grids, enter quantities, and submit bulk orders in under 2 minutes.
+3. **Automated Draft Order Creation**:
+   Submissions arrive directly in your Shopify Admin as native Draft Orders with line items, custom discounts, and buyer details ready for invoicing.
+4. **Wholesale Pricing & Discount Modes**:
+   Apply percentage discounts or custom wholesale pricing across selected products or collections.
+5. **Quantity Rules & Pack Sizes**:
+   Set minimum order quantities, maximum limits, and step increments (case pack multipliers) per catalog or variant.
+6. **Real-time Inventory Sync**:
+   Keep buyer views accurate with live Shopify stock checks and configurable inventory visibility modes.
 
 ---
 
-## Pricing Details (Shopify App Pricing)
+## Support & Legal Info
 
-| Plan Tier | Price | Trial | Live Catalogs | Max Variants / Catalog | Monthly Draft Orders |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Starter** | $14.99 / mo | 7-Day Free Trial | 1 Live Catalog | 500 Variants | 50 Orders / mo |
-| **Growth** | $29.99 / mo | 7-Day Free Trial | 5 Live Catalogs | 5,000 Variants | 250 Orders / mo |
-| **Scale** | $49.99 / mo | 7-Day Free Trial | 20 Live Catalogs | 25,000 Variants | 1,000 Orders / mo |
-
-- **No permanent free tier**
-- **Hard caps only: Zero surprise overages**
-- **All billing processed strictly via Shopify App Pricing**
-
----
-
-## Search Keywords & Tags
-- `b2b wholesale`
-- `wholesale catalog`
-- `draft orders`
-- `quick order`
-- `bulk order form`
-- `variant matrix`
-- `purchase order`
-- `line sheet`
-
----
-
-## Support & Legal URLs
-- **Support Contact:** `support@catalogflow.io`
-- **Support Page:** `https://app.catalogflow.io/support`
-- **Privacy Policy:** `https://app.catalogflow.io/privacy`
-- **Terms of Service:** `https://app.catalogflow.io/terms`
+- **Support Email**: `support@catalogflow.app`
+- **Application Origin**: `https://b2b-catalog.hostless.app`
+- **Privacy Policy**: `https://b2b-catalog.hostless.app/privacy`
+- **Terms of Service**: `https://b2b-catalog.hostless.app/terms`
+- **Support Page**: `https://b2b-catalog.hostless.app/support`

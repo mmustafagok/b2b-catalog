@@ -624,56 +624,12 @@ export const CatalogConfigurationForm: React.FC<CatalogConfigurationFormProps> =
 
       {activeTab === 'form' && (
         <div className="cf-tab-pane">
-          <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', fontWeight: 600 }}>Buyer Checkout Form Fields</h4>
+          <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', fontWeight: 600 }}>Buyer Order Form Fields</h4>
           <p className="cf-section-desc" style={{ marginBottom: '1rem' }}>
-            Configure fields requested from wholesale buyers during checkout.
+            Configure fields requested from wholesale buyers when submitting orders.
           </p>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div style={{ padding: '0.75rem', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>📞 Phone Number</div>
-              <div style={{ display: 'flex', gap: '1.25rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
-                  <input
-                    type="checkbox"
-                    checked={formState.buyerFormConfig.showPhone !== false}
-                    onChange={(e) => updateBuyerForm('showPhone', e.target.checked)}
-                  />
-                  Show Field
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!formState.buyerFormConfig.requirePhone}
-                    onChange={(e) => updateBuyerForm('requirePhone', e.target.checked)}
-                  />
-                  Require Field
-                </label>
-              </div>
-            </div>
-
-            <div style={{ padding: '0.75rem', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>📑 Tax ID / VAT ID</div>
-              <div style={{ display: 'flex', gap: '1.25rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
-                  <input
-                    type="checkbox"
-                    checked={formState.buyerFormConfig.showTaxId !== false}
-                    onChange={(e) => updateBuyerForm('showTaxId', e.target.checked)}
-                  />
-                  Show Field
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!formState.buyerFormConfig.requireTaxId}
-                    onChange={(e) => updateBuyerForm('requireTaxId', e.target.checked)}
-                  />
-                  Require Field
-                </label>
-              </div>
-            </div>
-
             <div style={{ padding: '0.75rem', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
               <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.35rem' }}>🔢 Purchase Order Number (PO)</div>
               <div style={{ display: 'flex', gap: '1.25rem' }}>

@@ -1,6 +1,6 @@
 import { prisma } from '../db.js';
 import { Prisma } from '@prisma/client';
-import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus, PriceMode, resolveEffectiveQuantityRules } from '../types/index.js';
+import { BuyerSubmitOrderSchema, BuyerSubmitOrderInput, CatalogStatus, PriceMode, PlanTier, resolveEffectiveQuantityRules, isValidQuantity } from '../types/index.js';
 import { calculateDisplayPrice, toDecimal, formatMoney, roundDecimal } from './pricing.server.js';
 import {
   reserveSubmissionQuotaSlot,
@@ -17,6 +17,7 @@ import { recordAnalyticsEvent, ANALYTICS_EVENTS } from './analytics.server.js';
 import { sanitizeErrorMessage } from './security.server.js';
 import { SubmitStageTracker, recordRuntimeIncident } from './incident.server.js';
 import { validateOrderLinkAccess, recordOrderLinkSubmission, isOrderLinkExpired, verifyPasscode } from './orderlink.server.js';
+import { recordPcdAccessAudit, PCD_AUDIT_ACTIONS } from './pcd-audit.server.js';
 import crypto from 'crypto';
 
 export class OrderSubmissionError extends Error {
@@ -245,15 +246,6 @@ export async function submitBuyerOrder(
   }
 
   const formFieldsMissing: Record<string, string> = {};
-  if (buyerFormConfig.showBuyerName && buyerFormConfig.requireBuyerName && !validated.buyer.buyerName) {
-    formFieldsMissing.buyerName = 'Contact name is required';
-  }
-  if (buyerFormConfig.showPhone && buyerFormConfig.requirePhone && !validated.buyer.phone) {
-    formFieldsMissing.phone = 'Phone number is required';
-  }
-  if (buyerFormConfig.showTaxId && buyerFormConfig.requireTaxId && !validated.buyer.taxId) {
-    formFieldsMissing.taxId = 'Tax ID / VAT ID is required';
-  }
   if (buyerFormConfig.showPoNumber && buyerFormConfig.requirePoNumber && !validated.buyer.poNumber) {
     formFieldsMissing.poNumber = 'Purchase Order (PO) number is required';
   }
@@ -338,12 +330,8 @@ export async function submitBuyerOrder(
 
     // Server-side: enforce quantity rules
     const { min: effectiveMin, max: effectiveMax, step: effectiveIncrement } = resolveEffectiveQuantityRules(catalog as any, vcfg);
-    if (line.quantity < effectiveMin) {
-      qtyRuleViolations.push({ variantId: line.variantId, detail: `Minimum quantity for ${snap.sku || line.variantId} is ${effectiveMin}` });
-    } else if (effectiveMax !== null && line.quantity > effectiveMax) {
-      qtyRuleViolations.push({ variantId: line.variantId, detail: `Maximum quantity for ${snap.sku || line.variantId} is ${effectiveMax}` });
-    } else if (effectiveIncrement > 1 && (line.quantity - effectiveMin) % effectiveIncrement !== 0) {
-      qtyRuleViolations.push({ variantId: line.variantId, detail: `Quantity for ${snap.sku || line.variantId} must be in increments of ${effectiveIncrement} starting from ${effectiveMin}` });
+    if (!isValidQuantity(line.quantity, effectiveMin, effectiveIncrement, effectiveMax)) {
+      qtyRuleViolations.push({ variantId: line.variantId, detail: `Quantity ${line.quantity} for ${snap.sku || line.variantId} is invalid (min: ${effectiveMin}${effectiveMax ? `, max: ${effectiveMax}` : ''}, step: ${effectiveIncrement})` });
     }
   }
 
@@ -461,8 +449,13 @@ export async function submitBuyerOrder(
     const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
     const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
     if (!slotReserved) {
+      const planName = entitlement.planTier === PlanTier.FREE ? 'Free' : entitlement.limits.name;
+      const msg =
+        entitlement.planTier === PlanTier.FREE
+          ? "You've used all 5 buyer submissions available this month."
+          : `You've used all ${entitlement.limits.monthlySubmissionsLimit} buyer submissions available this month.`;
       throw new OrderSubmissionError(
-        'Merchant order submission limit reached for their current plan. Please contact the merchant.',
+        msg,
         403,
         'QUOTA_EXCEEDED'
       );
@@ -485,9 +478,6 @@ export async function submitBuyerOrder(
           currency: catalog.shop.currency || 'USD',
           correlationRef: buildDraftOrderIdempotencyTag(idempotencyKey),
           orderLinkId: resolvedOrderLinkId,
-          buyerName: validated.buyer.buyerName ?? null,
-          buyerPhone: validated.buyer.phone ?? null,
-          taxId: validated.buyer.taxId ?? null,
         },
       });
     } catch (insertErr: any) {
@@ -600,8 +590,13 @@ export async function submitBuyerOrder(
         const entitlement = await defaultBillingProvider.getEntitlement(catalog.shopId);
         const slotReserved = await reserveSubmissionQuotaSlot(catalog.shopId, entitlement.limits.monthlySubmissionsLimit);
         if (!slotReserved) {
+          const planName = entitlement.planTier === PlanTier.FREE ? 'Free' : entitlement.limits.name;
+          const msg =
+            entitlement.planTier === PlanTier.FREE
+              ? "You've used all 5 buyer submissions available this month."
+              : `You've used all ${entitlement.limits.monthlySubmissionsLimit} buyer submissions available this month.`;
           throw new OrderSubmissionError(
-            'Merchant order submission limit reached for their current plan. Please contact the merchant.',
+            msg,
             403,
             'QUOTA_EXCEEDED'
           );
@@ -952,6 +947,16 @@ export async function submitBuyerOrder(
     },
     `order_submitted:${submission.id}`
   );
+
+  // Shopify PCD Level 2: Record zero-PII audit event for transmitting buyer email to Shopify Draft Order API
+  await recordPcdAccessAudit({
+    shopId: catalog.shopId,
+    catalogId: catalog.id,
+    requestId: submission.id,
+    action: PCD_AUDIT_ACTIONS.BUYER_EMAIL_PROCESSED_FOR_DRAFT_ORDER,
+    purpose: 'Transmit buyer email to Shopify Draft Order API for merchant invoicing',
+    actorType: 'BUYER',
+  });
 
   let draftRes: any;
   try {
@@ -1305,7 +1310,7 @@ export async function submitBuyerOrder(
     },
     `draft_order_created:${submission.id}`
   ).catch((analyticsErr: any) => {
-    console.warn('[Analytics:DraftOrderCreated] Non-fatal error recording analytics event:', analyticsErr?.message);
+    console.warn('[Analytics:DraftOrderCreated] Non-fatal error recording analytics event:', sanitizeErrorMessage(analyticsErr));
   });
 
   // Record order link analytics if this order was submitted via a named link

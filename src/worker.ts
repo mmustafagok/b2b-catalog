@@ -2,6 +2,8 @@ import 'dotenv/config';
 import './services/worker-env.js';
 import { validateEnvironment } from './services/env.server.js';
 import { claimNextJob, executeJob, failJob, recoverStaleJobs } from './services/job-queue.server.js';
+import { enforceDataRetention } from './services/retention.server.js';
+import { sanitizeErrorMessage } from './services/security.server.js';
 
 // In worker process, assign WORKER_DATABASE_URL before PrismaClient initializes if present
 if (process.env.WORKER_DATABASE_URL) {
@@ -26,7 +28,7 @@ export async function runWorkerOnce(): Promise<boolean> {
     await executeJob(job);
     return true;
   } catch (err: any) {
-    console.error(`[Worker] Job ${job.id} (${job.type}) failed:`, err.message);
+    console.error(`[Worker] Job ${job.id} (${job.type}) failed:`, sanitizeErrorMessage(err));
     await failJob(job, err);
     return true;
   }
@@ -41,10 +43,25 @@ export async function startWorkerLoop(pollIntervalMs: number = 1000): Promise<vo
   // Periodically recover stale jobs every 5 minutes
   const recoveryInterval = setInterval(() => {
     recoverStaleJobs().catch((err) => {
-      console.error('[Worker] Stale job recovery error:', err.message);
+      console.error('[Worker] Stale job recovery error:', sanitizeErrorMessage(err));
     });
   }, 5 * 60 * 1000);
   recoveryInterval.unref?.();
+
+  // Periodically enforce data retention cleanup every 24 hours
+  const retentionInterval = setInterval(() => {
+    enforceDataRetention().catch((err) => {
+      console.error('[Worker] Retention cleanup error:', sanitizeErrorMessage(err));
+    });
+  }, 24 * 60 * 60 * 1000);
+  retentionInterval.unref?.();
+
+  // Initial retention run shortly after startup (after 10s)
+  setTimeout(() => {
+    enforceDataRetention().catch((err) => {
+      console.warn('[Worker] Initial retention cleanup warning:', sanitizeErrorMessage(err));
+    });
+  }, 10000).unref?.();
 
   while (isRunning) {
     try {
@@ -54,7 +71,7 @@ export async function startWorkerLoop(pollIntervalMs: number = 1000): Promise<vo
         await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
       }
     } catch (loopErr: any) {
-      console.error('[Worker] Error in worker loop:', loopErr.message);
+      console.error('[Worker] Error in worker loop:', sanitizeErrorMessage(loopErr));
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
@@ -81,7 +98,7 @@ process.on('SIGINT', () => {
 // Auto-start loop if executed directly as entrypoint
 if (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js')) {
   startWorkerLoop().catch((err) => {
-    console.error('[Worker] Fatal error starting worker:', err);
+    console.error('[Worker] Fatal error starting worker:', sanitizeErrorMessage(err));
     process.exit(1);
   });
 }

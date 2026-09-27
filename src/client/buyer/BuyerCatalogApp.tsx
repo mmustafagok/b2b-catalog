@@ -205,16 +205,6 @@ export const BuyerCatalogApp: React.FC = () => {
     }));
   };
 
-  const handleApplyCsvLines = (lines: Array<{ variantId: string; quantity: number }>) => {
-    setQuantities((prev) => {
-      const next = { ...prev };
-      for (const line of lines) {
-        next[line.variantId] = line.quantity;
-      }
-      return next;
-    });
-  };
-
   // Search filtering
   const filteredProducts = useMemo(() => {
     if (!data?.products) return [];
@@ -259,10 +249,7 @@ export const BuyerCatalogApp: React.FC = () => {
 
   const handleSubmitOrder = async (buyerInfo: {
     businessName: string;
-    buyerName?: string;
     email: string;
-    phone?: string;
-    taxId?: string;
     poNumber?: string;
     note?: string;
   }) => {

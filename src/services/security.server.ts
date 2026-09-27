@@ -2,15 +2,40 @@ import { Request, Response, NextFunction } from 'express';
 
 const REDACTED_KEYS = new Set([
   'accesstoken',
+  'refreshtoken',
   'token',
+  'publictoken',
+  'linkaccesstoken',
   'secret',
+  'client_secret',
+  'apisecret',
+  'partnersecret',
   'authorization',
   'cookie',
+  'set-cookie',
   'password',
+  'passcode',
+  'passcodehash',
   'code',
-  'client_secret',
+  'oauthcode',
   'buyeremail',
   'email',
+  'customeremail',
+  'businessname',
+  'buyerbusinessname',
+  'company',
+  'companyname',
+  'ponumber',
+  'purchaseorder',
+  'purchaseordernumber',
+  'buyernote',
+  'ordernote',
+  'note',
+  'notes',
+  'buyer',
+  'database_url',
+  'databaseurl',
+  'worker_database_url',
 ]);
 
 /**
@@ -21,14 +46,52 @@ export function isValidPublicToken(token: string): boolean {
 }
 
 /**
+ * Redacts PII, tokens, and credentials from arbitrary string content.
+ */
+export function redactSensitiveString(str: string): string {
+  if (!str || typeof str !== 'string') return '';
+
+  return str
+    // 1. Database connection strings with credentials (run before email so user:pass@host is not matched as email)
+    .replace(/(?:postgres(?:ql)?|mysql|sqlite):\/\/[^:]+:[^@]+@[^\/\s"']+/gi, 'postgresql://[REDACTED_USER]:[REDACTED_PASSWORD]@[REDACTED_HOST]')
+    // 2. Email addresses
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi, '[REDACTED_EMAIL]')
+    // 3. Shopify shared secrets (shpss_) and tokens (shpat_, shpca_, shppa_, shppat_) + encrypted ciphertext markers
+    .replace(/shpss_[a-zA-Z0-9_\-]+/gi, '[REDACTED_SECRET]')
+    .replace(/(?:shpat_|shpca_|shppa_|shppat_|enc:v1:)[a-zA-Z0-9_\-:]+/gi, '[REDACTED_SHOPIFY_TOKEN]')
+    // 4. Authorization headers (Bearer / Basic)
+    .replace(/(?:Bearer|Basic)\s+[a-zA-Z0-9_\-\.]+/gi, 'Bearer [REDACTED_TOKEN]')
+    // 5. PO number patterns (e.g. PO-SECRET-123 or poNumber: "...")
+    .replace(/\bPO-[A-Z0-9_-]+\b/gi, '[REDACTED_PO]')
+    .replace(/(?:po[-_]?number|purchase[-_]?order(?:[-_]?number)?|po)\s*[:=]\s*["']?([^\s"',;]+)["']?/gi, 'poNumber=[REDACTED_PO]')
+    // 6. Business name key-value assignments
+    .replace(/(?:business[-_]?name|company(?:[-_]?name)?)\s*[:=]\s*["']?([^"',;\r\n]+?)["']?(?:,|\r|\n|$)/gi, 'businessName=[REDACTED_BUSINESS]')
+    // 7. Buyer/order note key-value assignments
+    .replace(/(?:buyer[-_]?notes?|order[-_]?notes?)\s*[:=]\s*["']?([^"',;\r\n]+?)["']?(?:,|\r|\n|$)/gi, 'buyerNote=[REDACTED_NOTE]')
+    // 8. Passwords / secrets / passcodes
+    .replace(/(?:password|passcode|secret|api[-_]?key)\s*[:=]\s*["']?([^\s"',;]+)["']?/gi, 'password=[REDACTED]');
+}
+
+/**
  * Deeply sanitizes logs by redacting sensitive fields and PII.
+ * Handles strings, arrays, objects, Error instances, and nested structures.
  */
 export function sanitizeForLogging(obj: any): any {
   if (obj === null || obj === undefined) return obj;
 
   if (typeof obj === 'string') {
-    // Redact email patterns
-    return obj.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]');
+    return redactSensitiveString(obj);
+  }
+
+  if (obj instanceof Error) {
+    return {
+      name: redactSensitiveString(obj.name),
+      message: redactSensitiveString(obj.message),
+      code: (obj as any).code,
+      statusCode: (obj as any).statusCode || (obj as any).status,
+      stack: obj.stack ? redactSensitiveString(obj.stack) : undefined,
+      cause: (obj as any).cause ? sanitizeForLogging((obj as any).cause) : undefined,
+    };
   }
 
   if (Array.isArray(obj)) {
@@ -39,7 +102,15 @@ export function sanitizeForLogging(obj: any): any {
     const cleaned: Record<string, any> = {};
     for (const [key, val] of Object.entries(obj)) {
       const lowerKey = key.toLowerCase();
-      if (REDACTED_KEYS.has(lowerKey) || lowerKey.includes('secret') || lowerKey.includes('token')) {
+      if (
+        REDACTED_KEYS.has(lowerKey) ||
+        lowerKey.includes('secret') ||
+        lowerKey.includes('token') ||
+        lowerKey.includes('password') ||
+        lowerKey.includes('passcode') ||
+        lowerKey.includes('cookie') ||
+        lowerKey.includes('email')
+      ) {
         cleaned[key] = '[REDACTED]';
       } else {
         cleaned[key] = sanitizeForLogging(val);
@@ -156,14 +227,42 @@ export const publicEventLimiter = createRateLimiter({
 });
 
 /**
- * Sanitizes server errors for public/client responses.
+ * Sanitizes server errors for public/client responses, persistent database fields, and logs.
+ * Guarantees that raw emails, tokens, secrets, PO numbers, and business names are redacted.
  */
 export function sanitizeErrorMessage(err: any): string {
-  if (process.env.NODE_ENV === 'production') {
-    return 'An unexpected server error occurred. Please try again later.';
-  }
+  let raw = '';
   if (typeof err === 'string') {
-    return err;
+    raw = err;
+  } else if (!err) {
+    return 'An unexpected error occurred';
+  } else if (err instanceof Error) {
+    raw = err.message || 'An error occurred';
+  } else if (typeof err === 'object') {
+    if (typeof err.message === 'string') raw = err.message;
+    else if (typeof err.error === 'string') raw = err.error;
+    else if (Array.isArray(err.issues)) {
+      raw = err.issues.map((i: any) => `${i.path?.join('.') || 'field'}: ${i.message}`).join(', ');
+    } else {
+      raw = 'An unexpected server error occurred. Please try again.';
+    }
+  } else {
+    raw = String(err);
   }
-  return err?.message || 'Server error';
+
+  return redactSensitiveString(raw);
+}
+
+export function parseApiErrorMessage(jsonOrErr: any, defaultMsg = 'An error occurred'): string {
+  if (!jsonOrErr) return defaultMsg;
+  if (typeof jsonOrErr === 'string') return jsonOrErr;
+
+  const raw = jsonOrErr.error ?? jsonOrErr.message ?? jsonOrErr;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object' && raw !== null) {
+    if (typeof raw.message === 'string') return raw.message;
+    if (typeof raw.error === 'string') return raw.error;
+    if (typeof raw.detail === 'string') return raw.detail;
+  }
+  return defaultMsg;
 }

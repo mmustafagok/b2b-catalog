@@ -443,8 +443,6 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
           buyer: {
             businessName: 'Apex Wholesale',
             email: 'buyer@apex.com',
-            phone: '',
-            taxId: '',
             poNumber: '',
             note: '',
           },
@@ -459,10 +457,6 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       const catalog = await createCatalog(shop.id, {
         name: 'Strict Form Catalog',
         buyerFormConfig: {
-          showPhone: true,
-          requirePhone: true,
-          showTaxId: true,
-          requireTaxId: true,
           showPoNumber: true,
           requirePoNumber: true,
         },
@@ -488,8 +482,6 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       } catch (err: any) {
         expect(err).toBeInstanceOf(OrderSubmissionError);
         expect(err.code).toBe('BUYER_FORM_VALIDATION_FAILED');
-        expect(err.details?.fields?.phone).toBeDefined();
-        expect(err.details?.fields?.taxId).toBeDefined();
         expect(err.details?.fields?.poNumber).toBeDefined();
       }
     });
@@ -498,10 +490,6 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
       const catalog = await createCatalog(shop.id, {
         name: 'Strict Filled Catalog',
         buyerFormConfig: {
-          showPhone: true,
-          requirePhone: true,
-          showTaxId: true,
-          requireTaxId: true,
           showPoNumber: true,
           requirePoNumber: true,
           showNote: true,
@@ -519,8 +507,6 @@ describe('Focused Bugfix & E2E Repair Test Suite', () => {
           buyer: {
             businessName: 'Strict Corp',
             email: 'buyer@strict.com',
-            phone: '+1 555-0199',
-            taxId: 'US-991827364',
             poNumber: 'PO-2026-001',
             note: 'Deliver to back dock',
           },

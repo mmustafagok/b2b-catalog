@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ProductItem } from './VariantMatrix.js';
-import { BuyerFormConfig } from '../../types/index.js';
+import { BuyerFormConfig, isValidQuantity } from '../../types/index.js';
 
 interface OrderSummaryDrawerProps {
   isOpen: boolean;
@@ -14,10 +14,7 @@ interface OrderSummaryDrawerProps {
   fieldErrors?: Record<string, string> | null;
   onSubmit: (buyerInfo: {
     businessName: string;
-    buyerName?: string;
     email: string;
-    phone?: string;
-    taxId?: string;
     poNumber?: string;
     note?: string;
   }) => Promise<void>;
@@ -48,10 +45,7 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
   errorMessage,
 }) => {
   const [businessName, setBusinessName] = useState('');
-  const [buyerName, setBuyerName] = useState('');
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
-  const [taxId, setTaxId] = useState('');
   const [poNumber, setPoNumber] = useState('');
   const [note, setNote] = useState('');
   const [clientError, setClientError] = useState<string | null>(null);
@@ -98,21 +92,6 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
       return;
     }
 
-    if (buyerFormConfig.showBuyerName && buyerFormConfig.requireBuyerName && !buyerName.trim()) {
-      setClientError('Contact name is required by supplier.');
-      return;
-    }
-
-    if (buyerFormConfig.showPhone && buyerFormConfig.requirePhone && !phone.trim()) {
-      setClientError('Phone number is required by supplier.');
-      return;
-    }
-
-    if (buyerFormConfig.showTaxId && buyerFormConfig.requireTaxId && !taxId.trim()) {
-      setClientError('Tax ID / VAT registration number is required.');
-      return;
-    }
-
     if (buyerFormConfig.showPoNumber !== false && buyerFormConfig.requirePoNumber && !poNumber.trim()) {
       setClientError('Purchase Order (PO) number is required.');
       return;
@@ -132,24 +111,24 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             setClientError(`Invalid quantity for "${product.title} / ${variant.title}". Must be a positive integer.`);
             return;
           }
-          if (!variant.isCappedOverThreshold && variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && qty > variant.effectiveAvailable) {
+          const canOrderBeyondReported =
+            Boolean(variant.isCappedOverThreshold) ||
+            variant.inventoryTracked === false ||
+            variant.inventoryPolicy === 'CONTINUE';
+
+          if (!canOrderBeyondReported && variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && qty > variant.effectiveAvailable) {
             setClientError(`"${product.title} / ${variant.title}": The requested quantity exceeds available stock.`);
             return;
           }
-          if (!variant.availableForSale || variant.effectiveAvailable === 0) {
+          if (!variant.availableForSale || (!canOrderBeyondReported && variant.effectiveAvailable === 0)) {
             setClientError(`"${product.title} / ${variant.title}" is currently out of stock.`);
             return;
           }
-          if (variant.minQty && qty < variant.minQty) {
-            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} is below minimum of ${variant.minQty}.`);
-            return;
-          }
-          if (variant.maxQty && qty > variant.maxQty) {
-            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} exceeds maximum of ${variant.maxQty}.`);
-            return;
-          }
-          if (variant.qtyIncrement && variant.qtyIncrement > 1 && qty % variant.qtyIncrement !== 0) {
-            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} must be a multiple of ${variant.qtyIncrement}.`);
+          const min = variant.minQty || 1;
+          const step = variant.qtyIncrement || 1;
+          const max = variant.maxQty;
+          if (!isValidQuantity(qty, min, step, max)) {
+            setClientError(`"${product.title} / ${variant.title}": Quantity ${qty} is invalid. Must be at least ${min}${max ? `, at most ${max}` : ''}, and in steps of ${step} from ${min}.`);
             return;
           }
         }
@@ -158,18 +137,12 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
 
     await onSubmit({
       businessName: businessName.trim(),
-      buyerName: buyerName.trim() || undefined,
       email: email.trim(),
-      phone: phone.trim() || undefined,
-      taxId: taxId.trim() || undefined,
       poNumber: poNumber.trim() || undefined,
       note: note.trim() || undefined,
     });
   };
 
-  const showContactNameField = !!buyerFormConfig.showBuyerName;
-  const showPhoneField = !!buyerFormConfig.showPhone;
-  const showTaxIdField = !!buyerFormConfig.showTaxId;
   const showPoField = buyerFormConfig.showPoNumber !== false;
   const showNoteField = buyerFormConfig.showNote !== false;
 
@@ -240,28 +213,6 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
             )}
           </div>
 
-          {showContactNameField && (
-            <div className="form-group">
-              <label className="form-label" htmlFor="buyerContactName">
-                Contact Name {buyerFormConfig.requireBuyerName ? '*' : '(Optional)'}
-              </label>
-              <input
-                id="buyerContactName"
-                className="form-input"
-                type="text"
-                required={buyerFormConfig.requireBuyerName}
-                placeholder="e.g. Jane Doe"
-                value={buyerName}
-                onChange={(e) => setBuyerName(e.target.value)}
-              />
-              {fieldErrors?.buyerName && (
-                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                  {fieldErrors.buyerName}
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="form-group">
             <label className="form-label" htmlFor="buyerEmail">
               Business Email Address *
@@ -281,50 +232,6 @@ export const OrderSummaryDrawer: React.FC<OrderSummaryDrawerProps> = ({
               </div>
             )}
           </div>
-
-          {showPhoneField && (
-            <div className="form-group">
-              <label className="form-label" htmlFor="buyerPhone">
-                Phone Number {buyerFormConfig.requirePhone ? '*' : '(Optional)'}
-              </label>
-              <input
-                id="buyerPhone"
-                className="form-input"
-                type="tel"
-                required={buyerFormConfig.requirePhone}
-                placeholder="+1 (555) 000-0000"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-              />
-              {fieldErrors?.phone && (
-                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                  {fieldErrors.phone}
-                </div>
-              )}
-            </div>
-          )}
-
-          {showTaxIdField && (
-            <div className="form-group">
-              <label className="form-label" htmlFor="taxId">
-                Tax ID / VAT Registration {buyerFormConfig.requireTaxId ? '*' : '(Optional)'}
-              </label>
-              <input
-                id="taxId"
-                className="form-input"
-                type="text"
-                required={buyerFormConfig.requireTaxId}
-                placeholder="e.g. US-123456789 or GB999999973"
-                value={taxId}
-                onChange={(e) => setTaxId(e.target.value)}
-              />
-              {fieldErrors?.taxId && (
-                <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                  {fieldErrors.taxId}
-                </div>
-              )}
-            </div>
-          )}
 
           {showPoField && (
             <div className="form-group">

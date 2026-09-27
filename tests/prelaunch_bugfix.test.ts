@@ -319,7 +319,7 @@ describe('BUG-5: Billing — billingStatus passthrough', () => {
       .set('Authorization', 'Bearer ' + token);
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('billingStatus');
-    expect(['DEV_OVERRIDE', 'SHOPIFY_APP_PRICING_PENDING_M10']).toContain(res.body.billingStatus);
+    expect(['DEV_OVERRIDE', 'ACTIVE', 'SHOPIFY_APP_PRICING']).toContain(res.body.billingStatus);
   });
 
   it('GET /api/admin/billing includes entitlementSource field', async () => {

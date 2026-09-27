@@ -17,6 +17,10 @@ export interface ValidatedEnvironment {
   shopifyApiSecret?: string;
   /** Public application URL as known to Shopify (must be HTTPS in production). */
   shopifyAppUrl?: string;
+  shopifyPartnerOrgId?: string;
+  shopifyPartnerAppId?: string;
+  shopifyPartnerApiAccessToken?: string;
+  shopifyAppHandle?: string;
   /** Server bind host (e.g. '0.0.0.0'). Never used as the public app URL. */
   serverBindHost: string;
   port: number;
@@ -109,6 +113,11 @@ export function validateEnvironment(): ValidatedEnvironment {
     }
   }
 
+  const shopifyPartnerOrgId = process.env.SHOPIFY_PARTNER_ORG_ID;
+  const shopifyPartnerAppId = process.env.SHOPIFY_PARTNER_APP_ID || process.env.SHOPIFY_APP_ID;
+  const shopifyPartnerApiAccessToken = process.env.SHOPIFY_PARTNER_API_ACCESS_TOKEN;
+  const shopifyAppHandle = process.env.SHOPIFY_APP_HANDLE || 'catalogflow-b2b-order-catalog';
+
   // 3. Strict production environment requirements
   if (nodeEnv === 'production') {
     if (!shopifyApiKey || shopifyApiKey.startsWith('your_') || shopifyApiKey === 'test_key') {
@@ -124,6 +133,17 @@ export function validateEnvironment(): ValidatedEnvironment {
       missingProdVars.push(`SHOPIFY_APP_URL: ${appUrlError}`);
     }
 
+    // Validate Shopify Partner API configuration for authoritative App Pricing
+    if (!shopifyPartnerOrgId || shopifyPartnerOrgId.startsWith('your_') || shopifyPartnerOrgId === 'test_org') {
+      missingProdVars.push('SHOPIFY_PARTNER_ORG_ID');
+    }
+    if (!shopifyPartnerAppId || shopifyPartnerAppId.startsWith('your_') || shopifyPartnerAppId === 'test_app') {
+      missingProdVars.push('SHOPIFY_PARTNER_APP_ID');
+    }
+    if (!shopifyPartnerApiAccessToken || shopifyPartnerApiAccessToken.startsWith('your_') || shopifyPartnerApiAccessToken === 'test_token') {
+      missingProdVars.push('SHOPIFY_PARTNER_API_ACCESS_TOKEN');
+    }
+
     if (missingProdVars.length > 0) {
       console.error('================================================================');
       console.error('FATAL CONFIGURATION ERROR: Missing required production env vars:');
@@ -132,6 +152,9 @@ export function validateEnvironment(): ValidatedEnvironment {
       }
       console.error('Application cannot start safely in production mode.');
       console.error('================================================================');
+      if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+        throw new Error(`Missing required production env vars: ${missingProdVars.join(', ')}`);
+      }
       process.exit(1);
     }
   }
@@ -143,6 +166,10 @@ export function validateEnvironment(): ValidatedEnvironment {
     shopifyApiKey,
     shopifyApiSecret,
     shopifyAppUrl,
+    shopifyPartnerOrgId,
+    shopifyPartnerAppId,
+    shopifyPartnerApiAccessToken,
+    shopifyAppHandle,
     serverBindHost,
     port,
   };

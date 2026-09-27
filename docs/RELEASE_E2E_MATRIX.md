@@ -21,7 +21,7 @@ Target API Version: 2026-07
 | **M10.9** | Live Revalidation & Stale Price Shield | **PASS** | Pre-mutation checksum and snapshot revalidation catches price changes, discount updates, or deleted variants. Safely returns `409 CATALOG_CHANGED`. |
 | **M10.10** | Idempotency & Concurrency Machine | **PASS** | Two-phase state machine with DB unique constraint on `idempotencyKeyHash`. Concurrent submissions share a single Draft Order lease without duplication. |
 | **M10.11** | Quota Enforcement | **PASS** | Atomic slot reservation and cycle reconciliation. Blocked requests fail cleanly with `QUOTA_EXCEEDED` before any Shopify mutation. |
-| **M10.12** | Shopify App Pricing Setup | **PENDING_SHOPIFY** | Plan definitions configured (Starter, Growth, Scale). Billing engine operates in `LOCAL_MIRROR_PENDING_SHOPIFY` mode pending live Shopify App Pricing contract activation pass. |
+| **M10.12** | Shopify App Pricing Setup | **PENDING_SHOPIFY** | Plan definitions configured (Free, Starter, Growth). Billing engine operates in `LOCAL_MIRROR_PENDING_SHOPIFY` mode pending live Shopify App Pricing contract activation pass. |
 | **M10.13** | Billing Entitlement Sync | **PASS** | `BillingProvider` acts as single authority. `Shop.plan` functions as synchronized mirror. Direct client DB plan mutations strictly blocked in production. |
 | **M10.14** | Downgrade Safety | **PASS** | Downgrading validates active catalog and variant counts against target plan limits. Does not destructively delete merchant data. |
 | **M10.15** | Commercial Funnel Analytics | **PASS** | Tracks `catalog_viewed`, `order_summary_started`, `order_submitted`, and North Star `draft_order_created`. Non-blocking DB recording. |

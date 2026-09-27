@@ -4,6 +4,7 @@ import { EditCatalogModal, CatalogSummary } from './EditCatalogModal.js';
 import { CatalogConfigurationForm, CatalogFormState } from './CatalogConfigurationForm.js';
 import { OrderLinksModal } from './OrderLinksModal.js';
 import { VariantConfigsModal } from './VariantConfigsModal.js';
+import { deriveOnboardingState, isLinkSharedStored, setLinkSharedStored } from './onboardingUtils.js';
 import './merchant.css';
 
 interface ShopInfo {
@@ -37,6 +38,7 @@ interface PlanFeatureDetails {
   id: string;
   name: string;
   price: number;
+  annualPrice?: number;
   interval: string;
   maxLiveCatalogs: number;
   maxVariants: number;
@@ -164,10 +166,12 @@ export const MerchantAppShell: React.FC = () => {
   const [quotaError, setQuotaError] = useState<boolean>(false);
   const [analyticsError, setAnalyticsError] = useState<boolean>(false);
 
-  // ── Extra Modals state (Order Links, Variant Configs, Edit Catalog) ─────────
+  // ── Extra Modals state (Order Links, Variant Configs, Edit Catalog, Onboarding Success) ─────────
   const [editingCatalog, setEditingCatalog] = useState<CatalogSummary | null>(null);
   const [linksCatalog, setLinksCatalog] = useState<CatalogSummary | null>(null);
   const [variantConfigsCatalog, setVariantConfigsCatalog] = useState<CatalogSummary | null>(null);
+  const [linkShared, setLinkShared] = useState<boolean>(false);
+  const [postPublishCatalog, setPostPublishCatalog] = useState<CatalogSummary | null>(null);
 
   // ── Catalog creation wizard state ─────────────────────────────────────────
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -191,21 +195,30 @@ export const MerchantAppShell: React.FC = () => {
   const [newMinQty, setNewMinQty] = useState<number>(1);
   const [newMaxQty, setNewMaxQty] = useState<string>('');
   const [newQtyIncrement, setNewQtyIncrement] = useState<number>(1);
-  const [newShowPhone, setNewShowPhone] = useState<boolean>(false);
-  const [newRequirePhone, setNewRequirePhone] = useState<boolean>(false);
-  const [newShowTaxId, setNewShowTaxId] = useState<boolean>(false);
-  const [newRequireTaxId, setNewRequireTaxId] = useState<boolean>(false);
-  const [newShowPoNumber, setNewShowPoNumber] = useState<boolean>(true);
-  const [newRequirePoNumber, setNewRequirePoNumber] = useState<boolean>(false);
-  const [newShowNote, setNewShowNote] = useState<boolean>(true);
-  const [newCatalogName, setNewCatalogName] = useState<string>('');
-  const [newAccentColor, setNewAccentColor] = useState<string>('#108043');
+  const newShowPoNumber = true;
+  const newRequirePoNumber = false;
+  const newShowNote = true;
+  const newCatalogName = '';
+  const newAccentColor = '#108043';
   const [newPublish, setNewPublish] = useState<boolean>(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
+
+  const markLinkShared = useCallback(() => {
+    setLinkShared(true);
+    if (shop?.id) {
+      setLinkSharedStored(shop.id);
+    }
+  }, [shop?.id]);
+
+  useEffect(() => {
+    if (shop?.id) {
+      setLinkShared(isLinkSharedStored(shop.id));
+    }
+  }, [shop?.id]);
 
 
   const loadData = useCallback(async () => {
@@ -216,10 +229,17 @@ export const MerchantAppShell: React.FC = () => {
       const bootstrapData = await bootstrapRes.json();
       setShop(bootstrapData.shop);
 
+      // Check for plan_handle in URL redirect from Shopify App Pricing
+      const searchParams = new URLSearchParams(window.location.search);
+      const planHandleParam = searchParams.get('plan_handle');
+      const billingEndpoint = planHandleParam
+        ? `/api/admin/billing?plan_handle=${encodeURIComponent(planHandleParam)}`
+        : '/api/admin/billing';
+
       // Secondary fetches — failures are non-fatal: show degraded states per widget
       const [quotaRes, billingRes, analyticsRes] = await Promise.all([
         authenticatedFetch('/api/admin/quota'),
-        authenticatedFetch('/api/admin/billing'),
+        authenticatedFetch(billingEndpoint),
         authenticatedFetch('/api/admin/analytics'),
       ]);
 
@@ -232,12 +252,22 @@ export const MerchantAppShell: React.FC = () => {
       if (billingRes.ok) {
         const billingData = await billingRes.json();
         setBilling(billingData);
-        // Detect if billing plan-switching is not yet wired in production
-        setBillingUnavailable(
-          billingData.billingStatus === 'SHOPIFY_APP_PRICING_PENDING_M10' ||
-          billingData.entitlementSource === 'LOCAL_MIRROR_PENDING_SHOPIFY'
-        );
+        // Production billing via Shopify App Pricing is active
+        setBillingUnavailable(false);
         setAnalyticsError(false);
+
+        if (planHandleParam) {
+          if (billingData.returnVerification?.verified) {
+            showToast(`Subscription confirmed with Shopify: ${billingData.currentPlan}!`);
+          } else if (billingData.returnVerification?.mismatch) {
+            showToast(`Could not verify ${planHandleParam} plan with Shopify. Current plan: ${billingData.currentPlan}.`);
+          }
+          // Clean URL parameter without reloading page
+          searchParams.delete('plan_handle');
+          const newSearch = searchParams.toString();
+          const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '');
+          window.history.replaceState({}, document.title, cleanUrl);
+        }
       } else {
         setBillingUnavailable(true);
       }
@@ -295,6 +325,9 @@ export const MerchantAppShell: React.FC = () => {
         throw new Error(d.error || 'Failed to toggle status');
       }
       showToast(`Catalog ${cat.status === 'PUBLISHED' ? 'unpublished' : 'published'} successfully!`);
+      if (cat.status !== 'PUBLISHED') {
+        setPostPublishCatalog(cat);
+      }
       loadData();
     } catch (err: any) {
       showToast(`Error: ${err.message}`);
@@ -305,6 +338,7 @@ export const MerchantAppShell: React.FC = () => {
     const buyerUrl = `${window.location.origin}/c/${publicToken}`;
     navigator.clipboard.writeText(buyerUrl);
     showToast('Buyer catalog link copied to clipboard!');
+    markLinkShared();
   };
 
   const handleManualSync = async () => {
@@ -347,18 +381,38 @@ export const MerchantAppShell: React.FC = () => {
   };
 
   const handlePlanChange = async (targetPlan: string) => {
-    if (billingUnavailable) {
-      showToast('Plan switching is managed through Shopify App Pricing. Please use your Shopify Admin billing settings.');
-      return;
-    }
     setSwitchingPlan(true);
     try {
+      // First try destination endpoint for Shopify App Pricing URL
+      const destRes = await authenticatedFetch(`/api/admin/billing/destination?plan=${targetPlan}`);
+      if (destRes.ok) {
+        const destData = await destRes.json();
+        if (destData.destinationUrl) {
+          if (window.top) {
+            window.top.location.href = destData.destinationUrl;
+          } else {
+            window.location.href = destData.destinationUrl;
+          }
+          return;
+        }
+      }
+
+      // Dev path: local mutation if allowed
       const res = await authenticatedFetch('/api/admin/billing/change-plan', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plan: targetPlan }),
       });
+      const data = await res.json();
       if (!res.ok) {
-        const data = await res.json();
+        if (data.destinationUrl) {
+          if (window.top) {
+            window.top.location.href = data.destinationUrl;
+          } else {
+            window.location.href = data.destinationUrl;
+          }
+          return;
+        }
         throw new Error(data.error || 'Failed to update plan');
       }
       showToast(`Plan successfully updated to ${targetPlan}!`);
@@ -421,7 +475,7 @@ export const MerchantAppShell: React.FC = () => {
     minQty: 1,
     maxQty: '',
     qtyIncrement: 1,
-    buyerFormConfig: { showBuyerName: true, requireBuyerName: false, showPhone: false, requirePhone: false, showTaxId: false, requireTaxId: false, showPoNumber: true, requirePoNumber: false, showNote: true, requireNote: false },
+    buyerFormConfig: { showPoNumber: true, requirePoNumber: false, showNote: true, requireNote: false },
     sources: [],
   });
 
@@ -440,7 +494,7 @@ export const MerchantAppShell: React.FC = () => {
       minQty: 1,
       maxQty: '',
       qtyIncrement: 1,
-      buyerFormConfig: { showBuyerName: true, requireBuyerName: false, showPhone: false, requirePhone: false, showTaxId: false, requireTaxId: false, showPoNumber: true, requirePoNumber: false, showNote: true, requireNote: false },
+      buyerFormConfig: { showPoNumber: true, requirePoNumber: false, showNote: true, requireNote: false },
       sources: [],
     });
     setNewPublish(false);
@@ -486,6 +540,9 @@ export const MerchantAppShell: React.FC = () => {
           showToast(`Catalog created but could not publish: ${pd.error || 'unknown error'}`);
         } else {
           showToast('Catalog created and published!');
+          if (created) {
+            setPostPublishCatalog({ ...created, status: 'PUBLISHED' });
+          }
         }
       } else {
         showToast('Catalog created in Draft status!');
@@ -498,6 +555,13 @@ export const MerchantAppShell: React.FC = () => {
       setCreatingCatalog(false);
     }
   };
+
+  const onboardingState = deriveOnboardingState({
+    catalogsCount: catalogs.length,
+    publishedCatalogsCount: catalogs.filter((c) => c.status === 'PUBLISHED').length,
+    linkShared,
+    submissionsCount: submissionsTotal || submissions.length,
+  });
 
   return (
     <div className="cf-merchant-container">
@@ -591,6 +655,64 @@ export const MerchantAppShell: React.FC = () => {
             {/* OVERVIEW TAB */}
             {activeTab === 'overview' && (
               <div className="cf-tab-content">
+                {/* 1. First-Use Primary Card */}
+                {onboardingState.shouldShowFirstUseCard && (
+                  <div className="cf-card cf-first-use-card" id="cf-first-use-card" style={{ marginBottom: '1.5rem', padding: '1.5rem' }}>
+                    <div style={{ maxWidth: '600px' }}>
+                      <h2 style={{ fontSize: '1.25rem', fontWeight: 600, margin: '0 0 0.5rem 0', color: '#202223' }}>
+                        Create your first wholesale catalog
+                      </h2>
+                      <p style={{ fontSize: '0.95rem', color: '#6d7175', margin: '0 0 1.25rem 0', lineHeight: '1.5' }}>
+                        Choose products, set wholesale pricing, publish, and share your buyer link.
+                      </p>
+                      <button
+                        type="button"
+                        className="cf-btn cf-btn-primary"
+                        onClick={openCreateWizard}
+                        id="cf-first-use-create-btn"
+                      >
+                        Create Catalog
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. Small First-Order Progress Checklist */}
+                {onboardingState.shouldShowChecklist && (
+                  <div className="cf-card cf-onboarding-checklist-card" id="cf-onboarding-checklist" style={{ marginBottom: '1.5rem', padding: '1.25rem 1.5rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                      <h3 style={{ fontSize: '1rem', fontWeight: 600, margin: 0, color: '#202223' }}>
+                        Get your first wholesale order
+                      </h3>
+                      <span className="cf-badge cf-badge-info" style={{ fontSize: '0.8rem' }}>
+                        {[onboardingState.hasCatalog, onboardingState.hasPublished, onboardingState.linkShared, onboardingState.hasFirstOrder].filter(Boolean).length} / 4 Complete
+                      </span>
+                    </div>
+
+                    <div className="cf-onboarding-checklist-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem' }}>
+                      <div className={`cf-checklist-step ${onboardingState.hasCatalog ? 'completed' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', color: onboardingState.hasCatalog ? '#008060' : '#6d7175', fontWeight: onboardingState.hasCatalog ? 600 : 400 }}>
+                        <span style={{ fontWeight: 'bold' }}>{onboardingState.hasCatalog ? '✓' : '○'}</span>
+                        <span>Catalog created</span>
+                      </div>
+
+                      <div className={`cf-checklist-step ${onboardingState.hasPublished ? 'completed' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', color: onboardingState.hasPublished ? '#008060' : '#6d7175', fontWeight: onboardingState.hasPublished ? 600 : 400 }}>
+                        <span style={{ fontWeight: 'bold' }}>{onboardingState.hasPublished ? '✓' : '○'}</span>
+                        <span>Published</span>
+                      </div>
+
+                      <div className={`cf-checklist-step ${onboardingState.linkShared ? 'completed' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', color: onboardingState.linkShared ? '#008060' : '#6d7175', fontWeight: onboardingState.linkShared ? 600 : 400 }}>
+                        <span style={{ fontWeight: 'bold' }}>{onboardingState.linkShared ? '✓' : '○'}</span>
+                        <span>Link copied/shared</span>
+                      </div>
+
+                      <div className={`cf-checklist-step ${onboardingState.hasFirstOrder ? 'completed' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', color: onboardingState.hasFirstOrder ? '#008060' : '#6d7175', fontWeight: onboardingState.hasFirstOrder ? 600 : 400 }}>
+                        <span style={{ fontWeight: 'bold' }}>{onboardingState.hasFirstOrder ? '✓' : '○'}</span>
+                        <span>First order received</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* KPI Metrics */}
                 <div className="cf-kpi-grid">
                   <div className="cf-kpi-card">
@@ -607,7 +729,7 @@ export const MerchantAppShell: React.FC = () => {
                       {quota?.usage.monthlySubmissionsCount || 0}
                     </span>
                     <span className="cf-kpi-sub">
-                      Limit: {quota?.limits.monthlySubmissionsLimit || 50} / mo
+                      Limit: {quota?.limits.monthlySubmissionsLimit || 5} / mo
                     </span>
                   </div>
 
@@ -623,7 +745,7 @@ export const MerchantAppShell: React.FC = () => {
 
                   <div className="cf-kpi-card">
                     <span className="cf-kpi-label">Plan Tier</span>
-                    <span className="cf-kpi-value">{quota?.planTier || 'STARTER'}</span>
+                    <span className="cf-kpi-value">{quota?.planTier || 'FREE'}</span>
                     <span className="cf-kpi-sub">
                       {quota?.allowed.canAcceptSubmission ? '✅ Quota Normal' : '⚠️ Limit Reached'}
                     </span>
@@ -1218,7 +1340,7 @@ export const MerchantAppShell: React.FC = () => {
 
                 {/* Plan Comparison Grid */}
                 <h4 style={{ margin: '1.5rem 0 0.5rem', fontSize: '1.15rem' }}>Available Subscription Plans</h4>
-                <p className="cf-section-desc">Switch plan tiers instantly with automated quota adjustment.</p>
+                <p className="cf-section-desc">All plans include complete core CatalogFlow product features. Upgrade anytime as your wholesale volume grows.</p>
 
                 <div className="cf-plans-grid">
                   {/* Billing availability notice */}
@@ -1251,7 +1373,12 @@ export const MerchantAppShell: React.FC = () => {
                             {isCurrent && <span className="cf-badge cf-badge-success">Active Plan</span>}
                           </div>
                           <div className="cf-plan-price">
-                            ${plan.price} <span>/ month</span>
+                            {plan.price === 0 ? '$0' : `$${plan.price}`} <span>/ month</span>
+                            {plan.annualPrice ? (
+                              <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '2px', fontWeight: 500 }}>
+                                or ${plan.annualPrice} / year
+                              </div>
+                            ) : null}
                           </div>
                         </div>
 
@@ -1369,7 +1496,7 @@ export const MerchantAppShell: React.FC = () => {
                     fontSize: '0.9rem',
                   }}
                 >
-                  ⚙️ Quantity Rules & Branding
+                  ⚙️ Quantity & Appearance
                 </button>
                 <button
                   type="button"
@@ -1386,7 +1513,7 @@ export const MerchantAppShell: React.FC = () => {
                     fontSize: '0.9rem',
                   }}
                 >
-                  📋 Buyer Checkout Form
+                  📋 Buyer Order Form
                 </button>
               </div>
 
@@ -1451,6 +1578,80 @@ export const MerchantAppShell: React.FC = () => {
           onClose={() => setVariantConfigsCatalog(null)}
           onToast={showToast}
         />
+      )}
+
+      {/* Post-Publish Success Modal */}
+      {postPublishCatalog && (
+        <div className="cf-modal-overlay" id="cf-post-publish-modal" onClick={() => setPostPublishCatalog(null)}>
+          <div className="cf-modal cf-modal-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="cf-modal-header">
+              <h2 className="cf-modal-title">Your wholesale order link is ready</h2>
+              <button
+                type="button"
+                className="cf-modal-close"
+                onClick={() => setPostPublishCatalog(null)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="cf-modal-body">
+              <p className="cf-text-muted" style={{ marginBottom: '1.25rem', fontSize: '0.95rem', lineHeight: '1.5' }}>
+                Send this link to a wholesale buyer. Their order will arrive in Shopify as a Draft Order.
+              </p>
+
+              <div className="cf-link-preview-box" style={{ background: '#f6f6f7', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #e1e3e5', marginBottom: '1.25rem', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all' }}>
+                {`${typeof window !== 'undefined' ? window.location.origin : ''}/c/${postPublishCatalog.publicToken}`}
+              </div>
+
+              <div className="cf-post-publish-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+                <button
+                  type="button"
+                  className="cf-btn cf-btn-primary"
+                  id="cf-post-publish-copy-btn"
+                  onClick={() => {
+                    handleCopyLink(postPublishCatalog.publicToken);
+                  }}
+                >
+                  📋 Copy Link
+                </button>
+                <a
+                  href={`/c/${postPublishCatalog.publicToken}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="cf-btn cf-btn-secondary"
+                  id="cf-post-publish-open-btn"
+                  onClick={() => markLinkShared()}
+                >
+                  🔗 Open Buyer View ↗
+                </a>
+                <button
+                  type="button"
+                  className="cf-btn cf-btn-secondary"
+                  id="cf-post-publish-qr-btn"
+                  onClick={() => {
+                    const catToShare = postPublishCatalog;
+                    setPostPublishCatalog(null);
+                    setLinksCatalog(catToShare);
+                    markLinkShared();
+                  }}
+                >
+                  📱 QR Code
+                </button>
+              </div>
+            </div>
+
+            <div className="cf-modal-footer" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="cf-btn cf-btn-secondary"
+                onClick={() => setPostPublishCatalog(null)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

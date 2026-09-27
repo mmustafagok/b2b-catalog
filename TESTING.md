@@ -14,9 +14,14 @@ The test suite runs against a dedicated PostgreSQL test database (`catalogflow_t
 psql -U postgres -h localhost -p 5432 -c "CREATE DATABASE catalogflow_test;"
 
 # Apply Prisma migrations
-$env:DATABASE_URL="postgresql://postgres:postgres@localhost:5432/catalogflow_test?schema=public"
+$env:TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/catalogflow_test?schema=public"
 npm run prisma:deploy
 ```
+
+### Test / Production Database Separation Guard
+- In test mode (`NODE_ENV=test` or `vitest`), the application automatically prioritizes `TEST_DATABASE_URL` over `DATABASE_URL`.
+- The database environment guard `validateDatabaseEnvironmentForContext()` strictly blocks automated test execution if the database connection string matches `PRODUCTION_DATABASE_URL`, matches `PRODUCTION_DB_HOST`, or contains production host indicators without a test designation. This guarantees tests can never accidentally mutate or drop production data.
+
 
 ---
 
@@ -187,7 +192,7 @@ npm run typecheck
   - Local database stores no raw buyer email or notes.
 
 ### 3.9 Milestone 7 & 8: Commercial Loop, Billing Limits, Hard Quotas & Analytics (`tests/m7_m8_billing_and_analytics.test.ts` — 29 Tests)
-- Plan tier models (Starter, Growth, Scale) with defined limits for live catalogs, variants, and monthly submissions.
+- Plan tier models (Free, Starter, Growth) with defined limits for live catalogs, variants, and monthly submissions.
 - Commercial entitlement boundary enforcement:
   - Max live catalogs enforcement on publishing.
   - Max variants per catalog limit enforcement.

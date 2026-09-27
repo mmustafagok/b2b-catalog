@@ -19,7 +19,7 @@ Shopify products → live wholesale catalog → bulk variant/qty order → Shopi
 | V1 yüzeyi | Merchant embedded admin + public buyer catalog URL |
 | Order outcome | Buyer submit → Shopify Draft Order |
 | MVP hedefi | 7–10 build günü + 2–4 gün hardening/listing |
-| Fiyat hipotezi | $14.99 / $29.99 / $49.99; hard caps, no overage |
+| Fiyat hipotezi | $0 (Free) / $14.99 (Starter) / $29.99 (Growth); hard caps, no overage |
 | 90 günlük hedef | 30–40 paid merchant → yaklaşık $750–$1.2k MRR (hedef, garanti değil) |
 
 
@@ -281,25 +281,13 @@ Production-ready product scope • market evidence • UX • architecture • s
 
 | **Plan** | **Price** | **Limits** | **Who** |
 | --- | --- | --- | --- |
-| Starter | $14.99/mo | 1 live catalog • 500 variants • 50 buyer submissions/mo | Small wholesale / first digital catalog |
-| Growth | $29.99/mo | 5 live catalogs • 5,000 variants • 250 submissions/mo | Active B2B merchant |
-| Scale | $49.99/mo | 20 live catalogs • 25,000 variants • 1,000 submissions/mo • priority support | High-volume wholesale team |
+| Free | $0/mo | 1 live catalog • 50 variants • 5 buyer submissions/mo | Small merchant / initial evaluation |
+| Starter | $14.99/mo ($119.99/yr) | 3 live catalogs • 500 variants • 50 buyer submissions/mo | Growing wholesale merchant |
+| Growth | $29.99/mo ($239.99/yr) | 10 live catalogs • 5,000 variants • 250 submissions/mo | High-volume wholesale team |
 
 
-- 7-day free trial recommended; no permanent Free plan in initial hypothesis. B2B value is high and support cost is real.
-- No usage-based overage in V1. Limit hit → clear upgrade CTA or wait until next billing period.
-- Grandfather early customers for first 6–12 months if pricing increases.
-- Pricing is a hypothesis; first 10 paid merchants determine whether Starter should move to $19 and Growth to $39.
-
-## 9.1 $1k MRR math
-
-
-| **Mix** | **MRR** |
-| --- | --- |
-| 10 × Starter | $149.90 |
-| 20 × Growth | $599.80 |
-| 5 × Scale | $249.95 |
-| TOTAL — 35 paid merchants | $999.65 |
+- Hard caps only; zero usage-based surprise overages.
+- Complete core feature parity across Free, Starter, and Growth plans. Upgrade strictly based on capacity.
 
 
 
@@ -468,7 +456,7 @@ Production-ready product scope • market evidence • UX • architecture • s
 | Buyer | Summary started → submitted | >40% |
 | Reliability | Submit → Draft Order success | >98% excluding merchant configuration errors |
 | Retention | Merchant with ≥2 submissions in 30d | >50% of activated |
-| Monetization | Trial → paid | >15% initial target |
+| Monetization | Free → paid upgrade | >15% initial target |
 | Support | Same issue from 3 merchants | Roadmap trigger |
 
 
@@ -506,7 +494,7 @@ Production-ready product scope • market evidence • UX • architecture • s
 | Idempotency | double click; network timeout after Shopify success; same key retry; different key intentional resubmit |
 | Auth/lifecycle | install, reinstall, uninstall, expired session, worker only active shops |
 | Privacy | logs redact email/public token; shop redact/data request; raw buyer email absent in successful DB record |
-| Billing | trial, upgrade/downgrade, hard cap, plan reset, no overage |
+| Billing | Free, Starter, Growth, upgrade/downgrade, hard cap, plan reset, no overage |
 | Performance | public catalog initial payload/page; pagination/lazy load; API p95; DB index checks |
 
 

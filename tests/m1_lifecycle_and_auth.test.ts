@@ -53,7 +53,7 @@ describe('Milestone 1: Shop Lifecycle, Encryption & Auth Hardening', () => {
     const plainToken = await getDecryptedAccessToken(shop.id);
     expect(plainToken).toBe('shpua_initial_test_token_123');
 
-    expect(shop.plan).toBe('STARTER');
+    expect(shop.plan).toBe('FREE');
     expect(shop.uninstalledAt).toBeNull();
 
     const active = await getActiveShopByDomain(testDomain);
@@ -112,9 +112,9 @@ describe('Milestone 1: Shop Lifecycle, Encryption & Auth Hardening', () => {
     });
 
     const quota = await checkShopQuota(shop.id);
-    expect(quota.planTier).toBe('STARTER');
+    expect(quota.planTier).toBe('FREE');
     expect(quota.limits.maxLiveCatalogs).toBe(1);
-    expect(quota.limits.monthlySubmissionsLimit).toBe(50);
+    expect(quota.limits.monthlySubmissionsLimit).toBe(5);
     expect(quota.allowed.canPublishCatalog).toBe(true);
     expect(quota.allowed.canAcceptSubmission).toBe(true);
   });

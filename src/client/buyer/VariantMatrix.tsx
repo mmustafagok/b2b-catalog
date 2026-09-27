@@ -1,5 +1,5 @@
 import React from 'react';
-import { resolveVariantInventory } from '../../types/index.js';
+import { resolveVariantInventory, nextValidQuantity, previousValidQuantity, normalizeQuantity } from '../../types/index.js';
 
 export interface VariantItem {
   id: string;
@@ -79,14 +79,16 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
   const handleInputChange = (
     variantId: string,
     val: string,
-    maxLimit: number | null
+    minQty = 1,
+    step = 1,
+    maxLimit: number | null = null
   ) => {
     const parsed = parseInt(val, 10);
-    if (isNaN(parsed) || parsed < 0) {
+    if (isNaN(parsed) || parsed <= 0) {
       onQuantityChange(variantId, 0);
     } else {
-      const clamped = maxLimit !== null ? Math.min(parsed, maxLimit) : parsed;
-      onQuantityChange(variantId, clamped);
+      const normalized = normalizeQuantity(parsed, minQty, step, maxLimit);
+      onQuantityChange(variantId, normalized);
     }
   };
 
@@ -96,18 +98,13 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
     delta: number,
     minQty = 1,
     maxLimit: number | null = null,
-    increment = 1
+    step = 1
   ) => {
-    let next = currentQty + delta * increment;
-    if (next <= 0) {
-      onQuantityChange(variantId, 0);
-      return;
-    }
-    if (next < minQty) {
-      next = delta > 0 ? minQty : 0;
-    }
-    if (maxLimit !== null && next > maxLimit) {
-      next = maxLimit;
+    let next: number;
+    if (delta > 0) {
+      next = nextValidQuantity(currentQty, minQty, step, maxLimit);
+    } else {
+      next = previousValidQuantity(currentQty, minQty, step);
     }
     onQuantityChange(variantId, next);
   };
@@ -138,14 +135,25 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
           {product.variants.map((variant) => {
             const currentQty = quantities[variant.shopifyVariantId] || 0;
             const hasDiscount = variant.displayPrice < variant.basePrice;
+            const canOrderBeyondReported =
+              Boolean(variant.isCappedOverThreshold) ||
+              variant.inventoryTracked === false ||
+              variant.inventoryPolicy === 'CONTINUE';
+
             const isOutOfStock =
               !variant.availableForSale ||
-              (variant.effectiveAvailable !== null && variant.effectiveAvailable !== undefined && variant.effectiveAvailable <= 0);
+              (!canOrderBeyondReported &&
+                variant.effectiveAvailable !== null &&
+                variant.effectiveAvailable !== undefined &&
+                variant.effectiveAvailable <= 0);
+
             const min = variant.minQty || 1;
             const step = variant.qtyIncrement || 1;
 
             let maxLimit: number | null = null;
-            if (variant.maxQty != null && variant.effectiveAvailable != null) {
+            if (canOrderBeyondReported) {
+              maxLimit = variant.maxQty ?? null;
+            } else if (variant.maxQty != null && variant.effectiveAvailable != null) {
               maxLimit = Math.min(variant.maxQty, variant.effectiveAvailable);
             } else if (variant.maxQty != null) {
               maxLimit = variant.maxQty;
@@ -202,7 +210,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                       className="qty-input"
                       value={isOutOfStock ? '' : (currentQty === 0 ? '' : currentQty)}
                       placeholder={isOutOfStock ? '0' : '0'}
-                      onChange={(e) => handleInputChange(variant.shopifyVariantId, e.target.value, maxLimit)}
+                      onChange={(e) => handleInputChange(variant.shopifyVariantId, e.target.value, min, step, maxLimit)}
                       onKeyDown={(e) => {
                         if (isOutOfStock) return;
                         if (e.key === 'ArrowUp') {
@@ -218,7 +226,7 @@ export const VariantMatrix: React.FC<VariantMatrixProps> = ({
                       type="button"
                       className="qty-btn"
                       aria-label={`Increase quantity for ${variant.title}`}
-                      disabled={isOutOfStock || (maxLimit !== null && currentQty >= maxLimit)}
+                      disabled={isOutOfStock || (maxLimit !== null && nextValidQuantity(currentQty, min, step, maxLimit) === currentQty)}
                       onClick={() => handleStep(variant.shopifyVariantId, currentQty, 1, min, maxLimit, step)}
                     >
                       +

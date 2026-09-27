@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { ProductItem, renderStockBadge } from './VariantMatrix.js';
+import { ProductItem, renderStockBadge, VariantItem } from './VariantMatrix.js';
+import { nextValidQuantity, previousValidQuantity, normalizeQuantity } from '../../types/index.js';
 
 interface QuickOrderViewProps {
   products: ProductItem[];
@@ -24,7 +25,7 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
 }) => {
   const [filterQuery, setFilterQuery] = useState('');
 
-  // Flatten products into variant rows
+  // Flatten products into variant rows with complete VariantItem inventory DTO parity
   const allRows = useMemo(() => {
     const rows: Array<{
       variantId: string;
@@ -40,6 +41,8 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
       effectiveAvailable?: number | null;
       inventoryQuantity?: number;
       isCappedOverThreshold?: boolean;
+      inventoryPolicy?: string;
+      inventoryTracked?: boolean;
       minQty?: number | null;
       maxQty?: number | null;
       qtyIncrement?: number | null;
@@ -61,6 +64,8 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
           effectiveAvailable: variant.effectiveAvailable,
           inventoryQuantity: variant.inventoryQuantity,
           isCappedOverThreshold: variant.isCappedOverThreshold,
+          inventoryPolicy: variant.inventoryPolicy,
+          inventoryTracked: variant.inventoryTracked,
           minQty: (variant as any).minQty,
           maxQty: (variant as any).maxQty,
           qtyIncrement: (variant as any).qtyIncrement,
@@ -87,18 +92,13 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
     delta: number,
     minQty = 1,
     maxQty: number | null = null,
-    increment = 1
+    step = 1
   ) => {
-    let nextQty = currentQty + delta * increment;
-    if (nextQty <= 0) {
-      onQuantityChange(variantId, 0);
-      return;
-    }
-    if (nextQty < minQty) {
-      nextQty = delta > 0 ? minQty : 0;
-    }
-    if (maxQty !== null && nextQty > maxQty) {
-      nextQty = maxQty;
+    let nextQty: number;
+    if (delta > 0) {
+      nextQty = nextValidQuantity(currentQty, minQty, step, maxQty);
+    } else {
+      nextQty = previousValidQuantity(currentQty, minQty, step);
     }
     onQuantityChange(variantId, nextQty);
   };
@@ -106,14 +106,16 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
   const handleDirectInput = (
     variantId: string,
     val: string,
+    minQty = 1,
+    step = 1,
     maxQty: number | null = null
   ) => {
     const parsed = parseInt(val, 10);
     if (isNaN(parsed) || parsed <= 0) {
       onQuantityChange(variantId, 0);
     } else {
-      const clamped = maxQty !== null ? Math.min(parsed, maxQty) : parsed;
-      onQuantityChange(variantId, clamped);
+      const normalized = normalizeQuantity(parsed, minQty, step, maxQty);
+      onQuantityChange(variantId, normalized);
     }
   };
 
@@ -166,14 +168,24 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
             ) : (
               filteredRows.map((row) => {
                 const currentQty = quantities[row.variantId] || 0;
+                const canOrderBeyondReported =
+                  Boolean(row.isCappedOverThreshold) ||
+                  row.inventoryTracked === false ||
+                  row.inventoryPolicy === 'CONTINUE';
+
                 const isOutOfStock =
                   !row.availableForSale ||
-                  (row.effectiveAvailable !== null && row.effectiveAvailable !== undefined && row.effectiveAvailable <= 0);
+                  (!canOrderBeyondReported &&
+                    row.effectiveAvailable !== null &&
+                    row.effectiveAvailable !== undefined &&
+                    row.effectiveAvailable <= 0);
                 const min = row.minQty || 1;
                 const step = row.qtyIncrement || 1;
 
                 let max: number | null = null;
-                if (row.maxQty != null && row.effectiveAvailable != null) {
+                if (canOrderBeyondReported) {
+                  max = row.maxQty ?? null;
+                } else if (row.maxQty != null && row.effectiveAvailable != null) {
                   max = Math.min(row.maxQty, row.effectiveAvailable);
                 } else if (row.maxQty != null) {
                   max = row.maxQty;
@@ -240,12 +252,12 @@ export const QuickOrderView: React.FC<QuickOrderViewProps> = ({
                           className="qty-input"
                           value={isOutOfStock ? '' : (currentQty === 0 ? '' : currentQty)}
                           placeholder="0"
-                          onChange={(e) => handleDirectInput(row.variantId, e.target.value, max)}
+                          onChange={(e) => handleDirectInput(row.variantId, e.target.value, max ?? undefined)}
                         />
                         <button
                           type="button"
                           className="qty-btn"
-                          disabled={isOutOfStock || (max !== null && currentQty >= max)}
+                          disabled={isOutOfStock || (max !== null && nextValidQuantity(currentQty, min, step, max) === currentQty)}
                           onClick={() => handleStep(row.variantId, currentQty, 1, min, max, step)}
                         >
                           +

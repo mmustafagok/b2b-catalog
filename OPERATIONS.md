@@ -160,5 +160,82 @@ When a network drop, timeout, or ambiguity occurs during Shopify Draft Order cre
 | `SHOPIFY_API_KEY` | Production | Shopify App Client ID |
 | `SHOPIFY_API_SECRET` | Production | Shopify App Client Secret for HMAC and JWT verification |
 | `HOST` / `SHOPIFY_APP_URL` | Production | Fully qualified public HTTPS URL of application |
+| `SHOPIFY_PARTNER_ORG_ID` | Production | Shopify Partner Organization ID for authoritative Partner API billing |
+| `SHOPIFY_PARTNER_APP_ID` | Production | Shopify Partner App ID for authoritative Partner API billing |
+| `SHOPIFY_PARTNER_API_ACCESS_TOKEN` | Production | Secret Partner API access token (`shppat_...`) |
+| `SHOPIFY_APP_HANDLE` | Optional | Partner Dashboard app handle (default: `catalogflow-b2b-order-catalog`) |
+| `DATABASE_BACKUP_URL` | Backups | Dedicated database URL for running encrypted backups (never falls back to `DATABASE_URL`) |
+| `BACKUP_ENCRYPTION_KEY` | Backups | 32-byte Base64 key for AES-256-GCM backup encryption and restore |
+| `RESTORE_DATABASE_URL` | Restore | Target database URL for backup restoration (never falls back to production URLs) |
+| `ALLOW_PRODUCTION_RESTORE`| Restore | Explicit guard flag (`true`) required to restore into a production database |
+| `TEST_DATABASE_URL` | Optional | Dedicated isolated database URL for test runners |
+| `PRODUCTION_DATABASE_URL`| Optional | Explicit production DB URL guard against accidental test execution |
 | `PORT` | Optional | Web server port (default: 3000) |
 | `NODE_ENV` | Optional | `development`, `test`, or `production` |
+
+---
+
+## 7. Protected Customer Data (PCD) Level 2 Operational Runbook
+
+### A. Data Minimization & Storage Architecture
+- CatalogFlow requests strictly one protected customer field: **Buyer Email**.
+- Raw buyer emails, business names, PO numbers, and buyer notes are **never persisted at rest** in the PostgreSQL database.
+- Data exists transiently in server memory only during the lifecycle of the HTTP request to create the Shopify Draft Order.
+
+### B. Automated Retention Enforcement
+Data retention is enforced automatically by `enforceDataRetention()` in `src/services/retention.server.ts`, executed by the background worker every 24 hours:
+- `RuntimeIncident`: 30-day retention.
+- `WebhookReceipt`: 30-day retention.
+- `BackgroundJob` (terminal `COMPLETED` / `FAILED`): 14-day retention.
+- `AnalyticsEvent`: 90-day retention.
+- `PcdAccessAudit`: 90-day retention.
+- `OrderSubmission`: Retained during active installation (operational history, zero raw PII).
+- Manual on-demand enforcement can be invoked via CLI:
+  ```bash
+  node -e "import('./dist/services/retention.server.js').then(m => m.enforceDataRetention()).then(console.log)"
+  ```
+
+### C. PCD Access Audit Trails
+- Audit events are recorded in `PcdAccessAudit`:
+  - `BUYER_EMAIL_PROCESSED_FOR_DRAFT_ORDER`: Transient processing of buyer email for Draft Order creation.
+  - `CUSTOMERS_DATA_REQUEST_RECEIVED`: Acknowledged data request compliance webhook.
+  - `CUSTOMERS_REDACT_RECEIVED`: Acknowledged customer redact compliance webhook.
+  - `SHOP_REDACT_RECEIVED` / `SHOP_DATA_PURGED`: Complete purge of shop records upon uninstall.
+- Audit records store zero buyer PII and have an automated 90-day retention cutoff.
+
+### D. Test / Production Isolation
+- Automated test suites (`vitest`) strictly prioritize `TEST_DATABASE_URL` over `DATABASE_URL`.
+- The database environment guard `validateDatabaseEnvironmentForContext()` refuses test execution if the connection string matches a known production database or production-designated hostname.
+
+### E. Encrypted Backup Architecture & Disaster Recovery Runbook
+- **Zero PCD in Backups:** Because buyer PCD is never persisted at rest, database backups contain zero buyer PCD.
+- **Workflow Automation:** GitHub Actions runner executes `.github/workflows/database-backup.yml` daily at 00:00 UTC and on-demand via `workflow_dispatch`.
+- **Backup Execution:**
+  ```bash
+  DATABASE_BACKUP_URL="<db_url>" BACKUP_ENCRYPTION_KEY="<base64_32_byte_key>" npm run backup:database
+  ```
+  - Takes a custom-format dump (`pg_dump --format=custom`).
+  - Encrypts using AES-256-GCM authenticated envelopes (`scripts/backup-crypto.ts`).
+  - Guaranteed deletion of plaintext `.dump` in a `finally` block.
+  - Emits `catalogflow-backup-<timestamp>-<hash>.dump.enc` into `backups/`.
+  - Artifacts stored in GitHub Actions private artifact store for 14 days.
+- **Safe Disaster Recovery Restore:**
+  ```bash
+  RESTORE_DATABASE_URL="<target_url>" BACKUP_ENCRYPTION_KEY="<key>" npm run restore:database backups/catalogflow-backup-....dump.enc
+  ```
+  - Authenticates and decrypts the envelope *before* invoking `pg_restore`.
+  - Refuses restore to production databases unless `ALLOW_PRODUCTION_RESTORE=true` is explicitly provided.
+  - Guaranteed deletion of decrypted plaintext dump in a `finally` block.
+- **Operational Sign-off Checklist:**
+  The backup system must not be claimed operational until the operator completes:
+  1. Set `DATABASE_BACKUP_URL` and `BACKUP_ENCRYPTION_KEY` in GitHub Repository Secrets.
+  2. Trigger manual `workflow_dispatch` on `database-backup.yml` and verify an encrypted `.dump.enc` artifact is produced.
+  3. Download the artifact and execute a test restore against a non-production test PostgreSQL database (`RESTORE_DATABASE_URL`) to verify end-to-end data integrity.
+
+### F. Staff Access & Authentication Policy
+- Production database and infrastructure access is strictly restricted to authorized primary operator(s) on a least-privilege basis.
+- Production data is never downloaded to local workstations.
+- All operators must enforce passwords of $\ge 16$ characters via a password manager and Multi-Factor Authentication (MFA / passkey) across Shopify Partner Dashboard, Hostless, GitHub, and production email.
+
+### G. Security Incident Response
+- Immediate response protocol, token revocation, forensic preservation, and notification procedures are detailed in [SECURITY_INCIDENT_RESPONSE.md](file:///d:/b2b-catalog/SECURITY_INCIDENT_RESPONSE.md).
